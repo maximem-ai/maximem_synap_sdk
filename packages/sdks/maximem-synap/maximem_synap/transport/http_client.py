@@ -20,6 +20,7 @@ from ..models.errors import (
     AuthenticationError,
     InvalidInputError,
     ContextNotFoundError,
+    InsufficientCreditsError,
 )
 from ..auth.models import AuthContext
 from ..utils.correlation import generate_correlation_id
@@ -216,14 +217,38 @@ class HTTPTransport:
             return {}
 
         # Error responses
+        error_body: Any = None
         try:
             error_body = response.json()
-            error_message = error_body.get("detail", response.text)
+            error_message = (
+                error_body.get("detail", response.text)
+                if isinstance(error_body, dict)
+                else response.text
+            )
         except Exception:
             error_message = response.text
 
         if response.status_code == 401:
             raise AuthenticationError(error_message, correlation_id=correlation_id)
+
+        if response.status_code == 402:
+            # Credit gate rejection. Server returns a structured detail
+            # body ({balance_credits, minimum_required_credits, ...})
+            # so callers can render a useful recovery prompt.
+            payload = {}
+            if isinstance(error_body, dict):
+                detail = error_body.get("detail")
+                payload = detail if isinstance(detail, dict) else error_body
+            balance = payload.get("balance_credits")
+            min_req = payload.get("minimum_required_credits")
+            raise InsufficientCreditsError(
+                error_message if isinstance(error_message, str) else "Insufficient credits",
+                balance_credits=float(balance) if balance is not None else None,
+                minimum_required_credits=float(min_req) if min_req is not None else None,
+                recovery_url=payload.get("recovery_url"),
+                redeem_url=payload.get("redeem_url"),
+                correlation_id=correlation_id,
+            )
 
         if response.status_code == 400:
             raise InvalidInputError(error_message, correlation_id=correlation_id)
@@ -397,6 +422,70 @@ class HTTPTransport:
     ) -> Dict[str, Any]:
         """Make DELETE request."""
         return await self.request("DELETE", path, auth_context, **kwargs)
+
+    async def post_multipart(
+        self,
+        path: str,
+        auth_context: AuthContext,
+        data: Dict[str, Any],
+        files: Optional[Dict[str, Any]] = None,
+        correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Make a multipart/form-data POST request (for file uploads)."""
+        correlation_id = correlation_id or generate_correlation_id(self.instance_id)
+        start_time = datetime.now(timezone.utc)
+
+        headers = {
+            "Authorization": f"Bearer {auth_context.api_key}",
+            "X-Correlation-ID": correlation_id,
+            "X-Client-ID": auth_context.client_id,
+            "X-Instance-ID": auth_context.instance_id,
+            # No Content-Type — httpx sets it with the multipart boundary automatically
+        }
+
+        last_error: Optional[Exception] = None
+        attempts = 0
+        max_attempts = self.retry_policy.max_attempts if self.retry_policy else 1
+
+        while attempts < max_attempts:
+            attempts += 1
+            try:
+                response = await self._client.post(
+                    url=path,
+                    headers=headers,
+                    data=data,
+                    files=files or {},
+                )
+
+                self._emit_telemetry(
+                    event_type="http_request",
+                    correlation_id=correlation_id,
+                    status="success" if response.status_code < 400 else "error",
+                    latency_ms=self._elapsed_ms(start_time),
+                    attempt=attempts,
+                    path=path,
+                    method="POST",
+                    status_code=response.status_code,
+                )
+
+                return self._handle_response(response, correlation_id)
+
+            except httpx.TimeoutException as e:
+                last_error = NetworkTimeoutError(f"Request timed out: {e}", correlation_id=correlation_id)
+            except httpx.ConnectError as e:
+                last_error = NetworkTimeoutError(f"Connection failed: {e}", correlation_id=correlation_id)
+            except SynapError:
+                raise
+            except Exception as e:
+                last_error = SynapTransientError(f"Unexpected error: {e}", correlation_id=correlation_id)
+
+            if not self._should_retry(last_error, attempts, max_attempts):
+                break
+
+            delay = self._calculate_backoff(attempts)
+            await asyncio.sleep(delay)
+
+        raise last_error
 
 
 class HttpTransport(BaseTransport):

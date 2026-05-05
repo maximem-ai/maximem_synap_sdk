@@ -6,30 +6,63 @@ Memory class stores and retrieves memories via Synap's cloud platform.
 CrewAI handles LLM analysis, categorization, and importance scoring.
 This backend handles persistence and retrieval by delegating to the
 Synap SDK.
+
+## Protocol compatibility notes
+
+CrewAI's StorageBackend defines mutation and listing methods
+(``delete``, ``update``, ``reset``, ``list_records``, ``count``, etc.)
+that assume direct control of the storage medium. Synap's public API
+currently exposes only ingestion (``sdk.memories.create``) and
+retrieval (``sdk.fetch``). Per docs.maximem.ai, there is no public
+endpoint to delete, update, or list individual stored memories.
+
+We therefore:
+
+- Execute :meth:`save` and :meth:`asearch` against the Synap SDK.
+- Degrade :meth:`delete`, :meth:`update`, :meth:`reset` to **no-ops
+  with a structured warning** — attempting to raise would break
+  CrewAI's default crew-reset flow.
+- Serve :meth:`list_records`, :meth:`count`, :meth:`get_record`,
+  :meth:`get_scope_info`, :meth:`list_scopes`, :meth:`list_categories`
+  from an in-process cache populated on save. Callers are warned once
+  at construction that these views are session-scoped, not
+  authoritative.
+- Require a non-empty ``query_text`` (either passed via
+  ``metadata_filter['_query_text']`` or supplied through the recall
+  path). ``query_embedding`` is accepted for protocol compliance and
+  intentionally ignored because Synap embeds server-side.
 """
 
-import asyncio
 import logging
-import uuid as _uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from crewai.memory.types import MemoryRecord, ScopeInfo
 
 from maximem_synap import MaximemSynapSDK
+from synap_integrations_common import (
+    SynapIntegrationError,
+    default_scope,
+    run_async,
+    wrap_sdk_errors_async,
+)
 
 logger = logging.getLogger(__name__)
 
+_SESSION_ONLY_WARNING = (
+    "SynapStorageBackend: listing/metadata methods (list_records, count, "
+    "get_record, get_scope_info, list_scopes, list_categories) return a "
+    "session-local view populated only by saves issued through THIS "
+    "backend instance. Synap does not expose public list APIs; restart "
+    "resets the view. See docs.maximem.ai for current API surface."
+)
 
-def _run_async(coro):
-    """Run an async coroutine from sync context."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    import nest_asyncio
-    nest_asyncio.apply()
-    return loop.run_until_complete(coro)
+_MUTATION_UNSUPPORTED_WARNING = (
+    "SynapStorageBackend.%s called, but Synap does not expose a public "
+    "%s endpoint. Treated as a no-op; stored memories on the Synap "
+    "backend are unchanged. If you need this, raise a request at "
+    "docs.maximem.ai."
+)
 
 
 class SynapStorageBackend:
@@ -38,7 +71,8 @@ class SynapStorageBackend:
     Delegates memory persistence to Synap's ingestion system
     and retrieval to Synap's search system.
 
-    Example:
+    Example::
+
         from crewai.memory import Memory
         from synap_crewai import SynapStorageBackend
 
@@ -57,14 +91,24 @@ class SynapStorageBackend:
         conversation_id: Optional[str] = None,
         mode: str = "fast",
     ):
+        if sdk is None:
+            raise ValueError("SynapStorageBackend requires a non-None sdk")
+        if not user_id:
+            raise ValueError("SynapStorageBackend requires a non-empty user_id")
+
         self.sdk = sdk
         self.user_id = user_id
         self.customer_id = customer_id
         self.conversation_id = conversation_id
         self.mode = mode
-        # Local record cache for get_record/list_records
-        # (CrewAI calls these for metadata ops, not core flow)
+        self._default_scope = default_scope(user_id, customer_id or None)
         self._records: Dict[str, MemoryRecord] = {}
+        self._session_warning_logged = False
+
+    def _warn_session_only(self) -> None:
+        if not self._session_warning_logged:
+            logger.warning(_SESSION_ONLY_WARNING)
+            self._session_warning_logged = True
 
     # ------------------------------------------------------------------
     # Core methods (used by CrewAI's Memory.remember / Memory.recall)
@@ -72,11 +116,15 @@ class SynapStorageBackend:
 
     def save(self, records: List[MemoryRecord]) -> None:
         """Persist memory records via Synap ingestion."""
-        _run_async(self.asave(records))
+        run_async(self.asave(records))
 
     async def asave(self, records: List[MemoryRecord]) -> None:
         for record in records:
-            try:
+            async with wrap_sdk_errors_async(
+                "crewai.asave",
+                logger,
+                record_id=record.id,
+            ):
                 await self.sdk.memories.create(
                     document=record.content,
                     user_id=self.user_id,
@@ -89,9 +137,7 @@ class SynapStorageBackend:
                         "source": record.source or "",
                     },
                 )
-                self._records[record.id] = record
-            except Exception as e:
-                logger.warning("SynapStorageBackend: save failed for record %s: %s", record.id, e)
+            self._records[record.id] = record
 
     def search(
         self,
@@ -104,11 +150,13 @@ class SynapStorageBackend:
     ) -> List[Tuple[MemoryRecord, float]]:
         """Search via Synap's hybrid retrieval.
 
-        Note: CrewAI passes query_embedding but Synap handles embeddings
-        server-side. We use the recall query text stored in metadata_filter
-        or fall back to a generic search.
+        ``query_embedding`` is accepted for CrewAI protocol compliance
+        but intentionally ignored — Synap embeds queries server-side.
+        The caller must pass the query text via
+        ``metadata_filter['_query_text']`` (CrewAI's ``Memory.recall``
+        sets this automatically).
         """
-        return _run_async(self.asearch(
+        return run_async(self.asearch(
             query_embedding, scope_prefix, categories,
             metadata_filter, limit, min_score,
         ))
@@ -122,15 +170,22 @@ class SynapStorageBackend:
         limit: int = 10,
         min_score: float = 0.0,
     ) -> List[Tuple[MemoryRecord, float]]:
-        # CrewAI's Memory.recall passes the query text in metadata_filter
-        # under "_query_text" key, or we fall back to generic fetch
-        query_text = None
+        del query_embedding  # unused: Synap embeds server-side
+
+        query_text: Optional[str] = None
         if metadata_filter and "_query_text" in metadata_filter:
             query_text = metadata_filter.pop("_query_text")
 
-        search_query = [query_text] if query_text else None
+        if not query_text:
+            raise SynapIntegrationError(
+                "crewai.asearch",
+                "query_text missing — pass via "
+                "metadata_filter['_query_text']. CrewAI's Memory.recall "
+                "populates this automatically; if you are calling the "
+                "backend directly, supply the query text yourself.",
+                {"scope_prefix": scope_prefix, "limit": limit},
+            )
 
-        # Map categories to Synap context types if possible
         types = None
         if categories:
             type_map = {
@@ -142,93 +197,80 @@ class SynapStorageBackend:
             types = [type_map.get(c, c) for c in categories if c in type_map]
             types = types or None
 
-        response = await self.sdk.fetch(
-            conversation_id=self.conversation_id,
-            user_id=self.user_id,
-            customer_id=self.customer_id or None,
-            search_query=search_query,
-            max_results=limit,
-            types=types,
+        async with wrap_sdk_errors_async(
+            "crewai.asearch",
+            logger,
+            limit=limit,
             mode=self.mode,
-            include_conversation_context=False,
-        )
+        ):
+            response = await self.sdk.fetch(
+                conversation_id=self.conversation_id,
+                user_id=self.user_id,
+                customer_id=self.customer_id or None,
+                search_query=[query_text],
+                max_results=limit,
+                types=types,
+                mode=self.mode,
+                include_conversation_context=False,
+            )
 
         results: List[Tuple[MemoryRecord, float]] = []
         now = datetime.now(timezone.utc)
+        scope = scope_prefix or self._default_scope
 
         for fact in response.facts:
-            record = MemoryRecord(
-                id=fact.id,
-                content=fact.content,
-                scope=scope_prefix or f"/{self.user_id}",
-                categories=["fact"],
-                importance=fact.confidence,
-                created_at=fact.extracted_at,
-                last_accessed=now,
-                metadata={"source": fact.source, "scope_origin": response.scope_map.get(fact.id, "")},
-            )
-            results.append((record, fact.confidence))
+            results.append((MemoryRecord(
+                id=fact.id, content=fact.content, scope=scope,
+                categories=["fact"], importance=fact.confidence,
+                created_at=fact.extracted_at, last_accessed=now,
+                metadata={"source": fact.source,
+                          "scope_origin": response.scope_map.get(fact.id, "")},
+            ), fact.confidence))
 
         for pref in response.preferences:
-            record = MemoryRecord(
-                id=pref.id,
-                content=pref.content,
-                scope=scope_prefix or f"/{self.user_id}",
-                categories=["preference"],
-                importance=pref.strength,
-                created_at=pref.extracted_at,
-                last_accessed=now,
-                metadata={"category": pref.category, "scope_origin": response.scope_map.get(pref.id, "")},
-            )
-            results.append((record, pref.strength))
+            results.append((MemoryRecord(
+                id=pref.id, content=pref.content, scope=scope,
+                categories=["preference"], importance=pref.strength,
+                created_at=pref.extracted_at, last_accessed=now,
+                metadata={"category": pref.category,
+                          "scope_origin": response.scope_map.get(pref.id, "")},
+            ), pref.strength))
 
         for ep in response.episodes:
-            record = MemoryRecord(
-                id=ep.id,
-                content=ep.summary,
-                scope=scope_prefix or f"/{self.user_id}",
-                categories=["episode"],
-                importance=ep.significance,
-                created_at=ep.occurred_at,
-                last_accessed=now,
+            results.append((MemoryRecord(
+                id=ep.id, content=ep.summary, scope=scope,
+                categories=["episode"], importance=ep.significance,
+                created_at=ep.occurred_at, last_accessed=now,
                 metadata={"scope_origin": response.scope_map.get(ep.id, "")},
-            )
-            results.append((record, ep.significance))
+            ), ep.significance))
 
         for em in response.emotions:
-            record = MemoryRecord(
-                id=em.id,
-                content=f"{em.emotion_type}: {em.context}",
-                scope=scope_prefix or f"/{self.user_id}",
-                categories=["emotion"],
-                importance=em.intensity,
-                created_at=em.detected_at,
-                last_accessed=now,
-                metadata={"emotion_type": em.emotion_type, "scope_origin": response.scope_map.get(em.id, "")},
-            )
-            results.append((record, em.intensity))
+            results.append((MemoryRecord(
+                id=em.id, content=f"{em.emotion_type}: {em.context}",
+                scope=scope, categories=["emotion"], importance=em.intensity,
+                created_at=em.detected_at, last_accessed=now,
+                metadata={"emotion_type": em.emotion_type,
+                          "scope_origin": response.scope_map.get(em.id, "")},
+            ), em.intensity))
 
         for te in response.temporal_events:
-            record = MemoryRecord(
-                id=te.id,
-                content=te.content,
-                scope=scope_prefix or f"/{self.user_id}",
+            results.append((MemoryRecord(
+                id=te.id, content=te.content, scope=scope,
                 categories=["temporal_event"],
                 importance=te.temporal_confidence,
-                created_at=te.event_date,
-                last_accessed=now,
-                metadata={"valid_until": str(te.valid_until) if te.valid_until else None,
-                          "scope_origin": response.scope_map.get(te.id, "")},
-            )
-            results.append((record, te.temporal_confidence))
+                created_at=te.event_date, last_accessed=now,
+                metadata={
+                    "valid_until": str(te.valid_until) if te.valid_until else None,
+                    "scope_origin": response.scope_map.get(te.id, ""),
+                },
+            ), te.temporal_confidence))
 
-        # Sort by score descending, apply min_score filter
         results = [(r, s) for r, s in results if s >= min_score]
         results.sort(key=lambda x: x[1], reverse=True)
         return results[:limit]
 
     # ------------------------------------------------------------------
-    # Secondary methods (protocol compliance)
+    # Unsupported mutations — no-op with warning (see module docstring)
     # ------------------------------------------------------------------
 
     def delete(
@@ -239,25 +281,34 @@ class SynapStorageBackend:
         older_than: Optional[datetime] = None,
         metadata_filter: Optional[Dict[str, Any]] = None,
     ) -> int:
-        count = 0
-        if record_ids:
-            for rid in record_ids:
-                self._records.pop(rid, None)
-                count += 1
-        elif scope_prefix:
-            to_remove = [k for k, v in self._records.items() if v.scope.startswith(scope_prefix)]
-            for k in to_remove:
-                del self._records[k]
-                count += 1
-        return count
+        logger.warning(_MUTATION_UNSUPPORTED_WARNING, "delete", "delete")
+        return 0
 
     async def adelete(self, **kwargs) -> int:
         return self.delete(**kwargs)
 
     def update(self, record: MemoryRecord) -> None:
-        self._records[record.id] = record
+        logger.warning(_MUTATION_UNSUPPORTED_WARNING, "update", "update")
+
+    def reset(self, scope_prefix: Optional[str] = None) -> None:
+        logger.warning(
+            "SynapStorageBackend.reset called. Server-side memories are "
+            "NOT cleared (Synap exposes no public delete API). Clearing "
+            "local session view only."
+        )
+        if scope_prefix:
+            keep = {k: v for k, v in self._records.items()
+                    if not v.scope.startswith(scope_prefix)}
+            self._records = keep
+        else:
+            self._records.clear()
+
+    # ------------------------------------------------------------------
+    # Session-local read views (see one-time warning on first access)
+    # ------------------------------------------------------------------
 
     def get_record(self, record_id: str) -> Optional[MemoryRecord]:
+        self._warn_session_only()
         return self._records.get(record_id)
 
     def list_records(
@@ -266,6 +317,7 @@ class SynapStorageBackend:
         limit: int = 200,
         offset: int = 0,
     ) -> List[MemoryRecord]:
+        self._warn_session_only()
         records = list(self._records.values())
         if scope_prefix:
             records = [r for r in records if r.scope.startswith(scope_prefix)]
@@ -273,8 +325,9 @@ class SynapStorageBackend:
         return records[offset:offset + limit]
 
     def get_scope_info(self, scope: str) -> ScopeInfo:
+        self._warn_session_only()
         records = [r for r in self._records.values() if r.scope.startswith(scope)]
-        cats = set()
+        cats: set = set()
         for r in records:
             cats.update(r.categories)
         return ScopeInfo(
@@ -287,10 +340,10 @@ class SynapStorageBackend:
         )
 
     def list_scopes(self, parent: str = "/") -> List[str]:
-        scopes = set()
+        self._warn_session_only()
+        scopes: set = set()
         for r in self._records.values():
             if r.scope.startswith(parent) and r.scope != parent:
-                # Get the next level
                 rest = r.scope[len(parent):]
                 next_part = rest.split("/")[0]
                 if next_part:
@@ -298,6 +351,7 @@ class SynapStorageBackend:
         return sorted(scopes)
 
     def list_categories(self, scope_prefix: Optional[str] = None) -> Dict[str, int]:
+        self._warn_session_only()
         counts: Dict[str, int] = {}
         for r in self._records.values():
             if scope_prefix and not r.scope.startswith(scope_prefix):
@@ -307,14 +361,8 @@ class SynapStorageBackend:
         return counts
 
     def count(self, scope_prefix: Optional[str] = None) -> int:
+        self._warn_session_only()
         if not scope_prefix:
             return len(self._records)
-        return sum(1 for r in self._records.values() if r.scope.startswith(scope_prefix))
-
-    def reset(self, scope_prefix: Optional[str] = None) -> None:
-        if scope_prefix:
-            to_remove = [k for k, v in self._records.items() if v.scope.startswith(scope_prefix)]
-            for k in to_remove:
-                del self._records[k]
-        else:
-            self._records.clear()
+        return sum(1 for r in self._records.values()
+                   if r.scope.startswith(scope_prefix))

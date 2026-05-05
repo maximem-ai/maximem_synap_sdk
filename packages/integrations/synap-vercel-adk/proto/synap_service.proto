@@ -1,0 +1,183 @@
+syntax = "proto3";
+
+package synap.v1;
+
+// =============================================================================
+// Service Definition
+// =============================================================================
+
+service SynapService {
+  // Bidirectional stream: SDK sends conversation events, server sends back
+  // anticipatory context bundles and control signals.
+  rpc Listen(stream StreamEvent) returns (stream StreamResponse);
+
+  // Client-streaming: SDK sends telemetry events in a stream, server
+  // acknowledges once when the client closes its half.
+  rpc IngestTelemetry(stream TelemetryEvent) returns (TelemetryAck);
+}
+
+// =============================================================================
+// Listen RPC — Client → Server
+// =============================================================================
+
+message StreamEvent {
+  oneof payload {
+    ConversationEvent conversation_event = 1;
+    HeartbeatPing heartbeat_ping = 2;
+    SessionControl session_control = 3;
+  }
+}
+
+message ConversationEvent {
+  // Core fields
+  string event_type = 1;        // user_message, assistant_message, tool_call,
+                                 // tool_result, context_request, session_start, session_end
+  string conversation_id = 2;
+  string user_id = 3;
+  string role = 4;               // "user" | "assistant"
+  string content = 5;
+  string customer_id = 6;
+  string session_id = 7;
+  map<string, string> metadata = 8;
+  int64 timestamp_ms = 9;
+
+  // tool_call fields
+  string tool_name = 10;
+  string tool_args_json = 11;
+
+  // context_request fields
+  repeated string search_queries = 12;
+  repeated string context_types = 13;
+}
+
+message HeartbeatPing {
+  int64 timestamp_ms = 1;
+}
+
+message SessionControl {
+  string action = 1;             // "start" | "end"
+  string session_id = 2;
+  string conversation_id = 3;
+  string user_id = 4;           // User identifier for scoped prefetch
+  string customer_id = 5;       // Customer/org identifier for scoped prefetch
+}
+
+// =============================================================================
+// Listen RPC — Server → Client
+// =============================================================================
+
+message StreamResponse {
+  oneof payload {
+    ContextBundleProto context_bundle = 1;
+    HeartbeatPong heartbeat_pong = 2;
+    StreamSignal signal = 3;
+  }
+}
+
+message HeartbeatPong {
+  int64 timestamp_ms = 1;
+}
+
+message StreamSignal {
+  string signal_type = 1;       // "throttle", "closing", "error"
+  string reason = 2;
+  map<string, string> metadata = 3;
+}
+
+// =============================================================================
+// ContextBundle — mirrors synap.cloud.agents.models.bundles.ContextBundle
+// =============================================================================
+
+message ContextBundleProto {
+  string bundle_id = 1;
+  string decision_id = 2;
+  map<string, ContextItemList> items_by_type = 3;
+  int32 total_tokens = 4;
+  int32 token_budget = 5;
+  bool budget_exceeded = 6;
+  string retrieval_mode = 7;              // "fast" | "accurate"
+  repeated string sources_queried = 8;
+  string degradation_level = 9;           // "none" | "partial" | "minimal" | "failed"
+  repeated string warnings = 10;
+  string created_at = 11;                 // ISO 8601
+  int32 retrieval_time_ms = 12;
+  bool cache_hit = 13;
+  repeated string search_queries = 14;   // Prefetch queries for SDK-side BM25 matching
+  string anticipation_user_id = 15;      // User ID for SDK anticipation cache keying
+  string anticipation_customer_id = 16;  // Customer ID for SDK anticipation cache keying
+  string anticipation_conversation_id = 17; // Conversation ID for SDK anticipation cache keying
+  repeated string search_keywords = 18;  // Expanded vocabulary keywords for SDK-side BM25 matching
+  string bundle_type = 19;               // "anticipation" | "user_summary" | "reactive"
+  ConversationContextProto conversation_context = 20; // Current session context (separate from long-term items)
+}
+
+// Current session context from compaction + raw buffer.
+// Kept as a coherent structured block, NOT atomized into ContextItems.
+message ConversationContextProto {
+  string summary = 1;                    // Narrative summary from compaction
+  string current_state_json = 2;         // JSON-encoded dict (status, next_steps, open_issues)
+  string key_extractions_json = 3;       // JSON-encoded dict of lists (facts, decisions, preferences, ...)
+  repeated RecentTurnProto recent_turns = 4;
+  string compaction_id = 5;
+  string compacted_at = 6;               // ISO 8601
+  string conversation_id = 7;
+}
+
+message RecentTurnProto {
+  string role = 1;                       // "user" | "assistant"
+  string content = 2;
+  string timestamp = 3;                  // ISO 8601
+}
+
+message ContextItemList {
+  repeated ContextItemProto items = 1;
+}
+
+message ContextItemProto {
+  string item_id = 1;
+  string content = 2;
+  string context_type = 3;               // facts, preferences, episodes, emotions, temporal
+  string source = 4;                     // vector, graph, cache, postgres
+  float similarity_score = 5;
+  float relevance_score = 6;
+  float confidence = 7;
+  string scope = 8;                      // user, customer, client
+  string entity_id = 9;
+  string created_at = 10;                // ISO 8601, empty if null
+  // Temporal metadata
+  string event_date = 11;               // ISO 8601, empty if null
+  string valid_until = 12;              // ISO 8601, empty if null
+  string temporal_category = 13;        // "perpetual" | "temporal_fact" | "episode"
+  float temporal_confidence = 14;       // 0.0 if unset
+}
+
+// =============================================================================
+// Telemetry RPC — Client → Server (streaming)
+// =============================================================================
+
+message TelemetryEvent {
+  string event_type = 1;
+  string instance_id = 2;
+  string client_id = 3;
+  string correlation_id = 4;
+  int64 timestamp_ms = 5;
+  int32 latency_ms = 6;
+  string status = 7;                     // "success" | "error"
+  string error_code = 8;
+  string scope = 9;
+  string cache_status = 10;
+  int32 attempt = 11;
+  string http_method = 12;
+  string http_path = 13;
+  int32 http_status_code = 14;
+  map<string, string> metadata = 15;
+  string sdk_version = 16;
+  string batch_id = 17;
+}
+
+// Telemetry RPC — Server → Client (unary response)
+
+message TelemetryAck {
+  string status = 1;                     // "accepted"
+  int32 events_received = 2;
+}

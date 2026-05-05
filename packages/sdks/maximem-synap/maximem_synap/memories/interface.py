@@ -1,12 +1,15 @@
 """Interface for memory operations."""
 
 import asyncio
+import json as _json
+import os
 import time
 from datetime import datetime
-from typing import List, Optional
+from typing import IO, List, Optional, Union
 from uuid import UUID
 
 from ..utils.correlation import generate_correlation_id
+from ..utils.datetime_utils import parse_iso_datetime as _parse_dt
 from ..telemetry.collector import emit_memory_event
 from ..telemetry.models import TelemetryEventType
 from .models import (
@@ -125,7 +128,7 @@ class MemoriesInterface:
                 ingestion_id=UUID(result["ingestion_id"]),
                 document_id=result["document_id"],
                 status=IngestStatus(result["status"]),
-                queued_at=datetime.fromisoformat(result["queued_at"]),
+                queued_at=_parse_dt(result["queued_at"]),
             )
 
             latency_ms = int((time.time() - start_time) * 1000)
@@ -202,7 +205,7 @@ class MemoriesInterface:
                         ingestion_id=UUID(r["ingestion_id"]),
                         document_id=r["document_id"],
                         status=IngestStatus(r["status"]),
-                        queued_at=datetime.fromisoformat(r["queued_at"]),
+                        queued_at=_parse_dt(r["queued_at"]),
                         error_message=r.get("error_message"),
                     )
                     for r in result["results"]
@@ -262,9 +265,9 @@ class MemoriesInterface:
                 ingestion_id=UUID(result["ingestion_id"]),
                 document_id=result["document_id"],
                 status=IngestStatus(result["status"]),
-                queued_at=datetime.fromisoformat(result["queued_at"]),
-                started_at=datetime.fromisoformat(result["started_at"]) if result.get("started_at") else None,
-                completed_at=datetime.fromisoformat(result["completed_at"]) if result.get("completed_at") else None,
+                queued_at=_parse_dt(result["queued_at"]),
+                started_at=_parse_dt(result.get("started_at")),
+                completed_at=_parse_dt(result.get("completed_at")),
                 memories_created=result.get("memories_created", 0),
                 memory_ids=result.get("memory_ids", []),
                 error_message=result.get("error_message"),
@@ -355,8 +358,8 @@ class MemoriesInterface:
                 confidence=result["confidence"],
                 category=result.get("category"),
                 subcategory=result.get("subcategory"),
-                created_at=datetime.fromisoformat(result["created_at"]),
-                updated_at=datetime.fromisoformat(result["updated_at"]) if result.get("updated_at") else None,
+                created_at=_parse_dt(result["created_at"]),
+                updated_at=_parse_dt(result.get("updated_at")),
                 source_document_id=result.get("source_document_id"),
             )
 
@@ -451,6 +454,118 @@ class MemoriesInterface:
             )
             raise
 
+    async def create_from_file(
+        self,
+        user_id: str,
+        customer_id: str,
+        relationship_type: str = "b2c",
+        file_path: Optional[str] = None,
+        file: Optional[IO[bytes]] = None,
+        filename: Optional[str] = None,
+        text: Optional[str] = None,
+        document_type: Optional[str] = None,
+        mode: str = "long-range",
+        metadata: Optional[dict] = None,
+    ) -> CreateMemoryResponse:
+        """
+        Ingest a file or raw text into the memory pipeline.
+
+        Exactly one of `file_path`, `file`, or `text` must be provided.
+
+        Args:
+            user_id: User this memory is about
+            customer_id: Customer this memory belongs to
+            relationship_type: "b2b" or "b2c" (default "b2c")
+            file_path: Path on disk to read and upload
+            file: Open binary file-like object (must also pass `filename`)
+            filename: Name to use for the file (required when passing `file=`)
+            text: Raw text content to ingest instead of a file
+            document_type: Override detected document type
+            mode: "fast" or "long-range" (default "long-range")
+            metadata: Additional metadata dict (serialized to JSON)
+
+        Returns:
+            CreateMemoryResponse with ingestion_id and status
+        """
+        self._sdk._ensure_initialized()
+        correlation_id = generate_correlation_id(self._sdk.instance_id)
+        start_time = time.time()
+
+        emit_memory_event(
+            self._sdk._telemetry_collector,
+            TelemetryEventType.MEMORY_CREATE,
+            correlation_id=correlation_id,
+            status="started",
+        )
+
+        try:
+            auth_context = await self._sdk._get_auth_context(correlation_id)
+
+            # Build form data fields
+            form_data: dict = {
+                "user_id": user_id,
+                "customer_id": customer_id,
+                "relationship_type": relationship_type,
+                "mode": mode,
+            }
+            if document_type:
+                form_data["document_type"] = document_type
+            if metadata:
+                form_data["metadata"] = _json.dumps(metadata)
+
+            # Build files dict for multipart
+            files: dict = {}
+            if file_path is not None:
+                fname = os.path.basename(file_path)
+                with open(file_path, "rb") as fh:
+                    file_bytes = fh.read()
+                files["file"] = (fname, file_bytes)
+            elif file is not None:
+                fname = filename or "upload"
+                files["file"] = (fname, file.read())
+            elif text is not None:
+                form_data["text"] = text
+            else:
+                raise ValueError("One of file_path, file, or text must be provided.")
+
+            result = await self._sdk._http_transport.post_multipart(
+                path="/api/v1/memories/upload",
+                auth_context=auth_context,
+                data=form_data,
+                files=files if files else None,
+                correlation_id=correlation_id,
+            )
+
+            response = CreateMemoryResponse(
+                ingestion_id=UUID(result["ingestion_id"]),
+                document_id=result["document_id"],
+                status=IngestStatus(result["status"]),
+                queued_at=_parse_dt(result["queued_at"]),
+            )
+
+            latency_ms = int((time.time() - start_time) * 1000)
+            emit_memory_event(
+                self._sdk._telemetry_collector,
+                TelemetryEventType.MEMORY_CREATE,
+                correlation_id=correlation_id,
+                latency_ms=latency_ms,
+                status="success",
+            )
+
+            return response
+
+        except Exception as e:
+            latency_ms = int((time.time() - start_time) * 1000)
+            emit_memory_event(
+                self._sdk._telemetry_collector,
+                TelemetryEventType.MEMORY_CREATE,
+                correlation_id=correlation_id,
+                latency_ms=latency_ms,
+                status="error",
+                error_code=type(e).__name__,
+            )
+            raise
+
     async def delete(self, memory_id: UUID) -> dict:
         """
         Delete a memory.
@@ -476,7 +591,7 @@ class MemoriesInterface:
 
             response = {
                 "memory_id": UUID(result["memory_id"]),
-                "deleted_at": datetime.fromisoformat(result["deleted_at"]),
+                "deleted_at": _parse_dt(result["deleted_at"]),
             }
 
             latency_ms = int((time.time() - start_time) * 1000)

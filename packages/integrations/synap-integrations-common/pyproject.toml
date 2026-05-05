@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maximem-synap-integrations-common"
+version = "0.1.4"
+description = "Shared utilities for Synap framework integrations"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [
+    {name = "Synap Team"}
+]
+keywords = ["synap", "memory", "ai", "agents", "integrations"]
+
+dependencies = [
+    "maximem-synap>=0.2.0",
+    "nest_asyncio>=1.5",
+]
+
+[project.optional-dependencies]
+testing = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["synap_integrations_common*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

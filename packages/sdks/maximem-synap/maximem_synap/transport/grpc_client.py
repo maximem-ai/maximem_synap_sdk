@@ -43,7 +43,7 @@ class GRPCTransport:
     - Graceful shutdown
     """
 
-    DEFAULT_HOST = "grpc.synap.dev"
+    DEFAULT_HOST = "synap-cloud-prod.maximem.ai"
     DEFAULT_PORT = 443
 
     # Reconnection settings

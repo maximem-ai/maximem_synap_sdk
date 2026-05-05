@@ -61,9 +61,6 @@ class BridgeManager {
           instance_id: instanceId,
           api_key: this.options.apiKey
             || process.env.SYNAP_API_KEY,
-          bootstrap_token: this.options.bootstrapToken
-            || process.env.SYNAP_BOOTSTRAP_TOKEN
-            || process.env.SYNAP_BOOTSTRAP_KEY,
           base_url: this.options.baseUrl || process.env.SYNAP_BASE_URL,
           grpc_host: this.options.grpcHost || process.env.SYNAP_GRPC_HOST,
           grpc_port: Number(this.options.grpcPort || process.env.SYNAP_GRPC_PORT || 50051),

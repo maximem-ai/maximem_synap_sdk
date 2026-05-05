@@ -79,17 +79,18 @@ class AuthenticationError extends SynapPermanentError {
   }
 }
 
-class BootstrapKeyInvalidError extends AuthenticationError {
-  constructor(message, correlationId) {
+class InsufficientCreditsError extends SynapPermanentError {
+  constructor(message, details, correlationId) {
     super(message, correlationId);
-    this.name = 'BootstrapKeyInvalidError';
-  }
-}
-
-class BootstrapError extends SynapPermanentError {
-  constructor(message, correlationId) {
-    super(message, correlationId);
-    this.name = 'BootstrapError';
+    this.name = 'InsufficientCreditsError';
+    // Structured details from the server's 402 response body:
+    //   { balance_credits, minimum_required_credits, recovery_url, redeem_url }
+    this.balanceCredits = details && details.balance_credits != null
+      ? Number(details.balance_credits) : null;
+    this.minimumRequiredCredits = details && details.minimum_required_credits != null
+      ? Number(details.minimum_required_credits) : null;
+    this.recoveryUrl = details && details.recovery_url ? details.recovery_url : null;
+    this.redeemUrl = details && details.redeem_url ? details.redeem_url : null;
   }
 }
 
@@ -133,8 +134,7 @@ const ERROR_MAP = {
   InvalidInstanceIdError,
   InvalidConversationIdError,
   AuthenticationError,
-  BootstrapKeyInvalidError,
-  BootstrapError,
+  InsufficientCreditsError,
   ContextNotFoundError,
   SessionExpiredError,
   ListeningAlreadyActiveError,
@@ -159,8 +159,7 @@ module.exports = {
   InvalidInstanceIdError,
   InvalidConversationIdError,
   AuthenticationError,
-  BootstrapKeyInvalidError,
-  BootstrapError,
+  InsufficientCreditsError,
   ContextNotFoundError,
   SessionExpiredError,
   ListeningAlreadyActiveError,

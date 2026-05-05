@@ -1,110 +1,176 @@
-# maximem-synap
+# MaximemSynap Python SDK
 
-Python SDK for [Synap](https://synap.ai) — persistent memory for AI agents and applications.
+Python client library for the MaximemSynap context management system.
 
-## Install
+## Installation
 
 ```bash
 pip install maximem-synap
 ```
 
-## Quick start
+## Quick Start
 
 ```python
-from maximem_synap import MaximemSynapSDK
+from maximem_synap import MaximemSynapSDK, ContextType, CompactionLevel
 
-sdk = MaximemSynapSDK(instance_id="your-instance-id")
-await sdk.initialize(bootstrap_token="your-bootstrap-token")
+# Initialize SDK (reads SYNAP_API_KEY from your environment)
+sdk = MaximemSynapSDK()
 
-# Fetch context across all scopes
-response = await sdk.fetch(
+# Fetch conversation context
+context = sdk.conversation.fetch(
     conversation_id="conv-123",
-    user_id="user-456",
-    search_query=["what the user is asking"],
+    search_query="user preferences",
+    max_results=10,
+    types=[ContextType.FACTS, ContextType.PREFERENCES]
 )
 
-print(response.formatted_context)
+# Access context items
+for item in context.items:
+    print(f"{item.context_type}: {item.content}")
 
-# Record a conversation turn
-await sdk.conversation.record_message(
+# Compact conversation context
+compacted = sdk.conversation.compact(
     conversation_id="conv-123",
-    role="user",
-    content="hello",
-    user_id="user-456",
-    customer_id="cust-789",
+    compaction_level=CompactionLevel.BALANCED
 )
 
-# Create a memory
-result = await sdk.memories.create(
-    document="User prefers dark mode",
+# Fetch user context
+user_context = sdk.user.fetch(
     user_id="user-456",
-    customer_id="cust-789",
+    conversation_id="conv-123",  # Optional
+    max_results=20
 )
+
+# Listen for real-time updates
+sdk.instance.listen()
+# ... your application logic ...
+sdk.instance.stop()
+
+# Cleanup
+sdk.shutdown()
 ```
-
-## Features
-
-- **Unified cross-scope fetch** — one call merges context from conversation, user, customer, and client scopes.
-- **Typed memory items** — facts, preferences, episodes, emotions, temporal events. Not flat text blobs.
-- **Automatic conversation recording** — `record_message()` handles ingestion; compaction runs server-side.
-- **In-memory anticipation cache** — sub-10ms cache hits when the server has pre-fetched relevant context.
-- **Multi-tier caching** — anticipation cache + local HTTP cache (SQLite) + cloud.
-- **Multiple retrieval modes** — `FAST` for interactive flows, `ACCURATE` for RAG pipelines.
-- **Compaction** — async conversation compression that serves previous context while a new one is being computed.
 
 ## Configuration
 
 ```python
-from maximem_synap import MaximemSynapSDK, SDKConfig
+from maximem_synap import CacheConfig, TimeoutConfig
 
-config = SDKConfig(
-    api_base_url="https://synap-cloud-prod.maximem.ai",
-    cache_backend="sqlite",
-    log_level="INFO",
+# Configure caching
+cache_config = CacheConfig(
+    enabled=True,
+    ttl_seconds=300,
+    max_entries=1000
 )
 
-sdk = MaximemSynapSDK(instance_id="your-instance-id", config=config)
+# Configure timeouts
+timeout_config = TimeoutConfig(
+    connect_timeout_ms=5000,
+    read_timeout_ms=30000,
+    total_timeout_ms=60000
+)
+
+# Apply configuration
+sdk.configure(
+    cache=cache_config,
+    log_level="DEBUG",
+    timeouts=timeout_config
+)
 ```
 
-Or via environment variables:
+## Environment Variables
 
-```bash
-export SYNAP_INSTANCE_ID="your-instance-id"
-export SYNAP_BOOTSTRAP_TOKEN="your-bootstrap-token"
-```
+- `SYNAP_API_KEY`: Your Synap API key
 
-## Authentication
+## Context Controllers
 
-Set your API key from the Synap dashboard:
-
-```bash
-export SYNAP_API_KEY=synap_your_key_here
-```
-
-Or pass it directly:
+### Conversation Context
 
 ```python
-sdk = MaximemSynapSDK(instance_id="...", api_key="synap_...")
+# Fetch conversation context
+context = sdk.conversation.fetch(
+    conversation_id="conv-123",
+    search_query="optional search",
+    max_results=10,
+    types=[ContextType.FACTS]
+)
+
+# Compact conversation context
+compacted = sdk.conversation.compact(
+    conversation_id="conv-123",
+    compaction_level=CompactionLevel.ADAPTIVE
+)
 ```
 
-For local development, the SDK stores credentials in `~/.synap/instances/{instance_id}/credentials.json` with `0600` file permissions. **Do not commit this file to version control.**
+### User Context
 
-## Framework integrations
-
-Use Synap with your favorite AI framework via the companion integration packages:
-
-```bash
-pip install synap-langchain    # LangChain / LangGraph
-pip install synap-crewai       # CrewAI
-pip install synap-llamaindex   # LlamaIndex
-pip install synap-haystack     # Haystack
-pip install synap-google-adk   # Google ADK
-pip install synap-autogen      # AutoGen
-pip install synap-semantic-kernel  # Semantic Kernel
-pip install synap-openai-agents    # OpenAI Agents SDK
-pip install synap-pydantic-ai     # Pydantic AI
+```python
+context = sdk.user.fetch(
+    user_id="user-456",
+    conversation_id="conv-123",  # Optional
+    types=[ContextType.PREFERENCES, ContextType.EMOTIONS]
+)
 ```
+
+### Customer Context
+
+```python
+context = sdk.customer.fetch(
+    customer_id="cust-789",
+    conversation_id="conv-123"  # Optional
+)
+```
+
+### Client Context
+
+```python
+context = sdk.client.fetch(
+    client_id="client-abc",
+    conversation_id="conv-123"  # Optional
+)
+```
+
+## Error Handling
+
+```python
+from maximem_synap import (
+    SDKError,
+    AgentUnavailableError,
+    ContextNotFoundError,
+    AuthenticationError
+)
+
+try:
+    context = sdk.conversation.fetch(conversation_id="conv-123")
+except AgentUnavailableError as e:
+    # Retryable error
+    print(f"Agent unavailable: {e}")
+except ContextNotFoundError as e:
+    # Non-retryable error
+    print(f"Context not found: {e}")
+except AuthenticationError as e:
+    # Authentication failed
+    print(f"Auth error: {e}")
+except SDKError as e:
+    # Base exception
+    print(f"SDK error: {e}, retryable: {e.retryable}")
+```
+
+## Context Types
+
+- `ContextType.FACTS`: Factual information
+- `ContextType.PREFERENCES`: User preferences
+- `ContextType.EPISODES`: Conversation episodes
+- `ContextType.EMOTIONS`: Emotional context
+- `ContextType.TEMPORAL`: Time-based context
+- `ContextType.ALL`: All context types
+
+## Compaction Levels
+
+- `CompactionLevel.AGGRESSIVE`: Maximum compression
+- `CompactionLevel.BALANCED`: Balanced approach
+- `CompactionLevel.CONSERVATIVE`: Minimal compression
+- `CompactionLevel.ADAPTIVE`: Adaptive based on context
 
 ## License
 
-Apache 2.0 — see [LICENSE](../../LICENSE).
+MIT

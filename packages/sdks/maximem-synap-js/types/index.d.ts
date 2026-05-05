@@ -29,9 +29,7 @@ export interface BridgeLogHandler {
 }
 
 export interface SynapClientOptions {
-  instanceId?: string;
   apiKey?: string;
-  bootstrapToken?: string;
   baseUrl?: string;
   grpcHost?: string;
   grpcPort?: number;
@@ -371,8 +369,22 @@ export class InvalidInputError extends SynapPermanentError {}
 export class InvalidInstanceIdError extends InvalidInputError {}
 export class InvalidConversationIdError extends InvalidInputError {}
 export class AuthenticationError extends SynapPermanentError {}
-export class BootstrapKeyInvalidError extends AuthenticationError {}
-export class BootstrapError extends SynapPermanentError {}
+export class InsufficientCreditsError extends SynapPermanentError {
+  balanceCredits: number | null;
+  minimumRequiredCredits: number | null;
+  recoveryUrl: string | null;
+  redeemUrl: string | null;
+  constructor(
+    message: string,
+    details?: {
+      balance_credits?: number | null;
+      minimum_required_credits?: number | null;
+      recovery_url?: string | null;
+      redeem_url?: string | null;
+    },
+    correlationId?: string,
+  );
+}
 export class ContextNotFoundError extends SynapPermanentError {}
 export class SessionExpiredError extends SynapPermanentError {}
 export class ListeningAlreadyActiveError extends SynapPermanentError {}

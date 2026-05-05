@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maximem-synap-agno"
+version = "0.1.4"
+description = "Synap memory integration for Agno — user memories backed by Synap"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [
+    {name = "Synap Team"}
+]
+keywords = ["synap", "memory", "agno", "ai", "agents"]
+
+dependencies = [
+    "maximem-synap>=0.2.0",
+    "maximem-synap-integrations-common>=0.1.0",
+    "agno>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["synap_agno*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

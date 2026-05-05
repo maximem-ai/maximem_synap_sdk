@@ -49,6 +49,36 @@ class RateLimitError(SynapTransientError):
         self.retry_after_seconds = retry_after_seconds
 
 
+class InsufficientCreditsError(SynapPermanentError):
+    """The caller's credit wallet cannot cover this request.
+
+    Raised for HTTP 402 (from :mod:`synap.cloud.application.credits.enforcement`)
+    and gRPC ``RESOURCE_EXHAUSTED`` with credit-related trailing metadata.
+    Callers should redeem a code, request more credits, or contact support.
+
+    Attributes:
+        balance_credits: Snapshot balance at the time of rejection.
+        minimum_required_credits: What the endpoint's minimum charge was.
+        recovery_url: Where the balance can be viewed (defaults to /v1/credits/balance).
+        redeem_url: Where the customer can enter a redeem code.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        balance_credits: Optional[float] = None,
+        minimum_required_credits: Optional[float] = None,
+        recovery_url: Optional[str] = None,
+        redeem_url: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+    ):
+        super().__init__(message, correlation_id=correlation_id)
+        self.balance_credits = balance_credits
+        self.minimum_required_credits = minimum_required_credits
+        self.recovery_url = recovery_url
+        self.redeem_url = redeem_url
+
+
 class ServiceUnavailableError(SynapTransientError):
     """Synap service temporarily unavailable."""
 
@@ -86,17 +116,6 @@ class AuthenticationError(SynapPermanentError):
     pass
 
 
-class BootstrapKeyInvalidError(AuthenticationError):
-    """Bootstrap key is invalid."""
-
-    def __init__(
-        self,
-        message: str = "Bootstrap key is invalid",
-        correlation_id: Optional[str] = None,
-    ):
-        super().__init__(message, correlation_id=correlation_id)
-
-
 class ContextNotFoundError(SynapPermanentError):
     """Requested context does not exist."""
 
@@ -105,12 +124,6 @@ class ContextNotFoundError(SynapPermanentError):
 
 class SessionExpiredError(SynapPermanentError):
     """Session has expired and cannot be resumed."""
-
-    pass
-
-
-class BootstrapError(SynapPermanentError):
-    """SDK bootstrap/initialization failed."""
 
     pass
 

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maximem-synap-claude-agent"
+version = "0.1.4"
+description = "Synap memory integration for Anthropic's Claude Agent SDK"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [
+    {name = "Synap Team"}
+]
+keywords = ["synap", "memory", "claude", "claude-agent-sdk", "anthropic", "ai", "agents"]
+
+dependencies = [
+    "maximem-synap>=0.2.0",
+    "maximem-synap-integrations-common>=0.1.0",
+    "claude-agent-sdk>=0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["synap_claude_agent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

@@ -5,15 +5,14 @@ memories. Use these when you want the agent to decide when to access
 memory, rather than doing it automatically on every turn.
 """
 
-import asyncio
 import logging
 from typing import Any, Optional, Type
 
+from langchain_core.tools import BaseTool
 from pydantic import BaseModel, ConfigDict, Field
 
-from langchain_core.tools import BaseTool
-
 from maximem_synap import MaximemSynapSDK
+from synap_integrations_common import run_async, wrap_sdk_errors_async
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +30,8 @@ class _StoreInput(BaseModel):
 class SynapSearchTool(BaseTool):
     """Search Synap memory for relevant context about the user.
 
-    Example:
+    Example::
+
         tool = SynapSearchTool(sdk=sdk, user_id="user-456")
         result = tool.invoke("What are the user's preferences?")
     """
@@ -54,31 +54,29 @@ class SynapSearchTool(BaseTool):
     max_results: int = 10
 
     def _run(self, query: str, **kwargs: Any) -> str:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(self._arun(query, **kwargs))
-        import nest_asyncio
-        nest_asyncio.apply()
-        return loop.run_until_complete(self._arun(query, **kwargs))
+        return run_async(self._arun(query, **kwargs))
 
     async def _arun(self, query: str, **kwargs: Any) -> str:
-        response = await self.sdk.fetch(
-            conversation_id=self.conversation_id,
-            user_id=self.user_id,
-            customer_id=self.customer_id,
-            search_query=[query],
-            mode=self.mode,
-            max_results=self.max_results,
-            include_conversation_context=False,
-        )
+        async with wrap_sdk_errors_async(
+            "langchain.search_memory", logger, user_id=self.user_id
+        ):
+            response = await self.sdk.fetch(
+                conversation_id=self.conversation_id,
+                user_id=self.user_id,
+                customer_id=self.customer_id,
+                search_query=[query],
+                mode=self.mode,
+                max_results=self.max_results,
+                include_conversation_context=False,
+            )
         return response.formatted_context or "No relevant memories found."
 
 
 class SynapStoreTool(BaseTool):
     """Store important information in Synap memory.
 
-    Example:
+    Example::
+
         tool = SynapStoreTool(sdk=sdk, user_id="user-456")
         result = tool.invoke("User prefers dark mode and concise responses")
     """
@@ -98,18 +96,15 @@ class SynapStoreTool(BaseTool):
     customer_id: Optional[str] = None
 
     def _run(self, content: str, **kwargs: Any) -> str:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(self._arun(content, **kwargs))
-        import nest_asyncio
-        nest_asyncio.apply()
-        return loop.run_until_complete(self._arun(content, **kwargs))
+        return run_async(self._arun(content, **kwargs))
 
     async def _arun(self, content: str, **kwargs: Any) -> str:
-        result = await self.sdk.memories.create(
-            document=content,
-            user_id=self.user_id,
-            customer_id=self.customer_id or "",
-        )
+        async with wrap_sdk_errors_async(
+            "langchain.store_memory", logger, user_id=self.user_id
+        ):
+            result = await self.sdk.memories.create(
+                document=content,
+                user_id=self.user_id,
+                customer_id=self.customer_id or "",
+            )
         return f"Memory stored (ingestion_id: {result.ingestion_id})"

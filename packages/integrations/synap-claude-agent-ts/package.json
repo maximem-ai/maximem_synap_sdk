@@ -1,0 +1,51 @@
+{
+  "name": "@maximem/synap-claude-agent",
+  "version": "0.1.1",
+  "description": "Synap memory integration for Anthropic's Claude Agent SDK (TypeScript)",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "synap",
+    "memory",
+    "claude",
+    "claude-agent-sdk",
+    "anthropic",
+    "agent",
+    "ai",
+    "mcp"
+  ],
+  "license": "Apache-2.0",
+  "peerDependencies": {
+    "@anthropic-ai/claude-agent-sdk": ">=0.2.0",
+    "zod": ">=4.0.0"
+  },
+  "devDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.116",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "zod": "^4.0.0"
+  }
+}

@@ -10,18 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from .enums import CompactionLevel
-
-
-def _parse_iso_datetime(value) -> Optional[datetime]:
-    """Parse an ISO 8601 string to datetime, returning None on failure."""
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value
-    try:
-        return datetime.fromisoformat(str(value))
-    except (ValueError, TypeError):
-        return None
+from ..utils.datetime_utils import parse_iso_datetime as _parse_iso_datetime
 
 
 _CONFIDENCE_STRINGS: dict = {
@@ -183,6 +172,15 @@ class ContextResponse(BaseModel):
     def raw(self) -> Dict[str, Any]:
         """Access raw response for fields not yet in typed model."""
         return getattr(self, "_raw_data", {})
+
+    @property
+    def all_items(self) -> List[Any]:
+        """All memory items as a flat list for easy iteration.
+
+        Order: facts → preferences → episodes → emotions → temporal_events.
+        Use the typed collections when you need type-specific fields.
+        """
+        return [*self.facts, *self.preferences, *self.episodes, *self.emotions, *self.temporal_events]
 
     @classmethod
     def from_cloud_response(
@@ -406,6 +404,15 @@ class UnifiedContextResponse(BaseModel):
     scopes_queried: List[str] = Field(default_factory=list)
     total_items: int = 0
     metadata: Optional[ResponseMetadata] = None
+
+    @property
+    def all_items(self) -> List[Any]:
+        """All memory items as a flat list for easy iteration.
+
+        Order: facts → preferences → episodes → emotions → temporal_events.
+        Use the typed collections when you need type-specific fields.
+        """
+        return [*self.facts, *self.preferences, *self.episodes, *self.emotions, *self.temporal_events]
 
     @staticmethod
     def merge(

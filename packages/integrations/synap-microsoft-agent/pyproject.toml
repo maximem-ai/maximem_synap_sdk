@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maximem-synap-microsoft-agent"
+version = "0.1.2"
+description = "Synap memory integration for Microsoft Agent Framework"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [
+    {name = "Synap Team"}
+]
+keywords = ["synap", "memory", "microsoft", "agent-framework", "ai", "agents"]
+
+dependencies = [
+    "maximem-synap>=0.2.0",
+    "maximem-synap-integrations-common>=0.1.0",
+    "agent-framework>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["synap_microsoft_agent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

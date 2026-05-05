@@ -25,8 +25,6 @@ from .models.config import CacheConfig, RetryPolicy, SDKConfig, TimeoutConfig
 from .models.errors import (
     AgentUnavailableError,
     AuthenticationError,
-    BootstrapError,
-    BootstrapKeyInvalidError,
     ConnectionError,
     ContextNotFoundError,
     InvalidConversationIdError,
@@ -109,8 +107,6 @@ __all__ = [
     "InvalidInstanceIdError",
     "InvalidConversationIdError",
     "AuthenticationError",
-    "BootstrapKeyInvalidError",
-    "BootstrapError",
     "ContextNotFoundError",
     "SessionExpiredError",
     "ListeningAlreadyActiveError",

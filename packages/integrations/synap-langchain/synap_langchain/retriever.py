@@ -5,20 +5,19 @@ to LangChain Document objects with rich metadata including type,
 confidence, scope, and temporal info.
 """
 
-import asyncio
 import logging
-from typing import Any, Dict, List, Optional
-
-from pydantic import ConfigDict, Field
+from typing import List, Optional
 
 from langchain_core.callbacks.manager import (
-    CallbackManagerForRetrieverRun,
     AsyncCallbackManagerForRetrieverRun,
+    CallbackManagerForRetrieverRun,
 )
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
+from pydantic import ConfigDict
 
 from maximem_synap import MaximemSynapSDK
+from synap_integrations_common import run_async, wrap_sdk_errors_async
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +25,8 @@ logger = logging.getLogger(__name__)
 class SynapRetriever(BaseRetriever):
     """Retriever that queries Synap memory and returns Documents.
 
-    Each memory item (fact, preference, episode, etc.) becomes a
-    LangChain Document with metadata preserving type, confidence,
-    scope, and temporal information.
+    Example::
 
-    Example:
         retriever = SynapRetriever(sdk=sdk, user_id="user-456")
         docs = retriever.invoke("What are the user's preferences?")
     """
@@ -51,15 +47,7 @@ class SynapRetriever(BaseRetriever):
         *,
         run_manager: CallbackManagerForRetrieverRun,
     ) -> List[Document]:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(
-                self._aget_relevant_documents(query, run_manager=run_manager)
-            )
-        import nest_asyncio
-        nest_asyncio.apply()
-        return loop.run_until_complete(
+        return run_async(
             self._aget_relevant_documents(query, run_manager=run_manager)
         )
 
@@ -69,16 +57,20 @@ class SynapRetriever(BaseRetriever):
         *,
         run_manager: AsyncCallbackManagerForRetrieverRun,
     ) -> List[Document]:
-        response = await self.sdk.fetch(
-            conversation_id=self.conversation_id,
-            user_id=self.user_id,
-            customer_id=self.customer_id,
-            search_query=[query],
-            max_results=self.max_results,
-            types=self.types,
-            mode=self.mode,
-            include_conversation_context=False,
-        )
+        async with wrap_sdk_errors_async(
+            "langchain.SynapRetriever", logger,
+            user_id=self.user_id, query_len=len(query),
+        ):
+            response = await self.sdk.fetch(
+                conversation_id=self.conversation_id,
+                user_id=self.user_id,
+                customer_id=self.customer_id,
+                search_query=[query],
+                max_results=self.max_results,
+                types=self.types,
+                mode=self.mode,
+                include_conversation_context=False,
+            )
 
         docs: List[Document] = []
 
@@ -86,10 +78,8 @@ class SynapRetriever(BaseRetriever):
             docs.append(Document(
                 page_content=fact.content,
                 metadata={
-                    "type": "fact",
-                    "id": fact.id,
-                    "confidence": fact.confidence,
-                    "source": fact.source,
+                    "type": "fact", "id": fact.id,
+                    "confidence": fact.confidence, "source": fact.source,
                     "scope": response.scope_map.get(fact.id, ""),
                     "valid_until": str(fact.valid_until) if fact.valid_until else None,
                     "temporal_category": fact.temporal_category,
@@ -100,10 +90,8 @@ class SynapRetriever(BaseRetriever):
             docs.append(Document(
                 page_content=pref.content,
                 metadata={
-                    "type": "preference",
-                    "id": pref.id,
-                    "strength": pref.strength,
-                    "category": pref.category,
+                    "type": "preference", "id": pref.id,
+                    "strength": pref.strength, "category": pref.category,
                     "scope": response.scope_map.get(pref.id, ""),
                 },
             ))
@@ -112,8 +100,7 @@ class SynapRetriever(BaseRetriever):
             docs.append(Document(
                 page_content=ep.summary,
                 metadata={
-                    "type": "episode",
-                    "id": ep.id,
+                    "type": "episode", "id": ep.id,
                     "significance": ep.significance,
                     "occurred_at": str(ep.occurred_at),
                     "scope": response.scope_map.get(ep.id, ""),
@@ -124,10 +111,8 @@ class SynapRetriever(BaseRetriever):
             docs.append(Document(
                 page_content=f"{em.emotion_type}: {em.context}",
                 metadata={
-                    "type": "emotion",
-                    "id": em.id,
-                    "intensity": em.intensity,
-                    "emotion_type": em.emotion_type,
+                    "type": "emotion", "id": em.id,
+                    "intensity": em.intensity, "emotion_type": em.emotion_type,
                     "detected_at": str(em.detected_at),
                     "scope": response.scope_map.get(em.id, ""),
                 },
@@ -137,8 +122,7 @@ class SynapRetriever(BaseRetriever):
             docs.append(Document(
                 page_content=te.content,
                 metadata={
-                    "type": "temporal_event",
-                    "id": te.id,
+                    "type": "temporal_event", "id": te.id,
                     "event_date": str(te.event_date),
                     "valid_until": str(te.valid_until) if te.valid_until else None,
                     "temporal_category": te.temporal_category,

@@ -1,0 +1,56 @@
+{
+  "name": "@maximem/synap-vercel-adk",
+  "version": "0.2.7",
+  "description": "Vercel AI SDK provider for Synap — context-aware LLM middleware",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "proto",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "synap",
+    "vercel-ai-sdk",
+    "ai-sdk",
+    "llm",
+    "context",
+    "memory",
+    "middleware"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "ai": ">=3.0.0"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.12.0",
+    "@grpc/proto-loader": "^0.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "ai": "^4.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.9"
+  }
+}

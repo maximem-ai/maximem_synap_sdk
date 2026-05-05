@@ -38,8 +38,7 @@ class SDKConfig(BaseModel):
     grpc_host: Optional[str] = None  # Override default gRPC host
     grpc_port: Optional[int] = None  # Override default gRPC port (e.g. 50051)
     grpc_use_tls: bool = True  # Set False for plaintext connections (testing)
-    storage_path: Optional[str] = None  # Override default ~/.synap/
-    credentials_source: str = "file"  # "file" or "env"
+    storage_path: Optional[str] = None  # Override default cache path (~/.synap/)
     cache_backend: Optional[str] = "sqlite"  # "sqlite" or None
     session_timeout_minutes: int = Field(default=30, ge=5, le=1440)
     timeouts: TimeoutConfig = Field(default_factory=TimeoutConfig)

@@ -2,29 +2,27 @@
 
 Implements LangChain's BaseChatMessageHistory interface backed by Synap.
 Use with RunnableWithMessageHistory to add memory to any chain or agent.
+
+Error-handling split:
+
+- :meth:`aget_messages` does **not** raise on SDK failure — a memory
+  lookup miss should not crash the chain's main response path. Failures
+  are logged at ``ERROR`` (previously ``DEBUG``, which was invisible in
+  practice) and an empty list is returned.
+- :meth:`aadd_messages` **does** raise. The caller explicitly invoked
+  ``add``; silently dropping messages masks ingestion outages.
 """
 
-import asyncio
 import logging
-from typing import Any, Dict, List, Optional, Sequence
+from typing import List, Sequence
 
 from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from maximem_synap import MaximemSynapSDK
+from synap_integrations_common import run_async, wrap_sdk_errors_async
 
 logger = logging.getLogger(__name__)
-
-
-def _run_async(coro):
-    """Run an async coroutine from sync context, handling event loop edge cases."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    import nest_asyncio
-    nest_asyncio.apply()
-    return loop.run_until_complete(coro)
 
 
 class SynapChatMessageHistory(BaseChatMessageHistory):
@@ -33,23 +31,6 @@ class SynapChatMessageHistory(BaseChatMessageHistory):
     Records conversation messages via the SDK and retrieves them
     using get_context_for_prompt(). Use with RunnableWithMessageHistory
     for automatic memory on every turn.
-
-    Example:
-        from synap_langchain import SynapChatMessageHistory
-        from langchain_core.runnables.history import RunnableWithMessageHistory
-
-        def get_session_history(session_id: str) -> SynapChatMessageHistory:
-            return SynapChatMessageHistory(
-                sdk=sdk,
-                conversation_id=session_id,
-                user_id="user-456",
-                customer_id="cust-789",
-            )
-
-        chain_with_history = RunnableWithMessageHistory(
-            chain,
-            get_session_history,
-        )
     """
 
     def __init__(
@@ -59,6 +40,17 @@ class SynapChatMessageHistory(BaseChatMessageHistory):
         user_id: str,
         customer_id: str = "",
     ):
+        if sdk is None:
+            raise ValueError("SynapChatMessageHistory requires a non-None sdk")
+        if not conversation_id:
+            raise ValueError(
+                "SynapChatMessageHistory requires a non-empty conversation_id"
+            )
+        if not user_id:
+            raise ValueError(
+                "SynapChatMessageHistory requires a non-empty user_id"
+            )
+
         self.sdk = sdk
         self.conversation_id = conversation_id
         self.user_id = user_id
@@ -83,37 +75,48 @@ class SynapChatMessageHistory(BaseChatMessageHistory):
 
     @property
     def messages(self) -> List[BaseMessage]:
-        """Retrieve messages from Synap."""
-        return _run_async(self.aget_messages())
+        return run_async(self.aget_messages())
 
     async def aget_messages(self) -> List[BaseMessage]:
-        """Async retrieve messages from Synap."""
-        msgs: List[BaseMessage] = []
+        """Best-effort retrieve. Failures return an empty list + ERROR log."""
         try:
             prompt_ctx = await self.sdk.conversation.context.get_context_for_prompt(
                 conversation_id=self.conversation_id,
             )
-            if prompt_ctx and prompt_ctx.recent_messages:
-                for rm in prompt_ctx.recent_messages:
-                    role = getattr(rm, "role", None) or "user"
-                    content = getattr(rm, "content", "") or ""
-                    if role == "assistant":
-                        msgs.append(AIMessage(content=str(content)))
-                    else:
-                        msgs.append(HumanMessage(content=str(content)))
-        except Exception as e:
-            logger.debug("SynapChatMessageHistory: failed to get messages: %s", e)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "SynapChatMessageHistory.aget_messages failed "
+                "conversation_id=%s error=%s",
+                self.conversation_id, exc, exc_info=True,
+            )
+            return []
+
+        if not prompt_ctx or not prompt_ctx.recent_messages:
+            return []
+
+        msgs: List[BaseMessage] = []
+        for rm in prompt_ctx.recent_messages:
+            role = getattr(rm, "role", None) or "user"
+            content = getattr(rm, "content", "") or ""
+            if role == "assistant":
+                msgs.append(AIMessage(content=str(content)))
+            else:
+                msgs.append(HumanMessage(content=str(content)))
         return msgs
 
     def add_messages(self, messages: Sequence[BaseMessage]) -> None:
-        """Add messages to Synap."""
-        _run_async(self.aadd_messages(messages))
+        run_async(self.aadd_messages(messages))
 
     async def aadd_messages(self, messages: Sequence[BaseMessage]) -> None:
-        """Async add messages to Synap."""
+        """Write messages. Surfaces SDK errors (caller invoked this explicitly)."""
         for msg in messages:
             role = "assistant" if isinstance(msg, AIMessage) else "user"
-            try:
+            async with wrap_sdk_errors_async(
+                "langchain.aadd_messages",
+                logger,
+                role=role,
+                conversation_id=self.conversation_id,
+            ):
                 await self.sdk.conversation.record_message(
                     conversation_id=self.conversation_id,
                     role=role,
@@ -121,17 +124,12 @@ class SynapChatMessageHistory(BaseChatMessageHistory):
                     user_id=self.user_id,
                     customer_id=self.customer_id,
                 )
-            except Exception as e:
-                logger.warning("Failed to record %s message: %s", role, e)
 
     def clear(self) -> None:
-        """Clear local cache."""
         self.sdk.cache.clear()
 
     async def aclear(self) -> None:
-        """Async clear local cache."""
         self.sdk.cache.clear()
 
 
-# Backward-compatible alias
 SynapMemory = SynapChatMessageHistory

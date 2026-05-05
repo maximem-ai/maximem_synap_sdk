@@ -164,18 +164,14 @@ async def handle_init(params: dict) -> dict:
     timings: List[dict] = []
 
     instance_id = params.get("instance_id", "")
-    bootstrap_token = params.get("bootstrap_token") or params.get("bootstrap_key")
+    api_key = params.get("api_key")
 
     step = time.perf_counter()
-    try:
-        sdk = MaximemSynapSDK(
-            instance_id=instance_id,
-            bootstrap_token=bootstrap_token,
-            _force_new=True,
-        )
-    except TypeError:
-        # Backward compatibility with older SDK constructors.
-        sdk = MaximemSynapSDK(instance_id=instance_id, _force_new=True)
+    sdk = MaximemSynapSDK(
+        instance_id=instance_id,
+        api_key=api_key,
+        _force_new=True,
+    )
     append_step(timings, "construct_sdk", step)
 
     config_kwargs = {"log_level": "DEBUG", "cache_backend": "sqlite"}
@@ -194,10 +190,7 @@ async def handle_init(params: dict) -> dict:
     append_step(timings, "configure_sdk", step)
 
     step = time.perf_counter()
-    if bootstrap_token:
-        await sdk.initialize(bootstrap_token=bootstrap_token)
-    else:
-        await sdk.initialize()
+    await sdk.initialize()
     append_step(timings, "initialize_sdk", step)
 
     grpc_listening = False
@@ -221,7 +214,6 @@ async def handle_init(params: dict) -> dict:
     return {
         "success": True,
         "instance_id": instance_id,
-        "bootstrap_token_used": bool(bootstrap_token),
         "grpc_listening": grpc_listening,
         "bridgeTiming": {
             "python_total_ms": ms_since(handler_start),

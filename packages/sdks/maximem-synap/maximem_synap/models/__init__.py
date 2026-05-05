@@ -37,8 +37,6 @@ from .requests import RequestEnvelope, ResponseEnvelope
 from .errors import (
     AgentUnavailableError,
     AuthenticationError,
-    BootstrapError,
-    BootstrapKeyInvalidError,
     ConnectionError,
     ContextNotFoundError,
     InvalidConversationIdError,
@@ -99,10 +97,8 @@ __all__ = [
     "InvalidInstanceIdError",
     "InvalidConversationIdError",
     "AuthenticationError",
-    "BootstrapKeyInvalidError",
     "ContextNotFoundError",
     "SessionExpiredError",
-    "BootstrapError",
     "ListeningAlreadyActiveError",
     "AgentUnavailableError",
     # Backward compatibility aliases

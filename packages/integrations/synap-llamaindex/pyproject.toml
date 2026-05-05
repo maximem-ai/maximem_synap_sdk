@@ -3,11 +3,11 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "synap-llamaindex"
-version = "0.1.0"
+name = "maximem-synap-llamaindex"
+version = "0.1.4"
 description = "Synap memory integration for LlamaIndex"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = "Apache-2.0"
 authors = [
     {name = "Synap Team"}
@@ -16,6 +16,7 @@ keywords = ["synap", "memory", "llamaindex", "rag", "ai"]
 
 dependencies = [
     "maximem-synap>=0.2.0",
+    "maximem-synap-integrations-common>=0.1.0",
     "llama-index-core>=0.10",
 ]
 

@@ -3,12 +3,12 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "synap-autogen"
-version = "0.1.0"
+name = "maximem-synap-autogen"
+version = "0.1.2"
 description = "Synap memory integration for AutoGen / AG2"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = "Apache-2.0"
-dependencies = ["maximem-synap>=0.2.0", "autogen-core>=0.4"]
+dependencies = ["maximem-synap>=0.2.0", "maximem-synap-integrations-common>=0.1.0", "autogen-core>=0.4"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]

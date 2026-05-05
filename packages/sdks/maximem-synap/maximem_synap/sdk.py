@@ -22,7 +22,6 @@ from .models.context import (
 from .models.enums import CompactionLevel, ContextScope
 from .models.errors import (
     SynapError,
-    BootstrapError,
     AuthenticationError,
     InvalidInputError,
     ContextNotFoundError,
@@ -188,8 +187,8 @@ class MaximemSynapSDK:
     """Synap SDK - Agentic Context Management.
 
     Usage:
-        sdk = MaximemSynapSDK(instance_id="your-instance-id")
-        await sdk.initialize(bootstrap_token="...")
+        sdk = MaximemSynapSDK()  # reads SYNAP_API_KEY from env
+        await sdk.initialize()
 
         # Fetch context
         ctx = await sdk.conversation.context.fetch(conversation_id="...")
@@ -205,18 +204,17 @@ class MaximemSynapSDK:
         self,
         instance_id: str = "",
         api_key: Optional[str] = None,
-        bootstrap_token: Optional[str] = None,
         config: Optional[SDKConfig] = None,
         _force_new: bool = False,
     ):
         """Create or get SDK instance.
 
         Args:
-            instance_id: Your Synap instance ID from the dashboard
-            api_key: API key from the dashboard (or set SYNAP_API_KEY env var)
-            bootstrap_token: One-time token for initial setup (alternative to api_key)
-            config: Optional configuration overrides
-            _force_new: Force create new instance (for testing)
+            instance_id: Optional instance ID. If omitted, resolved from the
+                API key on initialize() via GET /api/v1/auth/whoami.
+            api_key: Synap API key. If omitted, read from SYNAP_API_KEY env var.
+            config: Optional configuration overrides.
+            _force_new: Force create new instance (for testing).
         """
         # Check singleton registry
         if not _force_new:
@@ -228,7 +226,6 @@ class MaximemSynapSDK:
 
         self.instance_id = instance_id or os.environ.get("SYNAP_INSTANCE_ID", "")
         self._api_key = api_key
-        self._bootstrap_token = bootstrap_token
         self._config = config or SDKConfig()
         self._initialized = False
 
@@ -256,6 +253,11 @@ class MaximemSynapSDK:
         self.cache = CacheInterface(self)
         self.memories = MemoriesInterface(self)
 
+        # Credits is attached lazily so circular imports don't bite
+        # (credits.py imports MaximemSynapSDK via TYPE_CHECKING only).
+        from .credits import CreditsInterface
+        self.credits = CreditsInterface(self)
+
         # Configure logging
         configure_logging(self._config.log_level)
 
@@ -267,8 +269,7 @@ class MaximemSynapSDK:
         """Update SDK configuration.
 
         Args:
-            storage_path: Override default storage path
-            credentials_source: "file" or "env"
+            storage_path: Override default cache storage path
             cache_backend: "sqlite" or None
             session_timeout_minutes: Session timeout (5-1440)
             timeouts: TimeoutConfig or dict
@@ -301,41 +302,24 @@ class MaximemSynapSDK:
         count = self._turn_counters.get(key, 0)
         return count > 0 and count % self._user_summary_interval == 0
 
-    async def initialize(self, bootstrap_token: Optional[str] = None) -> None:
+    async def initialize(self) -> None:
         """Initialize the SDK.
 
-        Must be called before using any context operations.
-        Provide an API key (constructor, env var, or stored) or a bootstrap token.
-
-        Args:
-            bootstrap_token: One-time token (alternative to api_key)
+        Must be called before any context operations. Reads the Synap API key
+        from the api_key= kwarg (highest priority) or the SYNAP_API_KEY env var.
         """
         if self._initialized:
             return
 
-        token = bootstrap_token or self._bootstrap_token
+        self._credential_manager = CredentialManager(instance_id=self.instance_id)
 
-        # Initialize credential manager
-        self._credential_manager = CredentialManager(
-            instance_id=self.instance_id,
-            credentials_source=self._config.credentials_source,
-            storage_path=self._config.storage_path,
-        )
-
-        if self._config.api_base_url:
-            self._credential_manager.set_base_url(self._config.api_base_url)
-
-        # Load or bootstrap credentials
         try:
-            credentials = await self._credential_manager.load_or_bootstrap(
-                api_key=self._api_key,
-                bootstrap_token=token,
-            )
+            credentials = self._credential_manager.load(api_key=self._api_key)
             self._client_id = credentials.client_id
             if credentials.instance_id:
                 self.instance_id = credentials.instance_id
         except Exception as e:
-            raise BootstrapError(f"SDK initialization failed: {e}") from e
+            raise AuthenticationError(f"SDK initialization failed: {e}") from e
 
         # Initialize cache
         if self._config.cache_backend:
@@ -577,7 +561,7 @@ class MaximemSynapSDK:
     def _ensure_initialized(self) -> None:
         """Ensure SDK is initialized before operations."""
         if not self._initialized:
-            raise BootstrapError(
+            raise AuthenticationError(
                 "SDK not initialized. Call await sdk.initialize() first."
             )
 

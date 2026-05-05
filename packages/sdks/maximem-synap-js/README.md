@@ -37,14 +37,13 @@ Windows:
 $env:USERPROFILE\.synap-js-sdk\.venv\Scripts\python.exe -c "import maximem_synap; print(maximem_synap.__version__)"
 ```
 
-## Required Environment Variables
+## Required Environment Variable
 
-- `SYNAP_INSTANCE_ID`
-- `SYNAP_BOOTSTRAP_TOKEN` (required for first-time initialization/new instance)
-- `SYNAP_BASE_URL`
-- `SYNAP_GRPC_HOST`
-- `SYNAP_GRPC_PORT`
-- `SYNAP_GRPC_TLS`
+- `SYNAP_API_KEY` (from the Synap dashboard — Instances → Generate API Key)
+
+The SDK uses the default Synap cloud endpoints automatically. `SYNAP_BASE_URL`,
+`SYNAP_GRPC_HOST`, `SYNAP_GRPC_PORT`, and `SYNAP_GRPC_TLS` are only needed for
+advanced overrides such as local development or custom environments.
 
 ## Quick Start (JavaScript)
 
@@ -52,12 +51,7 @@ $env:USERPROFILE\.synap-js-sdk\.venv\Scripts\python.exe -c "import maximem_synap
 const { createClient } = require('@maximem/synap-js-sdk');
 
 const synap = createClient({
-  instanceId: process.env.SYNAP_INSTANCE_ID,
-  bootstrapToken: process.env.SYNAP_BOOTSTRAP_TOKEN,
-  baseUrl: process.env.SYNAP_BASE_URL,
-  grpcHost: process.env.SYNAP_GRPC_HOST,
-  grpcPort: Number(process.env.SYNAP_GRPC_PORT || 50051),
-  grpcUseTls: process.env.SYNAP_GRPC_TLS === 'true',
+  apiKey: process.env.SYNAP_API_KEY,
 });
 
 async function run() {
