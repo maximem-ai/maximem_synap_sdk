@@ -255,6 +255,14 @@ Understand the system before building on it:
 
 ---
 
+## Agent skills
+
+Drop-in instructions for coding agents (Claude Code, Cursor, etc.) that teach them how to wire Synap into your codebase.
+
+- **[Maximem Synap skill](skills/synap/)** — covers SDK setup, scoping (User/Customer/Client), ingestion, retrieval, and one-page wiring guides for all 18+ supported frameworks.
+
+---
+
 ## Requirements
 
 - **Python SDK**: Python 3.9+
