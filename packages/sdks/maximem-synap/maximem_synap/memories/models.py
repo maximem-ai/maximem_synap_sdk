@@ -52,9 +52,12 @@ class CreateMemoryRequest(BaseModel):
     # Temporal
     document_created_at: Optional[datetime] = None  # DCT
 
-    # Scope (required — must match the external IDs used during ingestion)
-    user_id: str
-    customer_id: str
+    # Scope (optional — server derives the effective scope level from which
+    # IDs are passed and the instance's user_context_isolation. B2C: either
+    # ID → user-scope; neither → client-scope. B2B: both → user; customer
+    # only → customer; neither → client; user_id without customer_id → 400.)
+    user_id: Optional[str] = None
+    customer_id: Optional[str] = None
 
     # Processing options
     mode: IngestMode = IngestMode.LONG_RANGE

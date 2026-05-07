@@ -32,11 +32,17 @@ class MemoriesInterface:
     Interface for memory operations.
 
     Usage:
-        # Create single memory
+        # Create user-scoped memory
         result = await sdk.memories.create(
             document="User prefers email communication",
             user_id="user-123",
             customer_id="customer-456",
+        )
+
+        # Create client-scope memory (no user_id / customer_id)
+        result = await sdk.memories.create(
+            document="Company refund policy: 30-day window.",
+            document_type="document",
         )
 
         # Check status
@@ -64,8 +70,8 @@ class MemoriesInterface:
     async def create(
         self,
         document: str,
-        user_id: str,
-        customer_id: str,
+        user_id: Optional[str] = None,
+        customer_id: Optional[str] = None,
         document_type: str = "ai-chat-conversation",
         document_id: Optional[str] = None,
         document_created_at: Optional[datetime] = None,
@@ -81,8 +87,12 @@ class MemoriesInterface:
 
         Args:
             document: The content to memorize
-            user_id: User this memory is about (required, must be external ID)
-            customer_id: Customer this memory belongs to (required, must be external ID)
+            user_id: External user ID this memory is about. Optional — omit
+                for customer- or client-scope ingestion.
+            customer_id: External customer ID this memory belongs to. Optional —
+                omit for client-scope ingestion. The server derives the
+                effective scope from the IDs passed and the instance's
+                user_context_isolation (B2C/B2B).
             document_type: Type of document (ai-chat-conversation, email, pdf, etc.)
             document_id: Optional client-provided ID
             document_created_at: When the document was originally created
