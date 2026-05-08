@@ -9,7 +9,6 @@ from typing import IO, List, Optional, Union
 from uuid import UUID
 
 from ..utils.correlation import generate_correlation_id
-from ..utils.datetime_utils import parse_iso_datetime as _parse_dt
 from ..telemetry.collector import emit_memory_event
 from ..telemetry.models import TelemetryEventType
 from .models import (
@@ -138,7 +137,7 @@ class MemoriesInterface:
                 ingestion_id=UUID(result["ingestion_id"]),
                 document_id=result["document_id"],
                 status=IngestStatus(result["status"]),
-                queued_at=_parse_dt(result["queued_at"]),
+                queued_at=datetime.fromisoformat(result["queued_at"]),
             )
 
             latency_ms = int((time.time() - start_time) * 1000)
@@ -215,7 +214,7 @@ class MemoriesInterface:
                         ingestion_id=UUID(r["ingestion_id"]),
                         document_id=r["document_id"],
                         status=IngestStatus(r["status"]),
-                        queued_at=_parse_dt(r["queued_at"]),
+                        queued_at=datetime.fromisoformat(r["queued_at"]),
                         error_message=r.get("error_message"),
                     )
                     for r in result["results"]
@@ -275,9 +274,9 @@ class MemoriesInterface:
                 ingestion_id=UUID(result["ingestion_id"]),
                 document_id=result["document_id"],
                 status=IngestStatus(result["status"]),
-                queued_at=_parse_dt(result["queued_at"]),
-                started_at=_parse_dt(result.get("started_at")),
-                completed_at=_parse_dt(result.get("completed_at")),
+                queued_at=datetime.fromisoformat(result["queued_at"]),
+                started_at=datetime.fromisoformat(result["started_at"]) if result.get("started_at") else None,
+                completed_at=datetime.fromisoformat(result["completed_at"]) if result.get("completed_at") else None,
                 memories_created=result.get("memories_created", 0),
                 memory_ids=result.get("memory_ids", []),
                 error_message=result.get("error_message"),
@@ -368,8 +367,8 @@ class MemoriesInterface:
                 confidence=result["confidence"],
                 category=result.get("category"),
                 subcategory=result.get("subcategory"),
-                created_at=_parse_dt(result["created_at"]),
-                updated_at=_parse_dt(result.get("updated_at")),
+                created_at=datetime.fromisoformat(result["created_at"]),
+                updated_at=datetime.fromisoformat(result["updated_at"]) if result.get("updated_at") else None,
                 source_document_id=result.get("source_document_id"),
             )
 
@@ -550,7 +549,7 @@ class MemoriesInterface:
                 ingestion_id=UUID(result["ingestion_id"]),
                 document_id=result["document_id"],
                 status=IngestStatus(result["status"]),
-                queued_at=_parse_dt(result["queued_at"]),
+                queued_at=datetime.fromisoformat(result["queued_at"]),
             )
 
             latency_ms = int((time.time() - start_time) * 1000)
@@ -601,7 +600,7 @@ class MemoriesInterface:
 
             response = {
                 "memory_id": UUID(result["memory_id"]),
-                "deleted_at": _parse_dt(result["deleted_at"]),
+                "deleted_at": datetime.fromisoformat(result["deleted_at"]),
             }
 
             latency_ms = int((time.time() - start_time) * 1000)

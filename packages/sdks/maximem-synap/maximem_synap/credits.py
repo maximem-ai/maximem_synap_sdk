@@ -29,8 +29,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional, TYPE_CHECKING
 
-from .utils.datetime_utils import parse_iso_datetime as _parse_iso
-
 if TYPE_CHECKING:
     from .sdk import MaximemSynapSDK
 
@@ -99,6 +97,13 @@ class RedeemResult:
 # =============================================================================
 
 
+def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
 
 
 # =============================================================================
