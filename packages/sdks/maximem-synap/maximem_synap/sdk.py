@@ -369,6 +369,78 @@ class MaximemSynapSDK:
         self._initialized = True
         logger.info(f"SDK initialized for instance {self.instance_id}")
 
+    def anticipation_cache_snapshot(self) -> Dict[str, Any]:
+        """Return a read-only summary of the in-process anticipation cache.
+
+        Diagnostic-only view — counts, scope breakdown per bundle, recent
+        item content previews, and the BM25 corpus vocabulary. Useful for
+        verifying the gRPC anticipation pipeline is delivering bundles
+        with the right shape and that lookup tokens are present.
+
+        The cache itself remains private; this method projects a stable
+        public shape that won't change with internal refactors.
+        """
+        if self._anticipation_cache is None:
+            return {
+                "total_entries": 0,
+                "total_item_records": 0,
+                "scope_breakdown_overall": {},
+                "corpus_vocab_size": 0,
+                "corpus_vocab_sample": [],
+                "item_records": [],
+                "bundles": [],
+            }
+
+        from collections import Counter
+
+        cache = self._anticipation_cache
+        overall_scope: Counter = Counter()
+        bundles: List[Dict[str, Any]] = []
+        for bundle_id, entry in cache._entries.items():
+            per_bundle: Counter = Counter()
+            item_previews: List[Dict[str, Any]] = []
+            items_by_type = entry.bundle.get("items_by_type", {})
+            for t, items in items_by_type.items():
+                for it in items or []:
+                    sc = it.get("scope")
+                    overall_scope[sc] += 1
+                    per_bundle[sc] += 1
+                    item_previews.append({
+                        "type": t,
+                        "scope": sc,
+                        "content": (it.get("content") or "")[:140],
+                    })
+            bundles.append({
+                "bundle_id": bundle_id,
+                "entity_id": entry.entity_id,
+                "conversation_id": entry.conversation_id,
+                "bundle_type": entry.bundle_type,
+                "search_queries": entry.search_queries,
+                "scope_counts": dict(per_bundle),
+                "total_items": sum(per_bundle.values()),
+                "items": item_previews,
+            })
+
+        corpus_vocab_sample = sorted(getattr(cache, "_corpus_vocab", set()))[:80]
+        item_record_previews = [
+            {
+                "bundle_id": rec.bundle_id,
+                "item_type": rec.item_type,
+                "tokens": rec.tokens[:25],
+                "content": (rec.content or "")[:140],
+            }
+            for rec in getattr(cache, "_items", [])[:20]
+        ]
+        return {
+            "total_entries": len(cache._entries),
+            "total_item_records": len(cache._items),
+            "scope_breakdown_overall": dict(overall_scope),
+            "corpus_vocab_size": len(getattr(cache, "_corpus_vocab", set())),
+            "corpus_vocab_sample": corpus_vocab_sample,
+            "item_records": item_record_previews,
+            "bundles": bundles,
+        }
+
     async def shutdown(self) -> None:
         """Gracefully shutdown the SDK.
 
@@ -1693,6 +1765,10 @@ class InstanceInterface:
         session_id: Optional[str] = None,
         event_type: str = "user_message",
         metadata: Optional[Dict[str, str]] = None,
+        tool_name: Optional[str] = None,
+        tool_args: Optional[Dict[str, Any]] = None,
+        search_queries: Optional[List[str]] = None,
+        context_types: Optional[List[str]] = None,
     ) -> None:
         """Send a conversation message over the active gRPC stream.
 
@@ -1705,6 +1781,16 @@ class InstanceInterface:
             session_id: Session identifier
             event_type: Event type (user_message, assistant_message, tool_call, etc.)
             metadata: Additional string key-value metadata
+            tool_name: For tool_call events — the tool the agent is invoking.
+                The listening agent reads this when classifying TOOL_CALL signals
+                and uses it to anticipate the agent's next data needs.
+            tool_args: For tool_call events — JSON-encodable arguments dict.
+                Serialized into the tool_args_json proto field.
+            search_queries: For tool_call / context_request events — the
+                retrieval queries the agent plans to run. Listening agent
+                uses these as direct anticipation hints.
+            context_types: For tool_call / context_request events — the
+                memory categories the agent plans to fetch.
 
         Raises:
             ListeningNotActiveError: If listen() has not been called.
@@ -1714,7 +1800,7 @@ class InstanceInterface:
         if not self.is_listening:
             raise ListeningNotActiveError()
 
-        await self._controller._transport.send({
+        payload = {
             "event_type": event_type,
             "content": content,
             "role": role,
@@ -1723,7 +1809,17 @@ class InstanceInterface:
             "customer_id": customer_id or "",
             "session_id": session_id or "",
             "metadata": metadata or {},
-        })
+        }
+        if tool_name:
+            payload["tool_name"] = tool_name
+        if tool_args is not None:
+            payload["tool_args_json"] = json.dumps(tool_args)
+        if search_queries:
+            payload["search_queries"] = list(search_queries)
+        if context_types:
+            payload["context_types"] = list(context_types)
+
+        await self._controller._transport.send(payload)
 
     @property
     def is_listening(self) -> bool:
