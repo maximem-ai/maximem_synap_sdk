@@ -783,6 +783,7 @@ class MaximemSynapSDK:
                 types=types,
                 mode=mode,
                 user_id=user_id,
+                customer_id=customer_id,
             ))
             scope_labels.append("conversation")
 
@@ -1089,6 +1090,7 @@ class ConversationContextInterface:
         types: Optional[List[str]] = None,
         mode: str = "fast",
         user_id: Optional[str] = None,
+        customer_id: Optional[str] = None,
     ) -> ContextResponse:
         """Fetch context for a conversation.
 
@@ -1105,6 +1107,11 @@ class ConversationContextInterface:
                      user, preventing a bundle pushed for User A from being
                      served on User B's conversation lookup. Strongly
                      recommended; will become required in a future release.
+                     Also forwarded to the cloud so the conversation-fetch
+                     route doesn't have to derive scope from a (possibly
+                     not-yet-written) conversation row.
+            customer_id: Optional external customer id, forwarded with
+                     ``user_id`` for the same reason.
 
         Returns:
             ContextResponse with facts, preferences, episodes, etc.
@@ -1183,6 +1190,12 @@ class ConversationContextInterface:
                         "max_results": max_results,
                         "types": types or ["all"],
                         "mode": mode,
+                        # Pass scope ids when the caller supplied them so the
+                        # server doesn't have to derive them from the
+                        # conversation table. Avoids the async-write /
+                        # sync-read race against the tracker.
+                        **({"user_id": user_id} if user_id else {}),
+                        **({"customer_id": customer_id} if customer_id else {}),
                     },
                     correlation_id=correlation_id,
                 )
