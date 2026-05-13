@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import random
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 from datetime import datetime, timezone
 from enum import Enum
 
@@ -360,6 +360,45 @@ class GRPCTransport:
         event = synap_service_pb2.StreamEvent(conversation_event=conv_event)
         await self._stream.write(event)
 
+    async def send_context_used(
+        self,
+        *,
+        bundle_id: str,
+        conversation_id: str = "",
+        user_id: str = "",
+        customer_id: str = "",
+        served_item_ids: Optional[List[str]] = None,
+        scope: str = "",
+        source_bundle_ids: Optional[List[str]] = None,
+    ) -> None:
+        """Emit a ContextUsedEvent over the Listen stream.
+
+        Fire-and-forget telemetry: the SDK calls this after fetch() is served
+        from the anticipation cache so the server can attribute outcomes back
+        to the originating prefetch and update per-pattern hit rates.
+
+        Privacy: this method MUST NOT be called with raw user prompt content.
+        The proto only carries ids and scope.
+        """
+        if not self._stream:
+            raise ServiceUnavailableError("gRPC stream not connected")
+
+        from .proto import synap_service_pb2
+
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        used = synap_service_pb2.ContextUsedEvent(
+            bundle_id=bundle_id,
+            conversation_id=conversation_id or "",
+            user_id=user_id or "",
+            customer_id=customer_id or "",
+            served_item_ids=list(served_item_ids or []),
+            timestamp_ms=now_ms,
+            scope=scope or "",
+            source_bundle_ids=list(source_bundle_ids or []),
+        )
+        event = synap_service_pb2.StreamEvent(context_used=used)
+        await self._stream.write(event)
+
     def _handle_signal(self, signal) -> None:
         """Handle a StreamSignal from the server.
 
@@ -451,6 +490,11 @@ class GRPCTransport:
             "_anticipation_conversation_id": proto.anticipation_conversation_id or None,
             "_bundle_type": proto.bundle_type or "anticipation",
             "conversation_context": conv_ctx,
+            # Section 16 — bundle composition extensions. Defaults preserve
+            # backwards compatibility when the server is older than the SDK.
+            "_bundle_confidence": float(getattr(proto, "bundle_confidence", 0.0) or 0.0),
+            "_origin_pattern_id": getattr(proto, "origin_pattern_id", "") or "",
+            "_ttl_hint_seconds": int(getattr(proto, "ttl_hint_seconds", 0) or 0),
         }
 
     async def close(self) -> None:

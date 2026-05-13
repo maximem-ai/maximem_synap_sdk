@@ -7,14 +7,36 @@ from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class StreamEvent(_message.Message):
-    __slots__ = ("conversation_event", "heartbeat_ping", "session_control")
+    __slots__ = ("conversation_event", "heartbeat_ping", "session_control", "context_used")
     CONVERSATION_EVENT_FIELD_NUMBER: _ClassVar[int]
     HEARTBEAT_PING_FIELD_NUMBER: _ClassVar[int]
     SESSION_CONTROL_FIELD_NUMBER: _ClassVar[int]
+    CONTEXT_USED_FIELD_NUMBER: _ClassVar[int]
     conversation_event: ConversationEvent
     heartbeat_ping: HeartbeatPing
     session_control: SessionControl
-    def __init__(self, conversation_event: _Optional[_Union[ConversationEvent, _Mapping]] = ..., heartbeat_ping: _Optional[_Union[HeartbeatPing, _Mapping]] = ..., session_control: _Optional[_Union[SessionControl, _Mapping]] = ...) -> None: ...
+    context_used: ContextUsedEvent
+    def __init__(self, conversation_event: _Optional[_Union[ConversationEvent, _Mapping]] = ..., heartbeat_ping: _Optional[_Union[HeartbeatPing, _Mapping]] = ..., session_control: _Optional[_Union[SessionControl, _Mapping]] = ..., context_used: _Optional[_Union[ContextUsedEvent, _Mapping]] = ...) -> None: ...
+
+class ContextUsedEvent(_message.Message):
+    __slots__ = ("bundle_id", "conversation_id", "user_id", "customer_id", "served_item_ids", "timestamp_ms", "scope", "source_bundle_ids")
+    BUNDLE_ID_FIELD_NUMBER: _ClassVar[int]
+    CONVERSATION_ID_FIELD_NUMBER: _ClassVar[int]
+    USER_ID_FIELD_NUMBER: _ClassVar[int]
+    CUSTOMER_ID_FIELD_NUMBER: _ClassVar[int]
+    SERVED_ITEM_IDS_FIELD_NUMBER: _ClassVar[int]
+    TIMESTAMP_MS_FIELD_NUMBER: _ClassVar[int]
+    SCOPE_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_BUNDLE_IDS_FIELD_NUMBER: _ClassVar[int]
+    bundle_id: str
+    conversation_id: str
+    user_id: str
+    customer_id: str
+    served_item_ids: _containers.RepeatedScalarFieldContainer[str]
+    timestamp_ms: int
+    scope: str
+    source_bundle_ids: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, bundle_id: _Optional[str] = ..., conversation_id: _Optional[str] = ..., user_id: _Optional[str] = ..., customer_id: _Optional[str] = ..., served_item_ids: _Optional[_Iterable[str]] = ..., timestamp_ms: _Optional[int] = ..., scope: _Optional[str] = ..., source_bundle_ids: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class ConversationEvent(_message.Message):
     __slots__ = ("event_type", "conversation_id", "user_id", "role", "content", "customer_id", "session_id", "metadata", "timestamp_ms", "tool_name", "tool_args_json", "search_queries", "context_types")
@@ -107,7 +129,7 @@ class StreamSignal(_message.Message):
     def __init__(self, signal_type: _Optional[str] = ..., reason: _Optional[str] = ..., metadata: _Optional[_Mapping[str, str]] = ...) -> None: ...
 
 class ContextBundleProto(_message.Message):
-    __slots__ = ("bundle_id", "decision_id", "items_by_type", "total_tokens", "token_budget", "budget_exceeded", "retrieval_mode", "sources_queried", "degradation_level", "warnings", "created_at", "retrieval_time_ms", "cache_hit", "search_queries", "anticipation_user_id", "anticipation_customer_id", "anticipation_conversation_id", "search_keywords", "bundle_type", "conversation_context")
+    __slots__ = ("bundle_id", "decision_id", "items_by_type", "total_tokens", "token_budget", "budget_exceeded", "retrieval_mode", "sources_queried", "degradation_level", "warnings", "created_at", "retrieval_time_ms", "cache_hit", "search_queries", "anticipation_user_id", "anticipation_customer_id", "anticipation_conversation_id", "search_keywords", "bundle_type", "conversation_context", "bundle_confidence", "origin_pattern_id", "ttl_hint_seconds")
     class ItemsByTypeEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -135,6 +157,9 @@ class ContextBundleProto(_message.Message):
     SEARCH_KEYWORDS_FIELD_NUMBER: _ClassVar[int]
     BUNDLE_TYPE_FIELD_NUMBER: _ClassVar[int]
     CONVERSATION_CONTEXT_FIELD_NUMBER: _ClassVar[int]
+    BUNDLE_CONFIDENCE_FIELD_NUMBER: _ClassVar[int]
+    ORIGIN_PATTERN_ID_FIELD_NUMBER: _ClassVar[int]
+    TTL_HINT_SECONDS_FIELD_NUMBER: _ClassVar[int]
     bundle_id: str
     decision_id: str
     items_by_type: _containers.MessageMap[str, ContextItemList]
@@ -155,7 +180,10 @@ class ContextBundleProto(_message.Message):
     search_keywords: _containers.RepeatedScalarFieldContainer[str]
     bundle_type: str
     conversation_context: ConversationContextProto
-    def __init__(self, bundle_id: _Optional[str] = ..., decision_id: _Optional[str] = ..., items_by_type: _Optional[_Mapping[str, ContextItemList]] = ..., total_tokens: _Optional[int] = ..., token_budget: _Optional[int] = ..., budget_exceeded: bool = ..., retrieval_mode: _Optional[str] = ..., sources_queried: _Optional[_Iterable[str]] = ..., degradation_level: _Optional[str] = ..., warnings: _Optional[_Iterable[str]] = ..., created_at: _Optional[str] = ..., retrieval_time_ms: _Optional[int] = ..., cache_hit: bool = ..., search_queries: _Optional[_Iterable[str]] = ..., anticipation_user_id: _Optional[str] = ..., anticipation_customer_id: _Optional[str] = ..., anticipation_conversation_id: _Optional[str] = ..., search_keywords: _Optional[_Iterable[str]] = ..., bundle_type: _Optional[str] = ..., conversation_context: _Optional[_Union[ConversationContextProto, _Mapping]] = ...) -> None: ...
+    bundle_confidence: float
+    origin_pattern_id: str
+    ttl_hint_seconds: int
+    def __init__(self, bundle_id: _Optional[str] = ..., decision_id: _Optional[str] = ..., items_by_type: _Optional[_Mapping[str, ContextItemList]] = ..., total_tokens: _Optional[int] = ..., token_budget: _Optional[int] = ..., budget_exceeded: bool = ..., retrieval_mode: _Optional[str] = ..., sources_queried: _Optional[_Iterable[str]] = ..., degradation_level: _Optional[str] = ..., warnings: _Optional[_Iterable[str]] = ..., created_at: _Optional[str] = ..., retrieval_time_ms: _Optional[int] = ..., cache_hit: bool = ..., search_queries: _Optional[_Iterable[str]] = ..., anticipation_user_id: _Optional[str] = ..., anticipation_customer_id: _Optional[str] = ..., anticipation_conversation_id: _Optional[str] = ..., search_keywords: _Optional[_Iterable[str]] = ..., bundle_type: _Optional[str] = ..., conversation_context: _Optional[_Union[ConversationContextProto, _Mapping]] = ..., bundle_confidence: _Optional[float] = ..., origin_pattern_id: _Optional[str] = ..., ttl_hint_seconds: _Optional[int] = ...) -> None: ...
 
 class ConversationContextProto(_message.Message):
     __slots__ = ("summary", "current_state_json", "key_extractions_json", "recent_turns", "compaction_id", "compacted_at", "conversation_id")

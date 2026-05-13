@@ -115,6 +115,235 @@ async def _emit_context_fetch_event(
         logger.debug("context_fetch emit failed (non-fatal): %s", e)
 
 
+async def _emit_context_used_event(
+    sdk,
+    *,
+    bundle_id: str,
+    served_item_ids: List[str],
+    scope: str,
+    conversation_id: str = "",
+    user_id: str = "",
+    customer_id: str = "",
+    source_bundle_ids: Optional[List[str]] = None,
+) -> None:
+    """Emit a context_used event over the Listen stream (fire-and-forget).
+
+    Fired by each fetch() path after a successful anticipation cache hit.
+    Drives the server's learning loop: per-prefetch outcome scoring,
+    per-pattern hit rates, per-query-family priors. Privacy: no raw user
+    prompt content is sent — only ids and scope.
+    """
+    try:
+        if not sdk.instance.is_listening:
+            return
+        await sdk.instance._controller._transport.send_context_used(
+            bundle_id=bundle_id,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            customer_id=customer_id,
+            served_item_ids=served_item_ids,
+            scope=scope,
+            source_bundle_ids=source_bundle_ids or [],
+        )
+    except Exception as e:
+        logger.debug("context_used emit failed (non-fatal): %s", e)
+
+
+def _extract_served_item_ids(anticipated: Dict) -> List[str]:
+    """Pull item ids out of an anticipation cache lookup result."""
+    ids: List[str] = []
+    seen = set()
+    for item in anticipated.get("items") or []:
+        iid = item.get("item_id") or item.get("id") or ""
+        if iid and iid not in seen:
+            seen.add(iid)
+            ids.append(iid)
+    return ids
+
+
+def _default_tool_description(scope: str) -> str:
+    """Default LLM-facing description for the ``as_tool`` helper. Phrased to
+    prime the agent to call it for context retrieval."""
+    base = (
+        "Retrieve stored context (facts, preferences, recent episodes, "
+        "emotions, temporal events) from Synap memory."
+    )
+    if scope == "conversation":
+        return (
+            base + " Scoped to a specific conversation. Call this when you "
+            "need facts already established in the current conversation, "
+            "or to reload context after a topic shift."
+        )
+    if scope == "user":
+        return (
+            base + " Scoped to the user's long-term memory. Call this when "
+            "you need to recall who the user is, their preferences, or "
+            "their history across conversations."
+        )
+    if scope == "customer":
+        return (
+            base + " Scoped to the customer/organization. Call this when "
+            "you need facts about the customer org rather than an individual."
+        )
+    if scope == "client":
+        return (
+            base + " Scoped to the integrating client/product. Call this for "
+            "product-level knowledge (e.g. policies, documentation)."
+        )
+    return (
+        base + " Cross-scope: merges conversation, user, customer, and "
+        "client memory in one call. Call this at the start of a turn when "
+        "you need general grounding before responding."
+    )
+
+
+def _tool_input_schema(scope: str, *, has_conversation_id: bool) -> Dict[str, Any]:
+    """JSON-Schema for the LLM-callable arguments. Scope ids closed over by
+    ``as_tool`` are NOT in the schema — the LLM only chooses runtime args
+    (query, types, limits)."""
+    props: Dict[str, Any] = {
+        "search_query": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Optional list of search queries describing what context "
+                "you need. Free-form natural language is fine. Omit to "
+                "retrieve the most relevant recent context."
+            ),
+        },
+        "max_results": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "description": "Maximum items to return (default 10).",
+        },
+        "types": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": ["facts", "preferences", "episodes", "emotions", "temporal_events"],
+            },
+            "description": (
+                "Filter to specific memory categories. Omit to retrieve all."
+            ),
+        },
+        "mode": {
+            "type": "string",
+            "enum": ["fast", "accurate"],
+            "description": (
+                "Retrieval mode. 'fast' = low-latency (~50ms); 'accurate' = "
+                "LLM-decomposed multi-query (~200-500ms). Default 'fast'."
+            ),
+        },
+    }
+    if scope == "conversation" and not has_conversation_id:
+        # Closed-over conversation_id wasn't provided; LLM must supply per call.
+        props["conversation_id"] = {
+            "type": "string",
+            "description": "The conversation id to fetch context for.",
+        }
+        required = ["conversation_id"]
+    else:
+        required = []
+    return {
+        "type": "object",
+        "properties": props,
+        "required": required,
+        "additionalProperties": False,
+    }
+
+
+async def _invoke_scope_fetch(
+    *,
+    sdk: "MaximemSynapSDK",
+    scope: str,
+    user_id: Optional[str],
+    customer_id: Optional[str],
+    conversation_id: Optional[str],
+    call_args: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Dispatch into the right scope's fetch with closed-over ids merged in.
+
+    Returns a plain dict (not a Pydantic model) so the host runtime can
+    JSON-serialize directly into the LLM's tool-result message.
+    """
+    search_query = call_args.get("search_query")
+    max_results = int(call_args.get("max_results") or 10)
+    types = call_args.get("types")
+    mode = str(call_args.get("mode") or "fast")
+    call_conv_id = call_args.get("conversation_id") or conversation_id
+
+    if scope == "unified":
+        response = await sdk.fetch(
+            conversation_id=call_conv_id,
+            user_id=user_id,
+            customer_id=customer_id,
+            search_query=search_query,
+            max_results=max_results,
+            types=types,
+            mode=mode,
+        )
+        return {
+            "formatted_context": response.formatted_context,
+            "scopes_queried": response.scopes_queried,
+            "total_items": response.total_items,
+        }
+
+    if scope == "conversation":
+        if not call_conv_id:
+            return {"error": "conversation_id is required", "items": []}
+        response = await sdk.conversation.context.fetch(
+            conversation_id=call_conv_id,
+            search_query=search_query,
+            max_results=max_results,
+            types=types,
+            mode=mode,
+            user_id=user_id,
+        )
+    elif scope == "user":
+        response = await sdk.user.context.fetch(
+            user_id=user_id,
+            conversation_id=call_conv_id,
+            search_query=search_query,
+            max_results=max_results,
+            types=types,
+            mode=mode,
+            customer_id=customer_id,
+        )
+    elif scope == "customer":
+        response = await sdk.customer.context.fetch(
+            customer_id=customer_id,
+            conversation_id=call_conv_id,
+            search_query=search_query,
+            max_results=max_results,
+            types=types,
+            mode=mode,
+        )
+    else:  # client
+        response = await sdk.client.context.fetch(
+            conversation_id=call_conv_id,
+            search_query=search_query,
+            max_results=max_results,
+            types=types,
+            mode=mode,
+        )
+
+    return {
+        "facts": [f.model_dump() if hasattr(f, "model_dump") else f for f in response.facts],
+        "preferences": [
+            p.model_dump() if hasattr(p, "model_dump") else p for p in response.preferences
+        ],
+        "episodes": [e.model_dump() if hasattr(e, "model_dump") else e for e in response.episodes],
+        "emotions": [
+            em.model_dump() if hasattr(em, "model_dump") else em for em in response.emotions
+        ],
+        "temporal_events": [
+            te.model_dump() if hasattr(te, "model_dump") else te
+            for te in response.temporal_events
+        ],
+    }
+
+
 def _merge_user_summary_into_response(
     response: ContextResponse,
     summary_bundle: Dict,
@@ -543,12 +772,17 @@ class MaximemSynapSDK:
         scope_labels = []
 
         if conversation_id and (not scopes or "conversation" in scopes):
+            # Section 15: thread user_id into the conversation-scope sub-fetch
+            # so the SDK's anticipation cache can apply its strict per-user
+            # scope filter. Without this the conversation lookup falls back to
+            # broad matching, losing the cross-user privacy guarantee.
             tasks.append(self.conversation.context.fetch(
                 conversation_id=conversation_id,
                 search_query=search_query,
                 max_results=max_results,
                 types=types,
                 mode=mode,
+                user_id=user_id,
             ))
             scope_labels.append("conversation")
 
@@ -651,6 +885,118 @@ class MaximemSynapSDK:
         if self._telemetry_collector:
             self._telemetry_collector.emit_dict(event)
 
+    def as_tool(
+        self,
+        *,
+        scope: str = "user",
+        user_id: Optional[str] = None,
+        customer_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        style: str = "openai",
+    ) -> Dict[str, Any]:
+        """Return an LLM-ready tool definition for fetching Synap context.
+
+        Closes over the scope identifiers so the developer (and the LLM
+        agent) can't accidentally drop the per-user privacy filter the
+        Section 15 anticipation cache relies on. The returned dict carries
+        the schema + a bound ``handler`` coroutine the host runtime can
+        invoke when the LLM calls the tool.
+
+        Anticipation-friendliness note: tool wrapping works, but the
+        ``sdk.fetch(...)`` pre-fetch path is the default-recommended
+        integration. Use this helper only when the LLM truly needs agency
+        over when context is fetched mid-reasoning. See
+        ``docs/architecture/anticipation_feature_overview.md`` for the
+        full discussion.
+
+        Args:
+            scope: Which scope to fetch from. One of "conversation", "user",
+                   "customer", "client", "unified" (cross-scope).
+            user_id: Closed-over user id; required for "user" and
+                     recommended for "conversation"/"unified" (Section 15).
+            customer_id: Closed-over customer id; required for "customer".
+            conversation_id: Optional closed-over conversation id. When
+                             provided, the tool fetches for this conversation;
+                             when omitted, the LLM supplies it per call.
+            name: Override the tool name. Defaults to
+                  ``synap_fetch_{scope}_context``.
+            description: Override the tool description. Defaults to a
+                         scope-specific blurb that primes the LLM to call
+                         it for context retrieval.
+            style: "openai" or "anthropic". Controls the dict shape:
+                   - "openai": ``{"type":"function","function":{...}}``
+                   - "anthropic": ``{"name","description","input_schema"}``
+
+        Returns:
+            Tool definition dict. Always carries an ``async handler`` key
+            with the bound coroutine; runtimes that don't use it can ignore.
+
+        Examples:
+            >>> tool = sdk.as_tool(scope="user", user_id="user-1")
+            >>> # In an OpenAI tool-call loop:
+            >>> response = await llm.chat(tools=[tool])
+            >>> # In an Anthropic agent loop:
+            >>> tool = sdk.as_tool(scope="unified", user_id="u", style="anthropic")
+        """
+        scope = scope.lower()
+        valid = {"conversation", "user", "customer", "client", "unified"}
+        if scope not in valid:
+            raise InvalidInputError(
+                f"scope must be one of {sorted(valid)}, got {scope!r}"
+            )
+
+        if scope == "user" and not user_id:
+            raise InvalidInputError("scope='user' requires user_id")
+        if scope == "customer" and not customer_id:
+            raise InvalidInputError("scope='customer' requires customer_id")
+        if scope == "conversation" and not user_id:
+            # Not a hard error — anticipation cache will refuse cross-user
+            # matches anyway — but warn the caller that they're leaving
+            # privacy on the floor.
+            logger.warning(
+                "as_tool(scope='conversation') without user_id: the SDK "
+                "anticipation cache cannot apply per-user filtering. Pass "
+                "user_id to enable the Section 15 privacy guarantee."
+            )
+
+        tool_name = name or f"synap_fetch_{scope}_context"
+        tool_desc = description or _default_tool_description(scope)
+        schema = _tool_input_schema(scope, has_conversation_id=conversation_id is not None)
+
+        # Closed-over handler. The LLM passes the call-time params; the
+        # closed-over scope ids are merged in here so the LLM can't drop
+        # them (and the privacy filter holds).
+        async def handler(**call_args: Any) -> Dict[str, Any]:
+            return await _invoke_scope_fetch(
+                sdk=self,
+                scope=scope,
+                user_id=user_id,
+                customer_id=customer_id,
+                conversation_id=conversation_id,
+                call_args=call_args,
+            )
+
+        if style == "openai":
+            return {
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "description": tool_desc,
+                    "parameters": schema,
+                },
+                "handler": handler,
+            }
+        if style == "anthropic":
+            return {
+                "name": tool_name,
+                "description": tool_desc,
+                "input_schema": schema,
+                "handler": handler,
+            }
+        raise InvalidInputError(f"style must be 'openai' or 'anthropic', got {style!r}")
+
 
 # Sub-interfaces for domain-oriented API
 
@@ -742,6 +1088,7 @@ class ConversationContextInterface:
         max_results: int = 10,
         types: Optional[List[str]] = None,
         mode: str = "fast",
+        user_id: Optional[str] = None,
     ) -> ContextResponse:
         """Fetch context for a conversation.
 
@@ -753,6 +1100,11 @@ class ConversationContextInterface:
             mode: Retrieval mode - "fast" (default) or "accurate"
                   - "fast": Direct query, low latency (~50-100ms)
                   - "accurate": LLM-enhanced queries, higher quality (~200-500ms)
+            user_id: Optional external user id. Section 15 — passing this
+                     scopes the in-process anticipation cache lookup to that
+                     user, preventing a bundle pushed for User A from being
+                     served on User B's conversation lookup. Strongly
+                     recommended; will become required in a future release.
 
         Returns:
             ContextResponse with facts, preferences, episodes, etc.
@@ -776,9 +1128,13 @@ class ConversationContextInterface:
             "mode": mode,
         }
 
-        # Check anticipation cache first (bundles pre-fetched via gRPC stream)
+        # Check anticipation cache first (bundles pre-fetched via gRPC stream).
+        # Section 15: thread user_id through so the per-user filter can do
+        # its job. Without this, the lookup matched conversation_id alone and
+        # could return bundles whose entity_id was a *different* user.
         anticipated = self._sdk._anticipation_cache.lookup(
             search_query=search_query,
+            entity_id=user_id,
             conversation_id=conversation_id,
         )
         if anticipated:
@@ -787,6 +1143,14 @@ class ConversationContextInterface:
                 scope="conversation", mode=mode,
                 telemetry_collector=self._sdk._telemetry_collector,
             )
+            asyncio.ensure_future(_emit_context_used_event(
+                self._sdk,
+                bundle_id=anticipated.get("bundle_id", ""),
+                served_item_ids=_extract_served_item_ids(anticipated),
+                scope="conversation",
+                conversation_id=conversation_id,
+                source_bundle_ids=anticipated.get("source_bundle_ids", []),
+            ))
         else:
             # Check local cache
             cached = self._sdk._cache_manager.get(
@@ -871,10 +1235,12 @@ class ConversationContextInterface:
             conversation_id=conversation_id,
         ))
 
-        # Periodic user summary injection
+        # Periodic user summary injection. Section 15 — only inject when the
+        # caller passed a user_id; without it we cannot safely scope the
+        # summary lookup, so we skip rather than risk cross-user splice.
         turn = self._sdk._increment_turn(conversation_id)
-        if self._sdk._should_inject_user_summary(conversation_id):
-            summary = self._sdk._anticipation_cache.lookup_user_summary()
+        if user_id and self._sdk._should_inject_user_summary(conversation_id):
+            summary = self._sdk._anticipation_cache.lookup_user_summary(entity_id=user_id)
             if summary:
                 response = _merge_user_summary_into_response(response, summary)
                 logger.debug("Injected user summary at turn %d for conversation %s", turn, conversation_id)
@@ -1258,6 +1624,16 @@ class UserContextInterface:
                 scope="user", mode=mode,
                 telemetry_collector=self._sdk._telemetry_collector,
             )
+            asyncio.ensure_future(_emit_context_used_event(
+                self._sdk,
+                bundle_id=anticipated.get("bundle_id", ""),
+                served_item_ids=_extract_served_item_ids(anticipated),
+                scope="user",
+                user_id=user_id,
+                customer_id=customer_id or "",
+                conversation_id=conversation_id or "",
+                source_bundle_ids=anticipated.get("source_bundle_ids", []),
+            ))
         else:
             # Check local cache
             cached = self._sdk._cache_manager.get(
@@ -1410,6 +1786,15 @@ class CustomerContextInterface:
                 scope="customer", mode=mode,
                 telemetry_collector=self._sdk._telemetry_collector,
             )
+            asyncio.ensure_future(_emit_context_used_event(
+                self._sdk,
+                bundle_id=anticipated.get("bundle_id", ""),
+                served_item_ids=_extract_served_item_ids(anticipated),
+                scope="customer",
+                customer_id=customer_id,
+                conversation_id=conversation_id or "",
+                source_bundle_ids=anticipated.get("source_bundle_ids", []),
+            ))
         else:
             cached = self._sdk._cache_manager.get(
                 scope=CacheScope.CUSTOMER,
@@ -1559,6 +1944,14 @@ class ClientContextInterface:
                 scope="client", mode=mode,
                 telemetry_collector=self._sdk._telemetry_collector,
             )
+            asyncio.ensure_future(_emit_context_used_event(
+                self._sdk,
+                bundle_id=anticipated.get("bundle_id", ""),
+                served_item_ids=_extract_served_item_ids(anticipated),
+                scope="client",
+                conversation_id=conversation_id or "",
+                source_bundle_ids=anticipated.get("source_bundle_ids", []),
+            ))
         else:
             cached = self._sdk._cache_manager.get(
                 scope=CacheScope.CLIENT,

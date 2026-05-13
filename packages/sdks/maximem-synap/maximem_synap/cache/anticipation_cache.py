@@ -21,6 +21,12 @@ class _CacheEntry:
     stored_at: float
     bundle_type: str = "anticipation"
     search_queries: List[str] = field(default_factory=list)
+    # Section 16 — bundle composition extensions, captured at store time so
+    # lookups can rank by confidence and honor a per-bundle TTL hint without
+    # walking back into the raw bundle dict.
+    confidence: float = 0.0
+    origin_pattern_id: str = ""
+    ttl_hint_seconds: int = 0
 
 
 @dataclass
@@ -101,6 +107,9 @@ class AnticipationCache:
             stored_at=time.monotonic(),
             bundle_type=bundle_type,
             search_queries=search_queries,
+            confidence=float(bundle.get("_bundle_confidence", 0.0) or 0.0),
+            origin_pattern_id=bundle.get("_origin_pattern_id", "") or "",
+            ttl_hint_seconds=int(bundle.get("_ttl_hint_seconds", 0) or 0),
         )
 
         items_by_type = bundle.get("items_by_type", {})
@@ -300,6 +309,7 @@ class AnticipationCache:
             "source": "anticipation_cache",
             "search_queries": base_entry.search_queries if base_entry else [],
             "search_keywords": [],
+            "source_bundle_ids": sorted(bundle_ids_used),
             "_anticipation_user_id": base_entry.entity_id if base_entry else None,
             "_anticipation_conversation_id": base_entry.conversation_id if base_entry else None,
             "_bundle_type": "anticipation",
@@ -310,12 +320,27 @@ class AnticipationCache:
         entity_id: Optional[str],
         conversation_id: Optional[str],
     ) -> Set[str]:
+        """Return bundle ids that match the requested scope.
+
+        Section 15 — privacy hardening:
+        - When ``conversation_id`` is requested, the entry's stored
+          ``conversation_id`` must match exactly. Bundles with a falsy
+          (None / "") conversation_id are NOT eligible — that previously
+          allowed cross-conversation leakage of cross-emitted bundles.
+        - When ``entity_id`` is requested, the entry must match (or be the
+          explicit ``"_any"`` sentinel that the SDK uses for client-scope
+          fetches). Bundles whose stored entity_id doesn't match a specific
+          entity_id request never participate.
+        """
         valid = set()
         for bid, entry in self._entries.items():
             if entity_id is not None and entry.entity_id not in (entity_id, "_any"):
                 continue
             if conversation_id is not None:
-                if entry.conversation_id and entry.conversation_id != conversation_id:
+                # Strict match — no falsy fallback. A bundle that came in
+                # without a conversation_id is not eligible for a
+                # conversation-scoped lookup.
+                if entry.conversation_id != conversation_id:
                     continue
             valid.add(bid)
         return valid
@@ -340,11 +365,26 @@ class AnticipationCache:
         self,
         entity_id: Optional[str] = None,
     ) -> Optional[Dict]:
+        """Return the freshest user_summary bundle for ``entity_id``.
+
+        Section 15 — privacy hardening: callers MUST supply an ``entity_id``.
+        Previously a missing entity_id returned the freshest summary across
+        all users in the cache, which could splice User A's summary into
+        User B's response on the conversation-scope path. We now refuse the
+        lookup unless an entity_id is provided.
+        """
+        if not entity_id:
+            logger.debug(
+                "lookup_user_summary called without entity_id — refusing "
+                "to avoid cross-user summary leakage"
+            )
+            return None
+
         self._evict_expired()
         candidates = {
             bid: entry for bid, entry in self._entries.items()
             if entry.bundle_type == "user_summary"
-            and (entity_id is None or entry.entity_id in (entity_id, "_any"))
+            and entry.entity_id in (entity_id, "_any")
         }
         if not candidates:
             return None
