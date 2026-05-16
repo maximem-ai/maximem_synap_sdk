@@ -68,7 +68,7 @@ class AnticipationCache:
         total_lt_items = sum(
             len(v) for v in items_by_type.values() if isinstance(v, list)
         )
-        conv_ctx = bundle.get("conversation_context", {})
+        conv_ctx = bundle.get("conversation_context") or {}
         has_conv_context = bool(
             conv_ctx.get("summary")
             or conv_ctx.get("recent_turns")
@@ -141,7 +141,7 @@ class AnticipationCache:
                 self._corpus_vocab.update(tokens)
                 items_added += 1
 
-        conv_ctx = bundle.get("conversation_context", {})
+        conv_ctx = bundle.get("conversation_context") or {}
         key_ext = conv_ctx.get("key_extractions", {}) if conv_ctx else {}
         for ext_type in ("facts", "decisions", "preferences", "constraints"):
             ext_items = key_ext.get(ext_type, [])
