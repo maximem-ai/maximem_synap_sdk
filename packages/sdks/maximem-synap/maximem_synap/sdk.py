@@ -536,11 +536,20 @@ class MaximemSynapSDK:
 
         Must be called before any context operations. Reads the Synap API key
         from the api_key= kwarg (highest priority) or the SYNAP_API_KEY env var.
+
+        Bootstraps the SDK's `client_id` and `instance_id` from the server's
+        ``GET /api/v1/auth/whoami`` endpoint. The API key is the authoritative
+        identity on the server, so the SDK shouldn't require callers to also
+        plumb client_id / instance_id separately — that was the source of a
+        silent cache-scope bug where the SDK's empty client_id caused
+        every client-shared anticipation bundle to fail the scope filter.
         """
         if self._initialized:
             return
 
-        self._credential_manager = CredentialManager(instance_id=self.instance_id)
+        self._credential_manager = CredentialManager(
+            instance_id=self.instance_id,
+        )
 
         try:
             credentials = self._credential_manager.load(api_key=self._api_key)
@@ -550,7 +559,52 @@ class MaximemSynapSDK:
         except Exception as e:
             raise AuthenticationError(f"SDK initialization failed: {e}") from e
 
-        # Initialize cache
+        # Initialize HTTP transport first so we can resolve identity via
+        # whoami before the cache manager / telemetry collector (which both
+        # consume client_id) are constructed. The transport doesn't need a
+        # known instance_id at construction time — it pulls auth headers
+        # from the AuthContext passed per-request, and falls back to a
+        # generated correlation_id when instance_id is empty.
+        self._http_transport = HTTPTransport(
+            instance_id=self.instance_id,
+            base_url=self._config.api_base_url,
+            timeouts=self._config.timeouts,
+            retry_policy=self._config.retry_policy,
+            telemetry_callback=self._on_telemetry_event,
+        )
+
+        # Resolve client_id (and any missing instance_id) from the api_key.
+        # Best-effort: a whoami failure leaves whatever the env / explicit
+        # path produced and falls through to the existing behavior. Skipped
+        # if everything is already known to avoid an extra round-trip.
+        if not self._client_id or not self.instance_id:
+            try:
+                from .auth.models import AuthContext
+                bootstrap_ctx = AuthContext(
+                    client_id=self._client_id or "",
+                    instance_id=self.instance_id or "",
+                    api_key=self._api_key or os.environ.get("SYNAP_API_KEY", ""),
+                )
+                whoami = await self._http_transport.get(
+                    "/api/v1/auth/whoami", auth_context=bootstrap_ctx,
+                )
+                resolved_client_id = whoami.get("client_id") or ""
+                resolved_instance_id = whoami.get("instance_id") or ""
+                if resolved_client_id and not self._client_id:
+                    self._client_id = resolved_client_id
+                    if self._credential_manager._credentials is not None:
+                        self._credential_manager._credentials.client_id = resolved_client_id
+                if resolved_instance_id and not self.instance_id:
+                    self.instance_id = resolved_instance_id
+                    if self._credential_manager._credentials is not None:
+                        self._credential_manager._credentials.instance_id = resolved_instance_id
+                    self._http_transport.instance_id = resolved_instance_id
+            except Exception as e:
+                logger.warning(
+                    "SDK whoami bootstrap failed (non-fatal, will fall back to env): %s", e,
+                )
+
+        # Initialize cache (now that client_id is known)
         if self._config.cache_backend:
             self._cache_manager = CacheManager(
                 client_id=self._client_id,
@@ -562,15 +616,6 @@ class MaximemSynapSDK:
                 client_id=self._client_id,
                 enabled=False,
             )
-
-        # Initialize main HTTP transport
-        self._http_transport = HTTPTransport(
-            instance_id=self.instance_id,
-            base_url=self._config.api_base_url,
-            timeouts=self._config.timeouts,
-            retry_policy=self._config.retry_policy,
-            telemetry_callback=self._on_telemetry_event,
-        )
 
         # Initialize telemetry transport
         self._telemetry_transport = TelemetryTransport(
@@ -1139,10 +1184,16 @@ class ConversationContextInterface:
         # Section 15: thread user_id through so the per-user filter can do
         # its job. Without this, the lookup matched conversation_id alone and
         # could return bundles whose entity_id was a *different* user.
+        #
+        # Funnel scope: thread (user_id, customer_id, client_id) so the
+        # lookup widens to customer-shared and client-shared bundles when
+        # appropriate. See AnticipationCache._get_valid_bundle_ids.
         anticipated = self._sdk._anticipation_cache.lookup(
             search_query=search_query,
             entity_id=user_id,
             conversation_id=conversation_id,
+            customer_id=customer_id,
+            client_id=self._sdk._client_id,
         )
         if anticipated:
             response = _build_anticipation_response(
@@ -1626,10 +1677,14 @@ class UserContextInterface:
             "mode": mode,
         }
 
-        # Check anticipation cache first (bundles pre-fetched via gRPC stream)
+        # Check anticipation cache first (bundles pre-fetched via gRPC stream).
+        # Funnel scope: widen to customer-shared + client-shared bundles when
+        # the request has those IDs available.
         anticipated = self._sdk._anticipation_cache.lookup(
             search_query=search_query,
             entity_id=user_id,
+            customer_id=customer_id,
+            client_id=self._sdk._client_id,
         )
         if anticipated:
             response = _build_anticipation_response(
@@ -1788,10 +1843,14 @@ class CustomerContextInterface:
             "mode": mode,
         }
 
-        # Check anticipation cache first (bundles pre-fetched via gRPC stream)
+        # Check anticipation cache first (bundles pre-fetched via gRPC stream).
+        # Funnel scope: customer-scope requests widen to client-shared bundles
+        # but explicitly DO NOT widen to user-scoped bundles (those would
+        # leak one visitor's data into another visitor's customer fetch).
         anticipated = self._sdk._anticipation_cache.lookup(
             search_query=search_query,
             entity_id=customer_id,
+            client_id=self._sdk._client_id,
         )
         if anticipated:
             response = _build_anticipation_response(
@@ -1946,10 +2005,15 @@ class ClientContextInterface:
             "mode": mode,
         }
 
-        # Check anticipation cache first (bundles pre-fetched via gRPC stream)
+        # Check anticipation cache first (bundles pre-fetched via gRPC stream).
+        # Funnel scope: client-scope requests accept only client-keyed
+        # bundles or the "_any" sentinel. The "_client" entity_id remains
+        # to keep matching legacy bundles that were stored under that
+        # sentinel before the client_id marker existed.
         anticipated = self._sdk._anticipation_cache.lookup(
             search_query=search_query,
-            entity_id="_client",  # sentinel — prevents matching user/customer scoped bundles
+            entity_id="_client",
+            client_id=self._sdk._client_id,
         )
         if anticipated:
             response = _build_anticipation_response(
@@ -2226,6 +2290,64 @@ class InstanceInterface:
             payload["context_types"] = list(context_types)
 
         await self._controller._transport.send(payload)
+
+    async def record_thinking(
+        self,
+        content: str,
+        *,
+        conversation_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        customer_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        step_index: Optional[int] = None,
+        thought_type: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """Stream a reasoning step from the customer's agent to Synap.
+
+        Sends an ``agent_thinking`` event over the active gRPC stream so
+        the Synap Anticipation Agent can observe what the customer's
+        agent is thinking between ``user_message`` and ``assistant_message``.
+        This is how the anticipation pipeline gets visibility into the
+        client agent's reasoning — without it, anticipation only sees the
+        observable inputs (user msg, tool calls, fetches) and the final
+        output (assistant msg), not the deliberation in between.
+
+        Args:
+            content: The reasoning text (a chain-of-thought step, a
+                planned tool call, a self-correction, etc).
+            conversation_id: Conversation this thought belongs to.
+            user_id / customer_id: Identity for the conversation.
+            session_id: Optional session identifier.
+            step_index: Ordinal of this thought within the current turn,
+                if the customer agent tracks them. Surfaces in the
+                dashboard so operators can replay the reasoning timeline.
+            thought_type: Optional category — e.g. ``"plan"``, ``"reflect"``,
+                ``"tool_decision"``, ``"self_correction"``. The Synap
+                anticipation agent treats different kinds differently
+                when deciding whether to act.
+            metadata: Extra string key/value pairs (forwarded as gRPC
+                metadata).
+
+        Raises:
+            ListeningNotActiveError: If ``listen()`` has not been called.
+        """
+        md: Dict[str, str] = dict(metadata or {})
+        if step_index is not None:
+            md["step_index"] = str(step_index)
+        if thought_type:
+            md["thought_type"] = thought_type
+
+        await self.send_message(
+            content=content,
+            role="assistant",
+            conversation_id=conversation_id,
+            user_id=user_id,
+            customer_id=customer_id,
+            session_id=session_id,
+            event_type="agent_thinking",
+            metadata=md,
+        )
 
     @property
     def is_listening(self) -> bool:

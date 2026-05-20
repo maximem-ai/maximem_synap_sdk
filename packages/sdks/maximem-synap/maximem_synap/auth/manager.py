@@ -26,7 +26,14 @@ class CredentialManager:
         self._storage = EnvironmentCredentialStorage(instance_id)
 
     def load(self, api_key: Optional[str] = None) -> Credentials:
-        """Resolve credentials from the api_key kwarg or SYNAP_API_KEY."""
+        """Resolve credentials from the api_key kwarg or SYNAP_API_KEY.
+
+        ``client_id`` is intentionally left empty here — the SDK calls
+        ``GET /api/v1/auth/whoami`` during initialize() to resolve the
+        canonical identity from the api_key. The env var
+        ``SYNAP_CLIENT_ID`` is still honored as a fallback for offline /
+        unreachable-server cases.
+        """
         key = api_key or os.environ.get("SYNAP_API_KEY")
         if not key:
             raise AuthenticationError(
