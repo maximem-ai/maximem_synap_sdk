@@ -259,6 +259,84 @@ async def _emit_context_assembled_event(
         logger.debug("context_assembled emit failed (non-fatal): %s", e)
 
 
+def _should_skip_server_st(sdk: "MaximemSynapSDK", conversation_id: Optional[str]) -> bool:
+    """Return True when the SDK has a warm enough ShortTermContextStore
+    entry for the conversation that we can skip server-side ST assembly.
+
+    Warm = a previous ``compaction_update`` bundle landed for this
+    conversation (so the cache holds a real summary, not just locally
+    appended raw turns). Without that we still need the server's summary.
+
+    Off when ``sdk_st_authoritative`` flag is false. Off when no
+    conversation id is supplied (other-scoped fetches without a
+    conversation can't be merged locally).
+    """
+    if not conversation_id:
+        return False
+    if not sdk._is_st_authoritative():
+        return False
+    entry = sdk._st_store.get(conversation_id)
+    return entry is not None and entry.has_compaction()
+
+
+def _merge_local_st_into_response(
+    sdk: "MaximemSynapSDK",
+    response: Any,
+    conversation_id: Optional[str],
+) -> None:
+    """Splice the SDK-side cached short-term block onto ``response.conversation_context``.
+
+    Called after a Phase 2 fetch where the server returned no ST blob
+    (because the SDK told it to skip via include_conversation_context=False).
+    The response shape stays identical to the legacy form: callers see a
+    ``ConversationContextModel`` whether the data came from the server or
+    from the local cache.
+
+    No-op when the cache entry is missing — callers should already have
+    been guarded by ``_should_skip_server_st`` upstream, but be defensive.
+    """
+    if not conversation_id:
+        return
+    entry = sdk._st_store.get(conversation_id)
+    if entry is None:
+        return
+    try:
+        from .models.context import ConversationContextModel
+    except Exception:
+        logger.debug("ConversationContextModel import failed; skipping local merge")
+        return
+
+    recent_turns = []
+    for t in entry.recent_turns:
+        ts = t.get("timestamp")
+        if isinstance(ts, datetime):
+            ts = ts.isoformat()
+        recent_turns.append({
+            "role": t.get("role", "user"),
+            "content": t.get("content", ""),
+            "timestamp": ts,
+        })
+
+    try:
+        merged = ConversationContextModel(
+            summary=entry.summary,
+            current_state=dict(entry.current_state or {}),
+            key_extractions=dict(entry.key_extractions or {}),
+            recent_turns=recent_turns,
+            compaction_id=entry.compaction_id,
+            compacted_at=entry.compacted_at.isoformat() if entry.compacted_at else None,
+            conversation_id=conversation_id,
+        )
+    except Exception as e:
+        logger.warning("Failed to build local-merged conversation_context: %s", e)
+        return
+
+    try:
+        response.conversation_context = merged
+    except Exception as e:
+        logger.warning("Failed to attach merged conversation_context to response: %s", e)
+
+
 def _extract_served_item_ids(anticipated: Dict) -> List[str]:
     """Pull item ids out of an anticipation cache lookup result."""
     ids: List[str] = []
@@ -1439,22 +1517,28 @@ class ConversationContextInterface:
                 # Fetch from cloud
                 auth_context = await self._sdk._get_auth_context(correlation_id)
 
+                # Phase 2: when we have a warm local ST cache for this
+                # conversation, tell the server to skip ST assembly.
+                skip_server_st = _should_skip_server_st(self._sdk, conversation_id)
+                body = {
+                    "conversation_id": conversation_id,
+                    "search_query": search_query,
+                    "max_results": max_results,
+                    "types": types or ["all"],
+                    "mode": mode,
+                    # Pass scope ids when the caller supplied them so the
+                    # server doesn't have to derive them from the
+                    # conversation table. Avoids the async-write /
+                    # sync-read race against the tracker.
+                    **({"user_id": user_id} if user_id else {}),
+                    **({"customer_id": customer_id} if customer_id else {}),
+                }
+                if skip_server_st:
+                    body["include_conversation_context"] = False
                 result = await self._sdk._http_transport.post(
                     "/v1/context/conversation/fetch",
                     auth_context=auth_context,
-                    json={
-                        "conversation_id": conversation_id,
-                        "search_query": search_query,
-                        "max_results": max_results,
-                        "types": types or ["all"],
-                        "mode": mode,
-                        # Pass scope ids when the caller supplied them so the
-                        # server doesn't have to derive them from the
-                        # conversation table. Avoids the async-write /
-                        # sync-read race against the tracker.
-                        **({"user_id": user_id} if user_id else {}),
-                        **({"customer_id": customer_id} if customer_id else {}),
-                    },
+                    json=body,
                     correlation_id=correlation_id,
                 )
 
@@ -1468,6 +1552,11 @@ class ConversationContextInterface:
                 if "conversation_context" in result:
                     context_data["conversation_context"] = result["conversation_context"]
                 response = ContextResponse.from_cloud_response(context_data, metadata)
+
+                # Phase 2: splice the locally-cached ST block onto the
+                # response so consumers see a unified shape.
+                if skip_server_st:
+                    _merge_local_st_into_response(self._sdk, response, conversation_id)
 
                 # Cache the result (skip empty responses to avoid caching transient failures)
                 if any(context_data.get(k) for k in ("facts", "preferences", "episodes", "emotions", "temporal_events", "conversation_context")):
@@ -1981,18 +2070,22 @@ class UserContextInterface:
             else:
                 auth_context = await self._sdk._get_auth_context(correlation_id)
 
+                skip_server_st = _should_skip_server_st(self._sdk, conversation_id)
+                body = {
+                    "user_id": user_id,
+                    "customer_id": customer_id,
+                    "conversation_id": conversation_id,
+                    "search_query": search_query,
+                    "max_results": max_results,
+                    "types": types or ["all"],
+                    "mode": mode,
+                }
+                if skip_server_st:
+                    body["include_conversation_context"] = False
                 result = await self._sdk._http_transport.post(
                     "/v1/context/user/fetch",
                     auth_context=auth_context,
-                    json={
-                        "user_id": user_id,
-                        "customer_id": customer_id,
-                        "conversation_id": conversation_id,
-                        "search_query": search_query,
-                        "max_results": max_results,
-                        "types": types or ["all"],
-                        "mode": mode,
-                    },
+                    json=body,
                     correlation_id=correlation_id,
                 )
 
@@ -2006,6 +2099,9 @@ class UserContextInterface:
                 if "conversation_context" in result:
                     context_data["conversation_context"] = result["conversation_context"]
                 response = ContextResponse.from_cloud_response(context_data, metadata)
+
+                if skip_server_st:
+                    _merge_local_st_into_response(self._sdk, response, conversation_id)
 
                 # Cache (skip empty responses to avoid caching transient failures)
                 if any(context_data.get(k) for k in ("facts", "preferences", "episodes", "emotions", "temporal_events", "conversation_context")):
@@ -2156,17 +2252,21 @@ class CustomerContextInterface:
             else:
                 auth_context = await self._sdk._get_auth_context(correlation_id)
 
+                skip_server_st = _should_skip_server_st(self._sdk, conversation_id)
+                body = {
+                    "customer_id": customer_id,
+                    "conversation_id": conversation_id,
+                    "search_query": search_query,
+                    "max_results": max_results,
+                    "types": types or ["all"],
+                    "mode": mode,
+                }
+                if skip_server_st:
+                    body["include_conversation_context"] = False
                 result = await self._sdk._http_transport.post(
                     "/v1/context/customer/fetch",
                     auth_context=auth_context,
-                    json={
-                        "customer_id": customer_id,
-                        "conversation_id": conversation_id,
-                        "search_query": search_query,
-                        "max_results": max_results,
-                        "types": types or ["all"],
-                        "mode": mode,
-                    },
+                    json=body,
                     correlation_id=correlation_id,
                 )
 
@@ -2180,6 +2280,9 @@ class CustomerContextInterface:
                 if "conversation_context" in result:
                     context_data["conversation_context"] = result["conversation_context"]
                 response = ContextResponse.from_cloud_response(context_data, metadata)
+
+                if skip_server_st:
+                    _merge_local_st_into_response(self._sdk, response, conversation_id)
 
                 # Skip caching empty responses to avoid caching transient failures
                 if any(context_data.get(k) for k in ("facts", "preferences", "episodes", "emotions", "temporal_events", "conversation_context")):
@@ -2328,16 +2431,20 @@ class ClientContextInterface:
             else:
                 auth_context = await self._sdk._get_auth_context(correlation_id)
 
+                skip_server_st = _should_skip_server_st(self._sdk, conversation_id)
+                body = {
+                    "conversation_id": conversation_id,
+                    "search_query": search_query,
+                    "max_results": max_results,
+                    "types": types or ["all"],
+                    "mode": mode,
+                }
+                if skip_server_st:
+                    body["include_conversation_context"] = False
                 result = await self._sdk._http_transport.post(
                     "/v1/context/client/fetch",
                     auth_context=auth_context,
-                    json={
-                        "conversation_id": conversation_id,
-                        "search_query": search_query,
-                        "max_results": max_results,
-                        "types": types or ["all"],
-                        "mode": mode,
-                    },
+                    json=body,
                     correlation_id=correlation_id,
                 )
 
@@ -2351,6 +2458,9 @@ class ClientContextInterface:
                 if "conversation_context" in result:
                     context_data["conversation_context"] = result["conversation_context"]
                 response = ContextResponse.from_cloud_response(context_data, metadata)
+
+                if skip_server_st:
+                    _merge_local_st_into_response(self._sdk, response, conversation_id)
 
                 # Skip caching empty responses to avoid caching transient failures
                 if any(context_data.get(k) for k in ("facts", "preferences", "episodes", "emotions", "temporal_events", "conversation_context")):
