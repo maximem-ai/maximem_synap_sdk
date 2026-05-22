@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x13synap_service.proto\x12\x08synap.v1\"\xef\x01\n\x0bStreamEvent\x12\x39\n\x12\x63onversation_event\x18\x01 \x01(\x0b\x32\x1b.synap.v1.ConversationEventH\x00\x12\x31\n\x0eheartbeat_ping\x18\x02 \x01(\x0b\x32\x17.synap.v1.HeartbeatPingH\x00\x12\x33\n\x0fsession_control\x18\x03 \x01(\x0b\x32\x18.synap.v1.SessionControlH\x00\x12\x32\n\x0c\x63ontext_used\x18\x04 \x01(\x0b\x32\x1a.synap.v1.ContextUsedEventH\x00\x42\t\n\x07payload\"\xbd\x01\n\x10\x43ontextUsedEvent\x12\x11\n\tbundle_id\x18\x01 \x01(\t\x12\x17\n\x0f\x63onversation_id\x18\x02 \x01(\t\x12\x0f\n\x07user_id\x18\x03 \x01(\t\x12\x13\n\x0b\x63ustomer_id\x18\x04 \x01(\t\x12\x17\n\x0fserved_item_ids\x18\x05 \x03(\t\x12\x14\n\x0ctimestamp_ms\x18\x06 \x01(\x03\x12\r\n\x05scope\x18\x07 \x01(\t\x12\x19\n\x11source_bundle_ids\x18\x08 \x03(\t\"\xf7\x02\n\x11\x43onversationEvent\x12\x12\n\nevent_type\x18\x01 \x01(\t\x12\x17\n\x0f\x63onversation_id\x18\x02 \x01(\t\x12\x0f\n\x07user_id\x18\x03 \x01(\t\x12\x0c\n\x04role\x18\x04 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x05 \x01(\t\x12\x13\n\x0b\x63ustomer_id\x18\x06 \x01(\t\x12\x12\n\nsession_id\x18\x07 \x01(\t\x12;\n\x08metadata\x18\x08 \x03(\x0b\x32).synap.v1.ConversationEvent.MetadataEntry\x12\x14\n\x0ctimestamp_ms\x18\t \x01(\x03\x12\x11\n\ttool_name\x18\n \x01(\t\x12\x16\n\x0etool_args_json\x18\x0b \x01(\t\x12\x16\n\x0esearch_queries\x18\x0c \x03(\t\x12\x15\n\rcontext_types\x18\r \x03(\t\x1a/\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"%\n\rHeartbeatPing\x12\x14\n\x0ctimestamp_ms\x18\x01 \x01(\x03\"s\n\x0eSessionControl\x12\x0e\n\x06\x61\x63tion\x18\x01 \x01(\t\x12\x12\n\nsession_id\x18\x02 \x01(\t\x12\x17\n\x0f\x63onversation_id\x18\x03 \x01(\t\x12\x0f\n\x07user_id\x18\x04 \x01(\t\x12\x13\n\x0b\x63ustomer_id\x18\x05 \x01(\t\"\xb0\x01\n\x0eStreamResponse\x12\x36\n\x0e\x63ontext_bundle\x18\x01 \x01(\x0b\x32\x1c.synap.v1.ContextBundleProtoH\x00\x12\x31\n\x0eheartbeat_pong\x18\x02 \x01(\x0b\x32\x17.synap.v1.HeartbeatPongH\x00\x12(\n\x06signal\x18\x03 \x01(\x0b\x32\x16.synap.v1.StreamSignalH\x00\x42\t\n\x07payload\"%\n\rHeartbeatPong\x12\x14\n\x0ctimestamp_ms\x18\x01 \x01(\x03\"\x9c\x01\n\x0cStreamSignal\x12\x13\n\x0bsignal_type\x18\x01 \x01(\t\x12\x0e\n\x06reason\x18\x02 \x01(\t\x12\x36\n\x08metadata\x18\x03 \x03(\x0b\x32$.synap.v1.StreamSignal.MetadataEntry\x1a/\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\xf4\x05\n\x12\x43ontextBundleProto\x12\x11\n\tbundle_id\x18\x01 \x01(\t\x12\x13\n\x0b\x64\x65\x63ision_id\x18\x02 \x01(\t\x12\x44\n\ritems_by_type\x18\x03 \x03(\x0b\x32-.synap.v1.ContextBundleProto.ItemsByTypeEntry\x12\x14\n\x0ctotal_tokens\x18\x04 \x01(\x05\x12\x14\n\x0ctoken_budget\x18\x05 \x01(\x05\x12\x17\n\x0f\x62udget_exceeded\x18\x06 \x01(\x08\x12\x16\n\x0eretrieval_mode\x18\x07 \x01(\t\x12\x17\n\x0fsources_queried\x18\x08 \x03(\t\x12\x19\n\x11\x64\x65gradation_level\x18\t \x01(\t\x12\x10\n\x08warnings\x18\n \x03(\t\x12\x12\n\ncreated_at\x18\x0b \x01(\t\x12\x19\n\x11retrieval_time_ms\x18\x0c \x01(\x05\x12\x11\n\tcache_hit\x18\r \x01(\x08\x12\x16\n\x0esearch_queries\x18\x0e \x03(\t\x12\x1c\n\x14\x61nticipation_user_id\x18\x0f \x01(\t\x12 \n\x18\x61nticipation_customer_id\x18\x10 \x01(\t\x12$\n\x1c\x61nticipation_conversation_id\x18\x11 \x01(\t\x12\x17\n\x0fsearch_keywords\x18\x12 \x03(\t\x12\x13\n\x0b\x62undle_type\x18\x13 \x01(\t\x12@\n\x14\x63onversation_context\x18\x14 \x01(\x0b\x32\".synap.v1.ConversationContextProto\x12\x19\n\x11\x62undle_confidence\x18\x15 \x01(\x02\x12\x19\n\x11origin_pattern_id\x18\x16 \x01(\t\x12\x18\n\x10ttl_hint_seconds\x18\x17 \x01(\x05\x1aM\n\x10ItemsByTypeEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12(\n\x05value\x18\x02 \x01(\x0b\x32\x19.synap.v1.ContextItemList:\x02\x38\x01\"\xdc\x01\n\x18\x43onversationContextProto\x12\x0f\n\x07summary\x18\x01 \x01(\t\x12\x1a\n\x12\x63urrent_state_json\x18\x02 \x01(\t\x12\x1c\n\x14key_extractions_json\x18\x03 \x01(\t\x12/\n\x0crecent_turns\x18\x04 \x03(\x0b\x32\x19.synap.v1.RecentTurnProto\x12\x15\n\rcompaction_id\x18\x05 \x01(\t\x12\x14\n\x0c\x63ompacted_at\x18\x06 \x01(\t\x12\x17\n\x0f\x63onversation_id\x18\x07 \x01(\t\"C\n\x0fRecentTurnProto\x12\x0c\n\x04role\x18\x01 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x02 \x01(\t\x12\x11\n\ttimestamp\x18\x03 \x01(\t\"<\n\x0f\x43ontextItemList\x12)\n\x05items\x18\x01 \x03(\x0b\x32\x1a.synap.v1.ContextItemProto\"\xb8\x02\n\x10\x43ontextItemProto\x12\x0f\n\x07item_id\x18\x01 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x02 \x01(\t\x12\x14\n\x0c\x63ontext_type\x18\x03 \x01(\t\x12\x0e\n\x06source\x18\x04 \x01(\t\x12\x18\n\x10similarity_score\x18\x05 \x01(\x02\x12\x17\n\x0frelevance_score\x18\x06 \x01(\x02\x12\x12\n\nconfidence\x18\x07 \x01(\x02\x12\r\n\x05scope\x18\x08 \x01(\t\x12\x11\n\tentity_id\x18\t \x01(\t\x12\x12\n\ncreated_at\x18\n \x01(\t\x12\x12\n\nevent_date\x18\x0b \x01(\t\x12\x13\n\x0bvalid_until\x18\x0c \x01(\t\x12\x19\n\x11temporal_category\x18\r \x01(\t\x12\x1b\n\x13temporal_confidence\x18\x0e \x01(\x02\"\xbc\x03\n\x0eTelemetryEvent\x12\x12\n\nevent_type\x18\x01 \x01(\t\x12\x13\n\x0binstance_id\x18\x02 \x01(\t\x12\x11\n\tclient_id\x18\x03 \x01(\t\x12\x16\n\x0e\x63orrelation_id\x18\x04 \x01(\t\x12\x14\n\x0ctimestamp_ms\x18\x05 \x01(\x03\x12\x12\n\nlatency_ms\x18\x06 \x01(\x05\x12\x0e\n\x06status\x18\x07 \x01(\t\x12\x12\n\nerror_code\x18\x08 \x01(\t\x12\r\n\x05scope\x18\t \x01(\t\x12\x14\n\x0c\x63\x61\x63he_status\x18\n \x01(\t\x12\x0f\n\x07\x61ttempt\x18\x0b \x01(\x05\x12\x13\n\x0bhttp_method\x18\x0c \x01(\t\x12\x11\n\thttp_path\x18\r \x01(\t\x12\x18\n\x10http_status_code\x18\x0e \x01(\x05\x12\x38\n\x08metadata\x18\x0f \x03(\x0b\x32&.synap.v1.TelemetryEvent.MetadataEntry\x12\x13\n\x0bsdk_version\x18\x10 \x01(\t\x12\x10\n\x08\x62\x61tch_id\x18\x11 \x01(\t\x1a/\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"7\n\x0cTelemetryAck\x12\x0e\n\x06status\x18\x01 \x01(\t\x12\x17\n\x0f\x65vents_received\x18\x02 \x01(\x05\x32\x94\x01\n\x0cSynapService\x12=\n\x06Listen\x12\x15.synap.v1.StreamEvent\x1a\x18.synap.v1.StreamResponse(\x01\x30\x01\x12\x45\n\x0fIngestTelemetry\x12\x18.synap.v1.TelemetryEvent\x1a\x16.synap.v1.TelemetryAck(\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x13synap_service.proto\x12\x08synap.v1\"\xad\x02\n\x0bStreamEvent\x12\x39\n\x12\x63onversation_event\x18\x01 \x01(\x0b\x32\x1b.synap.v1.ConversationEventH\x00\x12\x31\n\x0eheartbeat_ping\x18\x02 \x01(\x0b\x32\x17.synap.v1.HeartbeatPingH\x00\x12\x33\n\x0fsession_control\x18\x03 \x01(\x0b\x32\x18.synap.v1.SessionControlH\x00\x12\x32\n\x0c\x63ontext_used\x18\x04 \x01(\x0b\x32\x1a.synap.v1.ContextUsedEventH\x00\x12<\n\x11\x63ontext_assembled\x18\x05 \x01(\x0b\x32\x1f.synap.v1.ContextAssembledEventH\x00\x42\t\n\x07payload\"\xbd\x01\n\x10\x43ontextUsedEvent\x12\x11\n\tbundle_id\x18\x01 \x01(\t\x12\x17\n\x0f\x63onversation_id\x18\x02 \x01(\t\x12\x0f\n\x07user_id\x18\x03 \x01(\t\x12\x13\n\x0b\x63ustomer_id\x18\x04 \x01(\t\x12\x17\n\x0fserved_item_ids\x18\x05 \x03(\t\x12\x14\n\x0ctimestamp_ms\x18\x06 \x01(\x03\x12\r\n\x05scope\x18\x07 \x01(\t\x12\x19\n\x11source_bundle_ids\x18\x08 \x03(\t\"\xeb\x02\n\x15\x43ontextAssembledEvent\x12\x16\n\x0e\x63orrelation_id\x18\x01 \x01(\t\x12\x17\n\x0f\x63onversation_id\x18\x02 \x01(\t\x12\x0f\n\x07user_id\x18\x03 \x01(\t\x12\x13\n\x0b\x63ustomer_id\x18\x04 \x01(\t\x12\x16\n\x0e\x66inal_item_ids\x18\x05 \x03(\t\x12\x1a\n\x12\x66inal_total_tokens\x18\x06 \x01(\x05\x12\x15\n\rcompaction_id\x18\x07 \x01(\t\x12\x19\n\x11recent_turn_count\x18\x08 \x01(\x05\x12 \n\x18\x63ompaction_end_timestamp\x18\t \x01(\t\x12\x17\n\x0f\x61ssembly_source\x18\n \x01(\t\x12\x1c\n\x14\x61ssembly_duration_ms\x18\x0b \x01(\x05\x12\x11\n\tcache_hit\x18\x0c \x01(\x08\x12\x14\n\x0ctimestamp_ms\x18\r \x01(\x03\x12\x13\n\x0bsdk_version\x18\x0e \x01(\t\"\xf7\x02\n\x11\x43onversationEvent\x12\x12\n\nevent_type\x18\x01 \x01(\t\x12\x17\n\x0f\x63onversation_id\x18\x02 \x01(\t\x12\x0f\n\x07user_id\x18\x03 \x01(\t\x12\x0c\n\x04role\x18\x04 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x05 \x01(\t\x12\x13\n\x0b\x63ustomer_id\x18\x06 \x01(\t\x12\x12\n\nsession_id\x18\x07 \x01(\t\x12;\n\x08metadata\x18\x08 \x03(\x0b\x32).synap.v1.ConversationEvent.MetadataEntry\x12\x14\n\x0ctimestamp_ms\x18\t \x01(\x03\x12\x11\n\ttool_name\x18\n \x01(\t\x12\x16\n\x0etool_args_json\x18\x0b \x01(\t\x12\x16\n\x0esearch_queries\x18\x0c \x03(\t\x12\x15\n\rcontext_types\x18\r \x03(\t\x1a/\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"%\n\rHeartbeatPing\x12\x14\n\x0ctimestamp_ms\x18\x01 \x01(\x03\"s\n\x0eSessionControl\x12\x0e\n\x06\x61\x63tion\x18\x01 \x01(\t\x12\x12\n\nsession_id\x18\x02 \x01(\t\x12\x17\n\x0f\x63onversation_id\x18\x03 \x01(\t\x12\x0f\n\x07user_id\x18\x04 \x01(\t\x12\x13\n\x0b\x63ustomer_id\x18\x05 \x01(\t\"\xb0\x01\n\x0eStreamResponse\x12\x36\n\x0e\x63ontext_bundle\x18\x01 \x01(\x0b\x32\x1c.synap.v1.ContextBundleProtoH\x00\x12\x31\n\x0eheartbeat_pong\x18\x02 \x01(\x0b\x32\x17.synap.v1.HeartbeatPongH\x00\x12(\n\x06signal\x18\x03 \x01(\x0b\x32\x16.synap.v1.StreamSignalH\x00\x42\t\n\x07payload\"%\n\rHeartbeatPong\x12\x14\n\x0ctimestamp_ms\x18\x01 \x01(\x03\"\x9c\x01\n\x0cStreamSignal\x12\x13\n\x0bsignal_type\x18\x01 \x01(\t\x12\x0e\n\x06reason\x18\x02 \x01(\t\x12\x36\n\x08metadata\x18\x03 \x03(\x0b\x32$.synap.v1.StreamSignal.MetadataEntry\x1a/\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\xf4\x05\n\x12\x43ontextBundleProto\x12\x11\n\tbundle_id\x18\x01 \x01(\t\x12\x13\n\x0b\x64\x65\x63ision_id\x18\x02 \x01(\t\x12\x44\n\ritems_by_type\x18\x03 \x03(\x0b\x32-.synap.v1.ContextBundleProto.ItemsByTypeEntry\x12\x14\n\x0ctotal_tokens\x18\x04 \x01(\x05\x12\x14\n\x0ctoken_budget\x18\x05 \x01(\x05\x12\x17\n\x0f\x62udget_exceeded\x18\x06 \x01(\x08\x12\x16\n\x0eretrieval_mode\x18\x07 \x01(\t\x12\x17\n\x0fsources_queried\x18\x08 \x03(\t\x12\x19\n\x11\x64\x65gradation_level\x18\t \x01(\t\x12\x10\n\x08warnings\x18\n \x03(\t\x12\x12\n\ncreated_at\x18\x0b \x01(\t\x12\x19\n\x11retrieval_time_ms\x18\x0c \x01(\x05\x12\x11\n\tcache_hit\x18\r \x01(\x08\x12\x16\n\x0esearch_queries\x18\x0e \x03(\t\x12\x1c\n\x14\x61nticipation_user_id\x18\x0f \x01(\t\x12 \n\x18\x61nticipation_customer_id\x18\x10 \x01(\t\x12$\n\x1c\x61nticipation_conversation_id\x18\x11 \x01(\t\x12\x17\n\x0fsearch_keywords\x18\x12 \x03(\t\x12\x13\n\x0b\x62undle_type\x18\x13 \x01(\t\x12@\n\x14\x63onversation_context\x18\x14 \x01(\x0b\x32\".synap.v1.ConversationContextProto\x12\x19\n\x11\x62undle_confidence\x18\x15 \x01(\x02\x12\x19\n\x11origin_pattern_id\x18\x16 \x01(\t\x12\x18\n\x10ttl_hint_seconds\x18\x17 \x01(\x05\x1aM\n\x10ItemsByTypeEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12(\n\x05value\x18\x02 \x01(\x0b\x32\x19.synap.v1.ContextItemList:\x02\x38\x01\"\xdc\x01\n\x18\x43onversationContextProto\x12\x0f\n\x07summary\x18\x01 \x01(\t\x12\x1a\n\x12\x63urrent_state_json\x18\x02 \x01(\t\x12\x1c\n\x14key_extractions_json\x18\x03 \x01(\t\x12/\n\x0crecent_turns\x18\x04 \x03(\x0b\x32\x19.synap.v1.RecentTurnProto\x12\x15\n\rcompaction_id\x18\x05 \x01(\t\x12\x14\n\x0c\x63ompacted_at\x18\x06 \x01(\t\x12\x17\n\x0f\x63onversation_id\x18\x07 \x01(\t\"C\n\x0fRecentTurnProto\x12\x0c\n\x04role\x18\x01 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x02 \x01(\t\x12\x11\n\ttimestamp\x18\x03 \x01(\t\"<\n\x0f\x43ontextItemList\x12)\n\x05items\x18\x01 \x03(\x0b\x32\x1a.synap.v1.ContextItemProto\"\xb8\x02\n\x10\x43ontextItemProto\x12\x0f\n\x07item_id\x18\x01 \x01(\t\x12\x0f\n\x07\x63ontent\x18\x02 \x01(\t\x12\x14\n\x0c\x63ontext_type\x18\x03 \x01(\t\x12\x0e\n\x06source\x18\x04 \x01(\t\x12\x18\n\x10similarity_score\x18\x05 \x01(\x02\x12\x17\n\x0frelevance_score\x18\x06 \x01(\x02\x12\x12\n\nconfidence\x18\x07 \x01(\x02\x12\r\n\x05scope\x18\x08 \x01(\t\x12\x11\n\tentity_id\x18\t \x01(\t\x12\x12\n\ncreated_at\x18\n \x01(\t\x12\x12\n\nevent_date\x18\x0b \x01(\t\x12\x13\n\x0bvalid_until\x18\x0c \x01(\t\x12\x19\n\x11temporal_category\x18\r \x01(\t\x12\x1b\n\x13temporal_confidence\x18\x0e \x01(\x02\"\xbc\x03\n\x0eTelemetryEvent\x12\x12\n\nevent_type\x18\x01 \x01(\t\x12\x13\n\x0binstance_id\x18\x02 \x01(\t\x12\x11\n\tclient_id\x18\x03 \x01(\t\x12\x16\n\x0e\x63orrelation_id\x18\x04 \x01(\t\x12\x14\n\x0ctimestamp_ms\x18\x05 \x01(\x03\x12\x12\n\nlatency_ms\x18\x06 \x01(\x05\x12\x0e\n\x06status\x18\x07 \x01(\t\x12\x12\n\nerror_code\x18\x08 \x01(\t\x12\r\n\x05scope\x18\t \x01(\t\x12\x14\n\x0c\x63\x61\x63he_status\x18\n \x01(\t\x12\x0f\n\x07\x61ttempt\x18\x0b \x01(\x05\x12\x13\n\x0bhttp_method\x18\x0c \x01(\t\x12\x11\n\thttp_path\x18\r \x01(\t\x12\x18\n\x10http_status_code\x18\x0e \x01(\x05\x12\x38\n\x08metadata\x18\x0f \x03(\x0b\x32&.synap.v1.TelemetryEvent.MetadataEntry\x12\x13\n\x0bsdk_version\x18\x10 \x01(\t\x12\x10\n\x08\x62\x61tch_id\x18\x11 \x01(\t\x1a/\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"7\n\x0cTelemetryAck\x12\x0e\n\x06status\x18\x01 \x01(\t\x12\x17\n\x0f\x65vents_received\x18\x02 \x01(\x05\x32\x94\x01\n\x0cSynapService\x12=\n\x06Listen\x12\x15.synap.v1.StreamEvent\x1a\x18.synap.v1.StreamResponse(\x01\x30\x01\x12\x45\n\x0fIngestTelemetry\x12\x18.synap.v1.TelemetryEvent\x1a\x16.synap.v1.TelemetryAck(\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -40,43 +40,45 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_TELEMETRYEVENT_METADATAENTRY']._loaded_options = None
   _globals['_TELEMETRYEVENT_METADATAENTRY']._serialized_options = b'8\001'
   _globals['_STREAMEVENT']._serialized_start=34
-  _globals['_STREAMEVENT']._serialized_end=273
-  _globals['_CONTEXTUSEDEVENT']._serialized_start=276
-  _globals['_CONTEXTUSEDEVENT']._serialized_end=465
-  _globals['_CONVERSATIONEVENT']._serialized_start=468
-  _globals['_CONVERSATIONEVENT']._serialized_end=843
-  _globals['_CONVERSATIONEVENT_METADATAENTRY']._serialized_start=796
-  _globals['_CONVERSATIONEVENT_METADATAENTRY']._serialized_end=843
-  _globals['_HEARTBEATPING']._serialized_start=845
-  _globals['_HEARTBEATPING']._serialized_end=882
-  _globals['_SESSIONCONTROL']._serialized_start=884
-  _globals['_SESSIONCONTROL']._serialized_end=999
-  _globals['_STREAMRESPONSE']._serialized_start=1002
-  _globals['_STREAMRESPONSE']._serialized_end=1178
-  _globals['_HEARTBEATPONG']._serialized_start=1180
-  _globals['_HEARTBEATPONG']._serialized_end=1217
-  _globals['_STREAMSIGNAL']._serialized_start=1220
-  _globals['_STREAMSIGNAL']._serialized_end=1376
-  _globals['_STREAMSIGNAL_METADATAENTRY']._serialized_start=796
-  _globals['_STREAMSIGNAL_METADATAENTRY']._serialized_end=843
-  _globals['_CONTEXTBUNDLEPROTO']._serialized_start=1379
-  _globals['_CONTEXTBUNDLEPROTO']._serialized_end=2135
-  _globals['_CONTEXTBUNDLEPROTO_ITEMSBYTYPEENTRY']._serialized_start=2058
-  _globals['_CONTEXTBUNDLEPROTO_ITEMSBYTYPEENTRY']._serialized_end=2135
-  _globals['_CONVERSATIONCONTEXTPROTO']._serialized_start=2138
-  _globals['_CONVERSATIONCONTEXTPROTO']._serialized_end=2358
-  _globals['_RECENTTURNPROTO']._serialized_start=2360
-  _globals['_RECENTTURNPROTO']._serialized_end=2427
-  _globals['_CONTEXTITEMLIST']._serialized_start=2429
-  _globals['_CONTEXTITEMLIST']._serialized_end=2489
-  _globals['_CONTEXTITEMPROTO']._serialized_start=2492
-  _globals['_CONTEXTITEMPROTO']._serialized_end=2804
-  _globals['_TELEMETRYEVENT']._serialized_start=2807
-  _globals['_TELEMETRYEVENT']._serialized_end=3251
-  _globals['_TELEMETRYEVENT_METADATAENTRY']._serialized_start=796
-  _globals['_TELEMETRYEVENT_METADATAENTRY']._serialized_end=843
-  _globals['_TELEMETRYACK']._serialized_start=3253
-  _globals['_TELEMETRYACK']._serialized_end=3308
-  _globals['_SYNAPSERVICE']._serialized_start=3311
-  _globals['_SYNAPSERVICE']._serialized_end=3459
+  _globals['_STREAMEVENT']._serialized_end=335
+  _globals['_CONTEXTUSEDEVENT']._serialized_start=338
+  _globals['_CONTEXTUSEDEVENT']._serialized_end=527
+  _globals['_CONTEXTASSEMBLEDEVENT']._serialized_start=530
+  _globals['_CONTEXTASSEMBLEDEVENT']._serialized_end=893
+  _globals['_CONVERSATIONEVENT']._serialized_start=896
+  _globals['_CONVERSATIONEVENT']._serialized_end=1271
+  _globals['_CONVERSATIONEVENT_METADATAENTRY']._serialized_start=1224
+  _globals['_CONVERSATIONEVENT_METADATAENTRY']._serialized_end=1271
+  _globals['_HEARTBEATPING']._serialized_start=1273
+  _globals['_HEARTBEATPING']._serialized_end=1310
+  _globals['_SESSIONCONTROL']._serialized_start=1312
+  _globals['_SESSIONCONTROL']._serialized_end=1427
+  _globals['_STREAMRESPONSE']._serialized_start=1430
+  _globals['_STREAMRESPONSE']._serialized_end=1606
+  _globals['_HEARTBEATPONG']._serialized_start=1608
+  _globals['_HEARTBEATPONG']._serialized_end=1645
+  _globals['_STREAMSIGNAL']._serialized_start=1648
+  _globals['_STREAMSIGNAL']._serialized_end=1804
+  _globals['_STREAMSIGNAL_METADATAENTRY']._serialized_start=1224
+  _globals['_STREAMSIGNAL_METADATAENTRY']._serialized_end=1271
+  _globals['_CONTEXTBUNDLEPROTO']._serialized_start=1807
+  _globals['_CONTEXTBUNDLEPROTO']._serialized_end=2563
+  _globals['_CONTEXTBUNDLEPROTO_ITEMSBYTYPEENTRY']._serialized_start=2486
+  _globals['_CONTEXTBUNDLEPROTO_ITEMSBYTYPEENTRY']._serialized_end=2563
+  _globals['_CONVERSATIONCONTEXTPROTO']._serialized_start=2566
+  _globals['_CONVERSATIONCONTEXTPROTO']._serialized_end=2786
+  _globals['_RECENTTURNPROTO']._serialized_start=2788
+  _globals['_RECENTTURNPROTO']._serialized_end=2855
+  _globals['_CONTEXTITEMLIST']._serialized_start=2857
+  _globals['_CONTEXTITEMLIST']._serialized_end=2917
+  _globals['_CONTEXTITEMPROTO']._serialized_start=2920
+  _globals['_CONTEXTITEMPROTO']._serialized_end=3232
+  _globals['_TELEMETRYEVENT']._serialized_start=3235
+  _globals['_TELEMETRYEVENT']._serialized_end=3679
+  _globals['_TELEMETRYEVENT_METADATAENTRY']._serialized_start=1224
+  _globals['_TELEMETRYEVENT_METADATAENTRY']._serialized_end=1271
+  _globals['_TELEMETRYACK']._serialized_start=3681
+  _globals['_TELEMETRYACK']._serialized_end=3736
+  _globals['_SYNAPSERVICE']._serialized_start=3739
+  _globals['_SYNAPSERVICE']._serialized_end=3887
 # @@protoc_insertion_point(module_scope)

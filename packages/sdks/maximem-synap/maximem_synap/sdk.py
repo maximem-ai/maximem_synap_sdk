@@ -149,6 +149,116 @@ async def _emit_context_used_event(
         logger.debug("context_used emit failed (non-fatal): %s", e)
 
 
+async def _emit_context_assembled_event(
+    sdk: "MaximemSynapSDK",
+    *,
+    correlation_id: str,
+    response: Any,
+    scope: str,
+    start_time: datetime,
+    conversation_id: str = "",
+    user_id: str = "",
+    customer_id: str = "",
+) -> None:
+    """Emit a ContextAssembledEvent recording what the SDK actually composed.
+
+    Fire-and-forget. The server's finalize-on-timeout watcher backfills a
+    synthetic audit row if no event arrives within the configured window
+    (default 10s), so this never blocks the user-facing fetch.
+
+    Args:
+        response: Either a ``ContextResponse`` (single-scope fetch) or
+            ``UnifiedContextResponse`` (sdk.fetch). The helper introspects
+            common attributes to extract item ids and ST metadata.
+        scope: ``"conversation" | "user" | "customer" | "client" | "unified"``.
+    """
+    try:
+        if not sdk.instance.is_listening:
+            return
+
+        # Collect final item ids across the standard memory categories.
+        final_ids: List[str] = []
+        for attr in ("facts", "preferences", "episodes", "emotions", "temporal_events"):
+            items = getattr(response, attr, None) or []
+            for it in items:
+                iid = getattr(it, "id", None) or getattr(it, "item_id", None)
+                if iid:
+                    final_ids.append(str(iid))
+
+        # ST composition (read from the SDK store when present; falls back
+        # to the conversation_context field on the response).
+        compaction_id = ""
+        recent_turn_count = 0
+        end_ts_iso = ""
+        if conversation_id:
+            try:
+                entry = sdk._st_store.get(conversation_id)
+                if entry is not None:
+                    compaction_id = entry.compaction_id or ""
+                    recent_turn_count = len(entry.recent_turns)
+                    end_ts_iso = (
+                        entry.end_timestamp.isoformat() if entry.end_timestamp else ""
+                    )
+            except Exception:
+                pass
+        if not compaction_id:
+            cc = getattr(response, "conversation_context", None)
+            if cc is not None:
+                compaction_id = getattr(cc, "compaction_id", "") or ""
+                end_ts_iso = (
+                    getattr(cc, "compacted_at", "") or ""
+                )
+                try:
+                    recent_turn_count = len(getattr(cc, "recent_turns", []) or [])
+                except Exception:
+                    recent_turn_count = 0
+
+        # Token count: best-effort — pydantic models may expose
+        # ``total_tokens`` either on the top-level response or under
+        # metadata; default to 0 when unknown.
+        final_total_tokens = (
+            int(getattr(response, "total_tokens", 0) or 0)
+            or int(getattr(getattr(response, "metadata", None), "total_tokens", 0) or 0)
+        )
+
+        source = (
+            getattr(getattr(response, "metadata", None), "source", "")
+            or "cloud"
+        )
+        # ResponseMetadata uses 'cache' as a shorthand for the local HTTP
+        # cache; map it to the explicit name we use in the proto.
+        if source == "cache":
+            source = "http_cache"
+        if source == "anticipation_cache":
+            cache_hit = True
+        elif source == "http_cache":
+            cache_hit = True
+        else:
+            cache_hit = bool(getattr(getattr(response, "metadata", None), "cache_hit", False))
+
+        duration_ms = int(
+            (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
+        )
+
+        await sdk.instance._controller._transport.send_context_assembled(
+            correlation_id=correlation_id,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            customer_id=customer_id,
+            final_item_ids=final_ids,
+            final_total_tokens=final_total_tokens,
+            compaction_id=compaction_id,
+            recent_turn_count=recent_turn_count,
+            compaction_end_timestamp=end_ts_iso,
+            assembly_source=source,
+            assembly_duration_ms=duration_ms,
+            cache_hit=cache_hit,
+            sdk_version=__version__,
+        )
+    except Exception as e:
+        logger.debug("context_assembled emit failed (non-fatal): %s", e)
+
+
 def _extract_served_item_ids(anticipated: Dict) -> List[str]:
     """Pull item ids out of an anticipation cache lookup result."""
     ids: List[str] = []
@@ -468,7 +578,18 @@ class MaximemSynapSDK:
         self._client_id: Optional[str] = None
 
         from .cache.anticipation_cache import AnticipationCache
+        from .cache.short_term_store import ShortTermContextStore
         self._anticipation_cache = AnticipationCache()
+        # SDK-authoritative short-term context store (gated by the
+        # `sdk_st_authoritative` server-side feature flag — see
+        # docs/internal/sdk_authoritative_short_term_context_plan.md).
+        # Populated by `compaction_update` bundles arriving on the Listen
+        # stream and by local `record_message`/`send_message` appends.
+        self._st_store = ShortTermContextStore()
+        # Cached server-decided value of the feature flag, keyed by
+        # instance_id. None = not-yet-checked. Refreshed opportunistically
+        # via `_refresh_st_authoritative_flag()`.
+        self._st_authoritative_enabled: Optional[bool] = None
 
         self._turn_counters: Dict[str, int] = {}
         self._user_summary_interval: int = 5
@@ -524,6 +645,29 @@ class MaximemSynapSDK:
         key = conversation_id or "_global"
         self._turn_counters[key] = self._turn_counters.get(key, 0) + 1
         return self._turn_counters[key]
+
+    def _is_st_authoritative(self) -> bool:
+        """Whether SDK-authoritative short-term context is enabled.
+
+        Resolution order:
+          1. Cached value (``_st_authoritative_enabled``) — set by
+             ``initialize()``.
+          2. Explicit ``SDKConfig.sdk_st_authoritative``.
+          3. Env var ``SYNAP_SDK_ST_AUTHORITATIVE`` (truthy strings only).
+
+        Defaults to False.
+        """
+        if self._st_authoritative_enabled is not None:
+            return self._st_authoritative_enabled
+
+        enabled = bool(getattr(self._config, "sdk_st_authoritative", False))
+        if not enabled:
+            env_val = os.environ.get("SYNAP_SDK_ST_AUTHORITATIVE", "").strip().lower()
+            if env_val in {"1", "true", "yes", "on"}:
+                enabled = True
+
+        self._st_authoritative_enabled = enabled
+        return enabled
 
     def _should_inject_user_summary(self, conversation_id: Optional[str]) -> bool:
         """Check if user summary should be injected this turn."""
@@ -811,6 +955,7 @@ class MaximemSynapSDK:
             )
         """
         self._ensure_initialized()
+        start_time = datetime.now(timezone.utc)
 
         # Build parallel fetch tasks based on provided identifiers and scope filter
         tasks = []
@@ -907,6 +1052,25 @@ class MaximemSynapSDK:
             include_scope=include_scope_labels,
             include_conversation_context=include_conversation_context,
         )
+
+        # Audit enrichment for the unified fetch — uses a freshly minted
+        # correlation_id since the parallel sub-fetches each generated
+        # their own. The Requests page treats unified-scope rows as a
+        # separate audit entry.
+        try:
+            unified_correlation_id = generate_correlation_id(self.instance_id)
+            asyncio.ensure_future(_emit_context_assembled_event(
+                sdk=self,
+                correlation_id=unified_correlation_id,
+                response=merged,
+                scope="unified",
+                start_time=start_time,
+                conversation_id=conversation_id or "",
+                user_id=user_id or "",
+                customer_id=customer_id or "",
+            ))
+        except Exception as e:
+            logger.debug("unified context_assembled emit setup failed: %s", e)
 
         return merged
 
@@ -1090,7 +1254,7 @@ class ConversationInterface:
         """
         controller = self._ensure_controller()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
-        return await controller.record_message(
+        result = await controller.record_message(
             conversation_id=conversation_id,
             role=role,
             content=content,
@@ -1100,6 +1264,30 @@ class ConversationInterface:
             metadata=metadata,
             correlation_id=correlation_id,
         )
+        # Mirror the turn into the SDK-authoritative ST cache only AFTER
+        # the server acknowledges the write (D3 in the plan). Append on
+        # success guarantees the SDK cache and the server's view stay
+        # consistent w.r.t. which turns the next compaction will see.
+        if self._sdk._is_st_authoritative():
+            try:
+                recorded_at = result.get("recorded_at") if isinstance(result, dict) else None
+                ts = None
+                if recorded_at:
+                    try:
+                        from datetime import datetime as _dt
+                        rv = recorded_at[:-1] + "+00:00" if recorded_at.endswith("Z") else recorded_at
+                        ts = _dt.fromisoformat(rv)
+                    except Exception:
+                        ts = None
+                self._sdk._st_store.append_turn(
+                    conversation_id=conversation_id,
+                    role=role,
+                    content=content,
+                    timestamp=ts,
+                )
+            except Exception as e:
+                logger.warning("Failed to append turn to ST store: %s", e)
+        return result
 
     async def record_messages_batch(
         self,
@@ -1115,10 +1303,29 @@ class ConversationInterface:
         """
         controller = self._ensure_controller()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
-        return await controller.record_messages_batch(
+        result = await controller.record_messages_batch(
             messages=messages,
             correlation_id=correlation_id,
         )
+        if self._sdk._is_st_authoritative():
+            # Best-effort mirror: only the rows the server confirmed succeeded
+            # should be reflected in local cache. The batch result has a
+            # per-message ``results`` array aligned with the input order; rows
+            # without a ``message_id`` are treated as failed (matches the
+            # server-side route's response shape).
+            results = result.get("results", []) if isinstance(result, dict) else []
+            for msg, res in zip(messages, results):
+                if not isinstance(res, dict) or not res.get("message_id"):
+                    continue
+                try:
+                    self._sdk._st_store.append_turn(
+                        conversation_id=msg.get("conversation_id", ""),
+                        role=msg.get("role", "user"),
+                        content=msg.get("content", ""),
+                    )
+                except Exception as e:
+                    logger.warning("Failed to append batch turn to ST store: %s", e)
+        return result
 
 
 class ConversationContextInterface:
@@ -1299,6 +1506,19 @@ class ConversationContextInterface:
             conversation_id=conversation_id,
         ))
 
+        # Audit enrichment — fire-and-forget snapshot of the composition
+        # the consumer LLM will actually see (D4/D5 in the plan).
+        asyncio.ensure_future(_emit_context_assembled_event(
+            sdk=self._sdk,
+            correlation_id=correlation_id,
+            response=response,
+            scope="conversation",
+            start_time=start_time,
+            conversation_id=conversation_id,
+            user_id=user_id or "",
+            customer_id=customer_id or "",
+        ))
+
         # Periodic user summary injection. Section 15 — only inject when the
         # caller passed a user_id; without it we cannot safely scope the
         # summary lookup, so we skip rather than risk cross-user splice.
@@ -1418,6 +1638,25 @@ class ConversationContextInterface:
         self._sdk._ensure_initialized()
 
         correlation_id = generate_correlation_id(self._sdk.instance_id)
+
+        # SDK-authoritative path: serve from the in-memory ST store when
+        # the feature is on, a compaction has been received, and the
+        # caller hasn't pinned a specific version (we only cache the
+        # latest).
+        if version is None and self._sdk._is_st_authoritative():
+            try:
+                entry = self._sdk._st_store.get(conversation_id)
+                if entry and entry.has_compaction():
+                    from .formatter.context_for_prompt import LocalContextFormatter
+                    rendered = LocalContextFormatter.render_compacted(
+                        entry, format=format, correlation_id=correlation_id
+                    )
+                    if rendered is not None:
+                        return rendered
+            except Exception as e:
+                logger.warning(
+                    "ST-cache get_compacted render failed (falling through): %s", e
+                )
 
         # Check local cache first (skip when version is pinned)
         if version is None:
@@ -1564,6 +1803,24 @@ class ConversationContextInterface:
             ContextForPromptResponse with formatted_context, recent_messages, and metadata
         """
         self._sdk._ensure_initialized()
+
+        # SDK-authoritative path: render locally from the ST store when
+        # the feature is on and we have either a compaction or pending
+        # raw turns for this conversation. This bypasses the cloud
+        # round-trip entirely on the warm path.
+        if self._sdk._is_st_authoritative():
+            try:
+                entry = self._sdk._st_store.get(conversation_id)
+                if entry is not None and (
+                    entry.has_compaction() or entry.recent_turns
+                ):
+                    from .formatter.context_for_prompt import LocalContextFormatter
+                    return LocalContextFormatter.render_for_prompt(entry, style=style)
+            except Exception as e:
+                logger.warning(
+                    "ST-cache get_context_for_prompt render failed (falling through): %s",
+                    e,
+                )
 
         # Check local cache first (Tier 2 optimization)
         try:
@@ -1787,6 +2044,17 @@ class UserContextInterface:
             user_id=user_id,
         ))
 
+        asyncio.ensure_future(_emit_context_assembled_event(
+            sdk=self._sdk,
+            correlation_id=correlation_id,
+            response=response,
+            scope="user",
+            start_time=start_time,
+            conversation_id=conversation_id or "",
+            user_id=user_id,
+            customer_id=customer_id or "",
+        ))
+
         # Periodic user summary injection
         turn = self._sdk._increment_turn(conversation_id)
         if self._sdk._should_inject_user_summary(conversation_id):
@@ -1946,6 +2214,16 @@ class CustomerContextInterface:
             mode=mode,
             source=response.metadata.source,
             items_count=items_count,
+            conversation_id=conversation_id or "",
+            customer_id=customer_id,
+        ))
+
+        asyncio.ensure_future(_emit_context_assembled_event(
+            sdk=self._sdk,
+            correlation_id=correlation_id,
+            response=response,
+            scope="customer",
+            start_time=start_time,
             conversation_id=conversation_id or "",
             customer_id=customer_id,
         ))
@@ -2110,6 +2388,15 @@ class ClientContextInterface:
             conversation_id=conversation_id or "",
         ))
 
+        asyncio.ensure_future(_emit_context_assembled_event(
+            sdk=self._sdk,
+            correlation_id=correlation_id,
+            response=response,
+            scope="client",
+            start_time=start_time,
+            conversation_id=conversation_id or "",
+        ))
+
         # Periodic user summary injection
         turn = self._sdk._increment_turn(conversation_id)
         if self._sdk._should_inject_user_summary(conversation_id):
@@ -2190,6 +2477,15 @@ class InstanceInterface:
             )
 
         if bundle_type == "compaction_update":
+            # Apply to the SDK-authoritative ST store so subsequent
+            # get_compacted / get_context_for_prompt calls can serve from
+            # cache. Safe to do unconditionally — the store is harmless
+            # when the feature is off (just unused).
+            try:
+                self._sdk._st_store.apply_compaction(bundle_dict)
+            except Exception as e:
+                logger.warning("Failed to apply compaction to ST store: %s", e)
+
             conv_id = bundle_dict.get("_anticipation_conversation_id")
             if conv_id:
                 try:
@@ -2290,6 +2586,24 @@ class InstanceInterface:
             payload["context_types"] = list(context_types)
 
         await self._controller._transport.send(payload)
+
+        # Mirror the turn locally for SDK-authoritative ST mode. gRPC send
+        # is fire-and-forget (no ack), so we treat the successful write to
+        # the stream as confirmation. Only mirror conversational events,
+        # not tool_call/context_request hints.
+        if (
+            self._sdk._is_st_authoritative()
+            and event_type in ("user_message", "assistant_message")
+            and conversation_id
+        ):
+            try:
+                self._sdk._st_store.append_turn(
+                    conversation_id=conversation_id,
+                    role=role,
+                    content=content,
+                )
+            except Exception as e:
+                logger.warning("Failed to append gRPC turn to ST store: %s", e)
 
     async def record_thinking(
         self,

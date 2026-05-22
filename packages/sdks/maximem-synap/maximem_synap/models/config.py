@@ -44,6 +44,14 @@ class SDKConfig(BaseModel):
     timeouts: TimeoutConfig = Field(default_factory=TimeoutConfig)
     retry_policy: Optional[RetryPolicy] = Field(default_factory=RetryPolicy)
     log_level: str = "WARNING"
+    # Phase 1 rollout flag for SDK-authoritative short-term context.
+    # When true: SDK appends raw turns into a local ShortTermContextStore on
+    # record_message/send_message, applies compaction_update bundles into
+    # it, and serves get_compacted/get_context_for_prompt from cache before
+    # falling back to REST. Default off — flipped via env var or explicit
+    # config during the canary. See
+    # docs/internal/sdk_authoritative_short_term_context_plan.md.
+    sdk_st_authoritative: bool = False
 
 
 # Backward compatibility - deprecated dataclass-style models
