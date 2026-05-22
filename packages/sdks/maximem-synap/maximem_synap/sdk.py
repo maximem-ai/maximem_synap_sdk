@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
@@ -337,6 +338,42 @@ def _merge_local_st_into_response(
         logger.warning("Failed to attach merged conversation_context to response: %s", e)
 
 
+def _dispatch_compaction_subscribers(
+    sdk: "MaximemSynapSDK",
+    conversation_id: str,
+    bundle_dict: Dict[str, Any],
+) -> None:
+    """Invoke every subscriber registered for this conversation_id with the
+    fired bundle. Both sync and async callables are accepted; async ones are
+    scheduled via ``asyncio.create_task``. Exceptions are caught and logged
+    so a single misbehaving subscriber can't break the gRPC reader loop or
+    the other subscribers.
+    """
+    if not conversation_id:
+        return
+    with sdk._compaction_subscribers_lock:
+        callbacks = list(sdk._compaction_subscribers.get(conversation_id, []))
+    if not callbacks:
+        return
+    for cb in callbacks:
+        try:
+            if asyncio.iscoroutinefunction(cb):
+                try:
+                    asyncio.create_task(cb(bundle_dict))
+                except RuntimeError:
+                    # No running loop (sync caller dispatching into async cb).
+                    logger.debug(
+                        "compaction subscriber %r is async but no event loop "
+                        "is running; skipping", cb,
+                    )
+            else:
+                cb(bundle_dict)
+        except Exception as e:
+            logger.warning(
+                "compaction subscriber %r raised on dispatch: %s", cb, e,
+            )
+
+
 def _extract_served_item_ids(anticipated: Dict) -> List[str]:
     """Pull item ids out of an anticipation cache lookup result."""
     ids: List[str] = []
@@ -668,6 +705,14 @@ class MaximemSynapSDK:
         # instance_id. None = not-yet-checked. Refreshed opportunistically
         # via `_refresh_st_authoritative_flag()`.
         self._st_authoritative_enabled: Optional[bool] = None
+
+        # Phase 4 — typed compaction-update subscribers (per-conversation
+        # callbacks fired when a `compaction_update` bundle arrives on the
+        # Listen stream). Keyed by conversation_id → list of callables.
+        # Maintained by ConversationContextInterface.subscribe_to_compaction_updates;
+        # dispatched from InstanceInterface._handle_anticipated_bundle.
+        self._compaction_subscribers: Dict[str, List[Callable[[Dict[str, Any]], Any]]] = {}
+        self._compaction_subscribers_lock = threading.RLock()
 
         self._turn_counters: Dict[str, int] = {}
         self._user_summary_interval: int = 5
@@ -1411,6 +1456,91 @@ class ConversationContextInterface:
 
     def __init__(self, sdk: MaximemSynapSDK):
         self._sdk = sdk
+
+    # ------------------------------------------------------------------
+    # Phase 4: typed compaction-update subscription
+    # ------------------------------------------------------------------
+
+    def subscribe_to_compaction_updates(
+        self,
+        conversation_id: str,
+        callback: Callable[[Dict[str, Any]], Any],
+    ) -> Callable[[], None]:
+        """Register ``callback`` to fire whenever a ``compaction_update``
+        bundle arrives on the Listen stream for ``conversation_id``.
+
+        Without this typed API, callers had to subscribe to every bundle
+        via ``sdk.instance.listen(on_context=...)`` and filter for
+        ``_bundle_type == "compaction_update"`` themselves. This wraps that
+        for the common case.
+
+        Multiple callbacks can be registered for the same conversation;
+        they fire in registration order. Both sync and ``async def``
+        callables are accepted — async ones are scheduled via
+        ``asyncio.create_task`` (and silently skipped if no event loop
+        is running, matching the standard SDK callback contract).
+
+        Returns an ``unsubscribe()`` thunk that removes this specific
+        subscription. Calling it more than once is a no-op.
+
+        Args:
+            conversation_id: Conversation to subscribe to. Must be non-empty.
+            callback: Receives the raw bundle dict (same shape passed to
+                ``on_context``). The ``conversation_context`` sub-dict
+                carries the compaction's ``summary``, ``compaction_id``,
+                ``end_timestamp``, etc.
+
+        Returns:
+            Callable that removes this subscription when invoked.
+
+        Raises:
+            InvalidInputError: If ``conversation_id`` is empty.
+        """
+        if not conversation_id:
+            raise InvalidInputError("conversation_id is required")
+        if callback is None:
+            raise InvalidInputError("callback is required")
+
+        sdk = self._sdk
+        with sdk._compaction_subscribers_lock:
+            subs = sdk._compaction_subscribers.setdefault(conversation_id, [])
+            subs.append(callback)
+
+        unsubscribed = [False]
+
+        def unsubscribe() -> None:
+            if unsubscribed[0]:
+                return
+            unsubscribed[0] = True
+            with sdk._compaction_subscribers_lock:
+                subs2 = sdk._compaction_subscribers.get(conversation_id)
+                if not subs2:
+                    return
+                try:
+                    subs2.remove(callback)
+                except ValueError:
+                    pass
+                if not subs2:
+                    sdk._compaction_subscribers.pop(conversation_id, None)
+
+        return unsubscribe
+
+    def unsubscribe_all_compaction_updates(
+        self, conversation_id: Optional[str] = None
+    ) -> int:
+        """Remove subscribers. If ``conversation_id`` is provided, only
+        subscribers for that conversation are removed; otherwise every
+        subscriber across every conversation is removed. Returns the
+        count removed.
+        """
+        sdk = self._sdk
+        with sdk._compaction_subscribers_lock:
+            if conversation_id is None:
+                count = sum(len(v) for v in sdk._compaction_subscribers.values())
+                sdk._compaction_subscribers.clear()
+                return count
+            popped = sdk._compaction_subscribers.pop(conversation_id, None)
+            return len(popped) if popped else 0
 
     async def fetch(
         self,
@@ -2615,6 +2745,11 @@ class InstanceInterface:
                     )
                 except Exception:
                     pass  # Non-critical
+
+                # Phase 4: dispatch to typed subscribers for this conversation.
+                # Failures in user callbacks are swallowed and logged so a
+                # bad listener can't break the stream-reader loop.
+                _dispatch_compaction_subscribers(self._sdk, conv_id, bundle_dict)
 
         # Always invoke user callback regardless of type
         if hasattr(self, "_on_context_callback") and self._on_context_callback:
