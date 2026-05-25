@@ -3,9 +3,8 @@
 import asyncio
 import logging
 import random
-from collections import deque
-from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
-from datetime import datetime, timezone, timedelta
+from typing import Any, Callable, Dict, List, Optional
+from datetime import datetime, timezone
 from enum import Enum
 
 import grpc
@@ -57,14 +56,6 @@ class GRPCTransport:
     HEARTBEAT_TIMEOUT = 10.0   # seconds
     MAX_MISSED_HEARTBEATS = 3
 
-    # Outbound retry queue (D3 in the plan): if send() is called while the
-    # stream is disconnected/reconnecting, the ConversationEvent payload is
-    # buffered and replayed on reconnect. Bounded so a long outage cannot
-    # exhaust SDK memory; the oldest entry is dropped (with a WARN) when
-    # either limit is exceeded.
-    SEND_QUEUE_MAX_DEPTH = 100
-    SEND_QUEUE_MAX_AGE = timedelta(minutes=5)
-
     def __init__(
         self,
         instance_id: str,
@@ -97,15 +88,16 @@ class GRPCTransport:
         self._reconnect_attempts = 0
         self._last_pong_time: float = 0.0
         self._shutdown_event = asyncio.Event()
+        # Serializes ALL writes to the bidi stream. grpc.aio forbids concurrent
+        # write() on one call: a 2nd outstanding SEND_MESSAGE terminates the RPC
+        # (AioRpcError), after which every write raises InvalidStateError
+        # ("RPC already finished"). One shared SDK can fan many users/heartbeats
+        # at the stream concurrently, so every _stream.write() MUST hold this.
+        self._write_lock = asyncio.Lock()
 
         # Background tasks
         self._listen_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
-
-        # Outbound retry queue for ConversationEvents. Each entry is
-        # (timestamp_queued, payload_dict).
-        self._send_queue: Deque[Tuple[datetime, Dict[str, Any]]] = deque()
-        self._send_queue_lock = asyncio.Lock()
 
     @property
     def state(self) -> StreamState:
@@ -286,7 +278,8 @@ class GRPCTransport:
         ping = synap_service_pb2.StreamEvent(
             heartbeat_ping=synap_service_pb2.HeartbeatPing(timestamp_ms=now_ms)
         )
-        await self._stream.write(ping)
+        async with self._write_lock:
+            await self._stream.write(ping)
 
     async def _handle_disconnect(self, reason: str) -> None:
         """Handle disconnection and attempt reconnect."""
@@ -327,15 +320,6 @@ class GRPCTransport:
                 await self._establish_connection()
                 self._emit_telemetry("listen_reconnect", attempt=self._reconnect_attempts)
 
-                # Replay any buffered ConversationEvents before invoking
-                # the user-facing reconnect callback, so app-level code
-                # never sees a window where the SDK is "connected" but
-                # queued turns are still pending.
-                try:
-                    await self._drain_send_queue()
-                except Exception as e:
-                    logger.warning("Send-queue drain failed: %s", e)
-
                 if self.on_reconnect:
                     self.on_reconnect(self._reconnect_attempts)
 
@@ -356,29 +340,12 @@ class GRPCTransport:
     async def send(self, message: Dict[str, Any]) -> None:
         """Send a conversation message on the stream.
 
-        When the stream is not currently connected, the message is queued
-        for replay on reconnect rather than dropped. The queue is bounded
-        in both depth and age (see ``SEND_QUEUE_MAX_DEPTH`` /
-        ``SEND_QUEUE_MAX_AGE``) — overflow drops the oldest entry with a
-        WARN log.
-
         Args:
             message: Dict with event_type, content, role, conversation_id, etc.
         """
         if self._state != StreamState.CONNECTED:
-            await self._enqueue_for_retry(message)
-            return
+            raise ServiceUnavailableError("gRPC stream not connected")
 
-        try:
-            await self._write_conversation_event(message)
-        except Exception as e:
-            # Stream broke mid-write; queue the message for the reconnect
-            # loop to replay, and let the listen loop handle the error.
-            logger.warning("send() failed, queuing for retry: %s", e)
-            await self._enqueue_for_retry(message)
-
-    async def _write_conversation_event(self, message: Dict[str, Any]) -> None:
-        """Serialize a payload into ConversationEvent and write to the stream."""
         from .proto import synap_service_pb2
 
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -398,145 +365,8 @@ class GRPCTransport:
             context_types=message.get("context_types") or [],
         )
         event = synap_service_pb2.StreamEvent(conversation_event=conv_event)
-        await self._stream.write(event)
-
-    async def _enqueue_for_retry(self, message: Dict[str, Any]) -> None:
-        """Buffer a payload for replay after reconnect.
-
-        Drops the oldest entry (with WARN log) when depth or age limits
-        would otherwise be exceeded.
-        """
-        async with self._send_queue_lock:
-            self._prune_send_queue_locked()
-            if len(self._send_queue) >= self.SEND_QUEUE_MAX_DEPTH:
-                evicted_ts, evicted = self._send_queue.popleft()
-                logger.warning(
-                    "Send queue full (max=%d); dropping oldest event "
-                    "(queued_at=%s, event_type=%s, conversation_id=%s)",
-                    self.SEND_QUEUE_MAX_DEPTH,
-                    evicted_ts.isoformat(),
-                    evicted.get("event_type"),
-                    evicted.get("conversation_id"),
-                )
-            self._send_queue.append((datetime.now(timezone.utc), dict(message)))
-
-    def _prune_send_queue_locked(self) -> None:
-        """Drop send-queue entries older than the max-age window."""
-        cutoff = datetime.now(timezone.utc) - self.SEND_QUEUE_MAX_AGE
-        while self._send_queue and self._send_queue[0][0] < cutoff:
-            ts, msg = self._send_queue.popleft()
-            logger.warning(
-                "Send queue entry expired (queued_at=%s, age>%s); dropping "
-                "(event_type=%s, conversation_id=%s)",
-                ts.isoformat(),
-                self.SEND_QUEUE_MAX_AGE,
-                msg.get("event_type"),
-                msg.get("conversation_id"),
-            )
-
-    async def _drain_send_queue(self) -> int:
-        """Replay all queued payloads. Called after a successful reconnect.
-
-        Returns the number of payloads successfully replayed. Entries that
-        fail to write are re-queued at the front so the next reconnect
-        can retry them.
-        """
-        if not self._send_queue:
-            return 0
-        drained = 0
-        async with self._send_queue_lock:
-            self._prune_send_queue_locked()
-            # Snapshot under the lock, then write each event WITHOUT
-            # holding the lock so a slow .write() doesn't block other
-            # callers from enqueuing new events.
-            snapshot = list(self._send_queue)
-            self._send_queue.clear()
-
-        for idx, (ts, payload) in enumerate(snapshot):
-            if self._state != StreamState.CONNECTED:
-                # Lost connection mid-drain; re-queue this item and the
-                # rest of the snapshot at the front of the queue,
-                # preserving original FIFO order.
-                async with self._send_queue_lock:
-                    for back_ts, back_payload in reversed(snapshot[idx:]):
-                        self._send_queue.appendleft((back_ts, back_payload))
-                break
-            try:
-                await self._write_conversation_event(payload)
-                drained += 1
-            except Exception as e:
-                logger.warning("Drain write failed (will re-queue): %s", e)
-                async with self._send_queue_lock:
-                    for back_ts, back_payload in reversed(snapshot[idx:]):
-                        self._send_queue.appendleft((back_ts, back_payload))
-                break
-        if drained:
-            logger.info("Drained %d queued event(s) after reconnect", drained)
-        return drained
-
-    async def send_context_assembled(
-        self,
-        *,
-        correlation_id: str,
-        conversation_id: str = "",
-        user_id: str = "",
-        customer_id: str = "",
-        final_item_ids: Optional[List[str]] = None,
-        final_total_tokens: int = 0,
-        compaction_id: str = "",
-        recent_turn_count: int = 0,
-        compaction_end_timestamp: str = "",
-        assembly_source: str = "",
-        assembly_duration_ms: int = 0,
-        cache_hit: bool = False,
-        sdk_version: str = "",
-    ) -> None:
-        """Emit a ContextAssembledEvent for audit-enrichment.
-
-        Fire-and-forget: silently no-ops when the stream is not connected.
-        The server-side finalize-on-timeout watcher will write a synthetic
-        ``source='server_snapshot'`` row if no SDK event arrives within
-        the configured window.
-
-        Privacy: MUST NOT carry raw user prompt content. Only ids and
-        composition metadata.
-        """
-        if self._state != StreamState.CONNECTED or self._stream is None:
-            logger.debug(
-                "send_context_assembled: stream not connected, skipping "
-                "(correlation_id=%s)",
-                correlation_id,
-            )
-            return
-
-        from .proto import synap_service_pb2
-
-        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-        assembled = synap_service_pb2.ContextAssembledEvent(
-            correlation_id=correlation_id or "",
-            conversation_id=conversation_id or "",
-            user_id=user_id or "",
-            customer_id=customer_id or "",
-            final_item_ids=list(final_item_ids or []),
-            final_total_tokens=int(final_total_tokens or 0),
-            compaction_id=compaction_id or "",
-            recent_turn_count=int(recent_turn_count or 0),
-            compaction_end_timestamp=compaction_end_timestamp or "",
-            assembly_source=assembly_source or "",
-            assembly_duration_ms=int(assembly_duration_ms or 0),
-            cache_hit=bool(cache_hit),
-            timestamp_ms=now_ms,
-            sdk_version=sdk_version or "",
-        )
-        event = synap_service_pb2.StreamEvent(context_assembled=assembled)
-        try:
+        async with self._write_lock:
             await self._stream.write(event)
-        except Exception as e:
-            # Never raise on telemetry emit — the fetch already succeeded
-            # and the watcher will backfill if necessary.
-            logger.debug(
-                "send_context_assembled write failed (non-fatal): %s", e
-            )
 
     async def send_context_used(
         self,
@@ -575,7 +405,8 @@ class GRPCTransport:
             source_bundle_ids=list(source_bundle_ids or []),
         )
         event = synap_service_pb2.StreamEvent(context_used=used)
-        await self._stream.write(event)
+        async with self._write_lock:
+            await self._stream.write(event)
 
     def _handle_signal(self, signal) -> None:
         """Handle a StreamSignal from the server.

@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import os
-import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
@@ -148,230 +147,6 @@ async def _emit_context_used_event(
         )
     except Exception as e:
         logger.debug("context_used emit failed (non-fatal): %s", e)
-
-
-async def _emit_context_assembled_event(
-    sdk: "MaximemSynapSDK",
-    *,
-    correlation_id: str,
-    response: Any,
-    scope: str,
-    start_time: datetime,
-    conversation_id: str = "",
-    user_id: str = "",
-    customer_id: str = "",
-) -> None:
-    """Emit a ContextAssembledEvent recording what the SDK actually composed.
-
-    Fire-and-forget. The server's finalize-on-timeout watcher backfills a
-    synthetic audit row if no event arrives within the configured window
-    (default 10s), so this never blocks the user-facing fetch.
-
-    Args:
-        response: Either a ``ContextResponse`` (single-scope fetch) or
-            ``UnifiedContextResponse`` (sdk.fetch). The helper introspects
-            common attributes to extract item ids and ST metadata.
-        scope: ``"conversation" | "user" | "customer" | "client" | "unified"``.
-    """
-    try:
-        if not sdk.instance.is_listening:
-            return
-
-        # Collect final item ids across the standard memory categories.
-        final_ids: List[str] = []
-        for attr in ("facts", "preferences", "episodes", "emotions", "temporal_events"):
-            items = getattr(response, attr, None) or []
-            for it in items:
-                iid = getattr(it, "id", None) or getattr(it, "item_id", None)
-                if iid:
-                    final_ids.append(str(iid))
-
-        # ST composition (read from the SDK store when present; falls back
-        # to the conversation_context field on the response).
-        compaction_id = ""
-        recent_turn_count = 0
-        end_ts_iso = ""
-        if conversation_id:
-            try:
-                entry = sdk._st_store.get(conversation_id)
-                if entry is not None:
-                    compaction_id = entry.compaction_id or ""
-                    recent_turn_count = len(entry.recent_turns)
-                    end_ts_iso = (
-                        entry.end_timestamp.isoformat() if entry.end_timestamp else ""
-                    )
-            except Exception:
-                pass
-        if not compaction_id:
-            cc = getattr(response, "conversation_context", None)
-            if cc is not None:
-                compaction_id = getattr(cc, "compaction_id", "") or ""
-                end_ts_iso = (
-                    getattr(cc, "compacted_at", "") or ""
-                )
-                try:
-                    recent_turn_count = len(getattr(cc, "recent_turns", []) or [])
-                except Exception:
-                    recent_turn_count = 0
-
-        # Token count: best-effort — pydantic models may expose
-        # ``total_tokens`` either on the top-level response or under
-        # metadata; default to 0 when unknown.
-        final_total_tokens = (
-            int(getattr(response, "total_tokens", 0) or 0)
-            or int(getattr(getattr(response, "metadata", None), "total_tokens", 0) or 0)
-        )
-
-        source = (
-            getattr(getattr(response, "metadata", None), "source", "")
-            or "cloud"
-        )
-        # ResponseMetadata uses 'cache' as a shorthand for the local HTTP
-        # cache; map it to the explicit name we use in the proto.
-        if source == "cache":
-            source = "http_cache"
-        if source == "anticipation_cache":
-            cache_hit = True
-        elif source == "http_cache":
-            cache_hit = True
-        else:
-            cache_hit = bool(getattr(getattr(response, "metadata", None), "cache_hit", False))
-
-        duration_ms = int(
-            (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
-        )
-
-        await sdk.instance._controller._transport.send_context_assembled(
-            correlation_id=correlation_id,
-            conversation_id=conversation_id,
-            user_id=user_id,
-            customer_id=customer_id,
-            final_item_ids=final_ids,
-            final_total_tokens=final_total_tokens,
-            compaction_id=compaction_id,
-            recent_turn_count=recent_turn_count,
-            compaction_end_timestamp=end_ts_iso,
-            assembly_source=source,
-            assembly_duration_ms=duration_ms,
-            cache_hit=cache_hit,
-            sdk_version=__version__,
-        )
-    except Exception as e:
-        logger.debug("context_assembled emit failed (non-fatal): %s", e)
-
-
-def _should_skip_server_st(sdk: "MaximemSynapSDK", conversation_id: Optional[str]) -> bool:
-    """Return True when the SDK has a warm enough ShortTermContextStore
-    entry for the conversation that we can skip server-side ST assembly.
-
-    Warm = a previous ``compaction_update`` bundle landed for this
-    conversation (so the cache holds a real summary, not just locally
-    appended raw turns). Without that we still need the server's summary.
-
-    Off when ``sdk_st_authoritative`` flag is false. Off when no
-    conversation id is supplied (other-scoped fetches without a
-    conversation can't be merged locally).
-    """
-    if not conversation_id:
-        return False
-    if not sdk._is_st_authoritative():
-        return False
-    entry = sdk._st_store.get(conversation_id)
-    return entry is not None and entry.has_compaction()
-
-
-def _merge_local_st_into_response(
-    sdk: "MaximemSynapSDK",
-    response: Any,
-    conversation_id: Optional[str],
-) -> None:
-    """Splice the SDK-side cached short-term block onto ``response.conversation_context``.
-
-    Called after a Phase 2 fetch where the server returned no ST blob
-    (because the SDK told it to skip via include_conversation_context=False).
-    The response shape stays identical to the legacy form: callers see a
-    ``ConversationContextModel`` whether the data came from the server or
-    from the local cache.
-
-    No-op when the cache entry is missing — callers should already have
-    been guarded by ``_should_skip_server_st`` upstream, but be defensive.
-    """
-    if not conversation_id:
-        return
-    entry = sdk._st_store.get(conversation_id)
-    if entry is None:
-        return
-    try:
-        from .models.context import ConversationContextModel
-    except Exception:
-        logger.debug("ConversationContextModel import failed; skipping local merge")
-        return
-
-    recent_turns = []
-    for t in entry.recent_turns:
-        ts = t.get("timestamp")
-        if isinstance(ts, datetime):
-            ts = ts.isoformat()
-        recent_turns.append({
-            "role": t.get("role", "user"),
-            "content": t.get("content", ""),
-            "timestamp": ts,
-        })
-
-    try:
-        merged = ConversationContextModel(
-            summary=entry.summary,
-            current_state=dict(entry.current_state or {}),
-            key_extractions=dict(entry.key_extractions or {}),
-            recent_turns=recent_turns,
-            compaction_id=entry.compaction_id,
-            compacted_at=entry.compacted_at.isoformat() if entry.compacted_at else None,
-            conversation_id=conversation_id,
-        )
-    except Exception as e:
-        logger.warning("Failed to build local-merged conversation_context: %s", e)
-        return
-
-    try:
-        response.conversation_context = merged
-    except Exception as e:
-        logger.warning("Failed to attach merged conversation_context to response: %s", e)
-
-
-def _dispatch_compaction_subscribers(
-    sdk: "MaximemSynapSDK",
-    conversation_id: str,
-    bundle_dict: Dict[str, Any],
-) -> None:
-    """Invoke every subscriber registered for this conversation_id with the
-    fired bundle. Both sync and async callables are accepted; async ones are
-    scheduled via ``asyncio.create_task``. Exceptions are caught and logged
-    so a single misbehaving subscriber can't break the gRPC reader loop or
-    the other subscribers.
-    """
-    if not conversation_id:
-        return
-    with sdk._compaction_subscribers_lock:
-        callbacks = list(sdk._compaction_subscribers.get(conversation_id, []))
-    if not callbacks:
-        return
-    for cb in callbacks:
-        try:
-            if asyncio.iscoroutinefunction(cb):
-                try:
-                    asyncio.create_task(cb(bundle_dict))
-                except RuntimeError:
-                    # No running loop (sync caller dispatching into async cb).
-                    logger.debug(
-                        "compaction subscriber %r is async but no event loop "
-                        "is running; skipping", cb,
-                    )
-            else:
-                cb(bundle_dict)
-        except Exception as e:
-            logger.warning(
-                "compaction subscriber %r raised on dispatch: %s", cb, e,
-            )
 
 
 def _extract_served_item_ids(anticipated: Dict) -> List[str]:
@@ -693,26 +468,7 @@ class MaximemSynapSDK:
         self._client_id: Optional[str] = None
 
         from .cache.anticipation_cache import AnticipationCache
-        from .cache.short_term_store import ShortTermContextStore
         self._anticipation_cache = AnticipationCache()
-        # SDK-authoritative short-term context store (gated by the
-        # `sdk_st_authoritative` server-side feature flag — see
-        # docs/internal/sdk_authoritative_short_term_context_plan.md).
-        # Populated by `compaction_update` bundles arriving on the Listen
-        # stream and by local `record_message`/`send_message` appends.
-        self._st_store = ShortTermContextStore()
-        # Cached server-decided value of the feature flag, keyed by
-        # instance_id. None = not-yet-checked. Refreshed opportunistically
-        # via `_refresh_st_authoritative_flag()`.
-        self._st_authoritative_enabled: Optional[bool] = None
-
-        # Phase 4 — typed compaction-update subscribers (per-conversation
-        # callbacks fired when a `compaction_update` bundle arrives on the
-        # Listen stream). Keyed by conversation_id → list of callables.
-        # Maintained by ConversationContextInterface.subscribe_to_compaction_updates;
-        # dispatched from InstanceInterface._handle_anticipated_bundle.
-        self._compaction_subscribers: Dict[str, List[Callable[[Dict[str, Any]], Any]]] = {}
-        self._compaction_subscribers_lock = threading.RLock()
 
         self._turn_counters: Dict[str, int] = {}
         self._user_summary_interval: int = 5
@@ -768,29 +524,6 @@ class MaximemSynapSDK:
         key = conversation_id or "_global"
         self._turn_counters[key] = self._turn_counters.get(key, 0) + 1
         return self._turn_counters[key]
-
-    def _is_st_authoritative(self) -> bool:
-        """Whether SDK-authoritative short-term context is enabled.
-
-        Resolution order:
-          1. Cached value (``_st_authoritative_enabled``) — set by
-             ``initialize()``.
-          2. Explicit ``SDKConfig.sdk_st_authoritative``.
-          3. Env var ``SYNAP_SDK_ST_AUTHORITATIVE`` (truthy strings only).
-
-        Defaults to False.
-        """
-        if self._st_authoritative_enabled is not None:
-            return self._st_authoritative_enabled
-
-        enabled = bool(getattr(self._config, "sdk_st_authoritative", False))
-        if not enabled:
-            env_val = os.environ.get("SYNAP_SDK_ST_AUTHORITATIVE", "").strip().lower()
-            if env_val in {"1", "true", "yes", "on"}:
-                enabled = True
-
-        self._st_authoritative_enabled = enabled
-        return enabled
 
     def _should_inject_user_summary(self, conversation_id: Optional[str]) -> bool:
         """Check if user summary should be injected this turn."""
@@ -1078,7 +811,6 @@ class MaximemSynapSDK:
             )
         """
         self._ensure_initialized()
-        start_time = datetime.now(timezone.utc)
 
         # Build parallel fetch tasks based on provided identifiers and scope filter
         tasks = []
@@ -1175,25 +907,6 @@ class MaximemSynapSDK:
             include_scope=include_scope_labels,
             include_conversation_context=include_conversation_context,
         )
-
-        # Audit enrichment for the unified fetch — uses a freshly minted
-        # correlation_id since the parallel sub-fetches each generated
-        # their own. The Requests page treats unified-scope rows as a
-        # separate audit entry.
-        try:
-            unified_correlation_id = generate_correlation_id(self.instance_id)
-            asyncio.ensure_future(_emit_context_assembled_event(
-                sdk=self,
-                correlation_id=unified_correlation_id,
-                response=merged,
-                scope="unified",
-                start_time=start_time,
-                conversation_id=conversation_id or "",
-                user_id=user_id or "",
-                customer_id=customer_id or "",
-            ))
-        except Exception as e:
-            logger.debug("unified context_assembled emit setup failed: %s", e)
 
         return merged
 
@@ -1377,7 +1090,7 @@ class ConversationInterface:
         """
         controller = self._ensure_controller()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
-        result = await controller.record_message(
+        return await controller.record_message(
             conversation_id=conversation_id,
             role=role,
             content=content,
@@ -1387,30 +1100,6 @@ class ConversationInterface:
             metadata=metadata,
             correlation_id=correlation_id,
         )
-        # Mirror the turn into the SDK-authoritative ST cache only AFTER
-        # the server acknowledges the write (D3 in the plan). Append on
-        # success guarantees the SDK cache and the server's view stay
-        # consistent w.r.t. which turns the next compaction will see.
-        if self._sdk._is_st_authoritative():
-            try:
-                recorded_at = result.get("recorded_at") if isinstance(result, dict) else None
-                ts = None
-                if recorded_at:
-                    try:
-                        from datetime import datetime as _dt
-                        rv = recorded_at[:-1] + "+00:00" if recorded_at.endswith("Z") else recorded_at
-                        ts = _dt.fromisoformat(rv)
-                    except Exception:
-                        ts = None
-                self._sdk._st_store.append_turn(
-                    conversation_id=conversation_id,
-                    role=role,
-                    content=content,
-                    timestamp=ts,
-                )
-            except Exception as e:
-                logger.warning("Failed to append turn to ST store: %s", e)
-        return result
 
     async def record_messages_batch(
         self,
@@ -1426,29 +1115,10 @@ class ConversationInterface:
         """
         controller = self._ensure_controller()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
-        result = await controller.record_messages_batch(
+        return await controller.record_messages_batch(
             messages=messages,
             correlation_id=correlation_id,
         )
-        if self._sdk._is_st_authoritative():
-            # Best-effort mirror: only the rows the server confirmed succeeded
-            # should be reflected in local cache. The batch result has a
-            # per-message ``results`` array aligned with the input order; rows
-            # without a ``message_id`` are treated as failed (matches the
-            # server-side route's response shape).
-            results = result.get("results", []) if isinstance(result, dict) else []
-            for msg, res in zip(messages, results):
-                if not isinstance(res, dict) or not res.get("message_id"):
-                    continue
-                try:
-                    self._sdk._st_store.append_turn(
-                        conversation_id=msg.get("conversation_id", ""),
-                        role=msg.get("role", "user"),
-                        content=msg.get("content", ""),
-                    )
-                except Exception as e:
-                    logger.warning("Failed to append batch turn to ST store: %s", e)
-        return result
 
 
 class ConversationContextInterface:
@@ -1456,91 +1126,6 @@ class ConversationContextInterface:
 
     def __init__(self, sdk: MaximemSynapSDK):
         self._sdk = sdk
-
-    # ------------------------------------------------------------------
-    # Phase 4: typed compaction-update subscription
-    # ------------------------------------------------------------------
-
-    def subscribe_to_compaction_updates(
-        self,
-        conversation_id: str,
-        callback: Callable[[Dict[str, Any]], Any],
-    ) -> Callable[[], None]:
-        """Register ``callback`` to fire whenever a ``compaction_update``
-        bundle arrives on the Listen stream for ``conversation_id``.
-
-        Without this typed API, callers had to subscribe to every bundle
-        via ``sdk.instance.listen(on_context=...)`` and filter for
-        ``_bundle_type == "compaction_update"`` themselves. This wraps that
-        for the common case.
-
-        Multiple callbacks can be registered for the same conversation;
-        they fire in registration order. Both sync and ``async def``
-        callables are accepted — async ones are scheduled via
-        ``asyncio.create_task`` (and silently skipped if no event loop
-        is running, matching the standard SDK callback contract).
-
-        Returns an ``unsubscribe()`` thunk that removes this specific
-        subscription. Calling it more than once is a no-op.
-
-        Args:
-            conversation_id: Conversation to subscribe to. Must be non-empty.
-            callback: Receives the raw bundle dict (same shape passed to
-                ``on_context``). The ``conversation_context`` sub-dict
-                carries the compaction's ``summary``, ``compaction_id``,
-                ``end_timestamp``, etc.
-
-        Returns:
-            Callable that removes this subscription when invoked.
-
-        Raises:
-            InvalidInputError: If ``conversation_id`` is empty.
-        """
-        if not conversation_id:
-            raise InvalidInputError("conversation_id is required")
-        if callback is None:
-            raise InvalidInputError("callback is required")
-
-        sdk = self._sdk
-        with sdk._compaction_subscribers_lock:
-            subs = sdk._compaction_subscribers.setdefault(conversation_id, [])
-            subs.append(callback)
-
-        unsubscribed = [False]
-
-        def unsubscribe() -> None:
-            if unsubscribed[0]:
-                return
-            unsubscribed[0] = True
-            with sdk._compaction_subscribers_lock:
-                subs2 = sdk._compaction_subscribers.get(conversation_id)
-                if not subs2:
-                    return
-                try:
-                    subs2.remove(callback)
-                except ValueError:
-                    pass
-                if not subs2:
-                    sdk._compaction_subscribers.pop(conversation_id, None)
-
-        return unsubscribe
-
-    def unsubscribe_all_compaction_updates(
-        self, conversation_id: Optional[str] = None
-    ) -> int:
-        """Remove subscribers. If ``conversation_id`` is provided, only
-        subscribers for that conversation are removed; otherwise every
-        subscriber across every conversation is removed. Returns the
-        count removed.
-        """
-        sdk = self._sdk
-        with sdk._compaction_subscribers_lock:
-            if conversation_id is None:
-                count = sum(len(v) for v in sdk._compaction_subscribers.values())
-                sdk._compaction_subscribers.clear()
-                return count
-            popped = sdk._compaction_subscribers.pop(conversation_id, None)
-            return len(popped) if popped else 0
 
     async def fetch(
         self,
@@ -1647,28 +1232,22 @@ class ConversationContextInterface:
                 # Fetch from cloud
                 auth_context = await self._sdk._get_auth_context(correlation_id)
 
-                # Phase 2: when we have a warm local ST cache for this
-                # conversation, tell the server to skip ST assembly.
-                skip_server_st = _should_skip_server_st(self._sdk, conversation_id)
-                body = {
-                    "conversation_id": conversation_id,
-                    "search_query": search_query,
-                    "max_results": max_results,
-                    "types": types or ["all"],
-                    "mode": mode,
-                    # Pass scope ids when the caller supplied them so the
-                    # server doesn't have to derive them from the
-                    # conversation table. Avoids the async-write /
-                    # sync-read race against the tracker.
-                    **({"user_id": user_id} if user_id else {}),
-                    **({"customer_id": customer_id} if customer_id else {}),
-                }
-                if skip_server_st:
-                    body["include_conversation_context"] = False
                 result = await self._sdk._http_transport.post(
                     "/v1/context/conversation/fetch",
                     auth_context=auth_context,
-                    json=body,
+                    json={
+                        "conversation_id": conversation_id,
+                        "search_query": search_query,
+                        "max_results": max_results,
+                        "types": types or ["all"],
+                        "mode": mode,
+                        # Pass scope ids when the caller supplied them so the
+                        # server doesn't have to derive them from the
+                        # conversation table. Avoids the async-write /
+                        # sync-read race against the tracker.
+                        **({"user_id": user_id} if user_id else {}),
+                        **({"customer_id": customer_id} if customer_id else {}),
+                    },
                     correlation_id=correlation_id,
                 )
 
@@ -1682,11 +1261,6 @@ class ConversationContextInterface:
                 if "conversation_context" in result:
                     context_data["conversation_context"] = result["conversation_context"]
                 response = ContextResponse.from_cloud_response(context_data, metadata)
-
-                # Phase 2: splice the locally-cached ST block onto the
-                # response so consumers see a unified shape.
-                if skip_server_st:
-                    _merge_local_st_into_response(self._sdk, response, conversation_id)
 
                 # Cache the result (skip empty responses to avoid caching transient failures)
                 if any(context_data.get(k) for k in ("facts", "preferences", "episodes", "emotions", "temporal_events", "conversation_context")):
@@ -1723,19 +1297,6 @@ class ConversationContextInterface:
             source=response.metadata.source,
             items_count=items_count,
             conversation_id=conversation_id,
-        ))
-
-        # Audit enrichment — fire-and-forget snapshot of the composition
-        # the consumer LLM will actually see (D4/D5 in the plan).
-        asyncio.ensure_future(_emit_context_assembled_event(
-            sdk=self._sdk,
-            correlation_id=correlation_id,
-            response=response,
-            scope="conversation",
-            start_time=start_time,
-            conversation_id=conversation_id,
-            user_id=user_id or "",
-            customer_id=customer_id or "",
         ))
 
         # Periodic user summary injection. Section 15 — only inject when the
@@ -1857,25 +1418,6 @@ class ConversationContextInterface:
         self._sdk._ensure_initialized()
 
         correlation_id = generate_correlation_id(self._sdk.instance_id)
-
-        # SDK-authoritative path: serve from the in-memory ST store when
-        # the feature is on, a compaction has been received, and the
-        # caller hasn't pinned a specific version (we only cache the
-        # latest).
-        if version is None and self._sdk._is_st_authoritative():
-            try:
-                entry = self._sdk._st_store.get(conversation_id)
-                if entry and entry.has_compaction():
-                    from .formatter.context_for_prompt import LocalContextFormatter
-                    rendered = LocalContextFormatter.render_compacted(
-                        entry, format=format, correlation_id=correlation_id
-                    )
-                    if rendered is not None:
-                        return rendered
-            except Exception as e:
-                logger.warning(
-                    "ST-cache get_compacted render failed (falling through): %s", e
-                )
 
         # Check local cache first (skip when version is pinned)
         if version is None:
@@ -2022,24 +1564,6 @@ class ConversationContextInterface:
             ContextForPromptResponse with formatted_context, recent_messages, and metadata
         """
         self._sdk._ensure_initialized()
-
-        # SDK-authoritative path: render locally from the ST store when
-        # the feature is on and we have either a compaction or pending
-        # raw turns for this conversation. This bypasses the cloud
-        # round-trip entirely on the warm path.
-        if self._sdk._is_st_authoritative():
-            try:
-                entry = self._sdk._st_store.get(conversation_id)
-                if entry is not None and (
-                    entry.has_compaction() or entry.recent_turns
-                ):
-                    from .formatter.context_for_prompt import LocalContextFormatter
-                    return LocalContextFormatter.render_for_prompt(entry, style=style)
-            except Exception as e:
-                logger.warning(
-                    "ST-cache get_context_for_prompt render failed (falling through): %s",
-                    e,
-                )
 
         # Check local cache first (Tier 2 optimization)
         try:
@@ -2200,22 +1724,18 @@ class UserContextInterface:
             else:
                 auth_context = await self._sdk._get_auth_context(correlation_id)
 
-                skip_server_st = _should_skip_server_st(self._sdk, conversation_id)
-                body = {
-                    "user_id": user_id,
-                    "customer_id": customer_id,
-                    "conversation_id": conversation_id,
-                    "search_query": search_query,
-                    "max_results": max_results,
-                    "types": types or ["all"],
-                    "mode": mode,
-                }
-                if skip_server_st:
-                    body["include_conversation_context"] = False
                 result = await self._sdk._http_transport.post(
                     "/v1/context/user/fetch",
                     auth_context=auth_context,
-                    json=body,
+                    json={
+                        "user_id": user_id,
+                        "customer_id": customer_id,
+                        "conversation_id": conversation_id,
+                        "search_query": search_query,
+                        "max_results": max_results,
+                        "types": types or ["all"],
+                        "mode": mode,
+                    },
                     correlation_id=correlation_id,
                 )
 
@@ -2229,9 +1749,6 @@ class UserContextInterface:
                 if "conversation_context" in result:
                     context_data["conversation_context"] = result["conversation_context"]
                 response = ContextResponse.from_cloud_response(context_data, metadata)
-
-                if skip_server_st:
-                    _merge_local_st_into_response(self._sdk, response, conversation_id)
 
                 # Cache (skip empty responses to avoid caching transient failures)
                 if any(context_data.get(k) for k in ("facts", "preferences", "episodes", "emotions", "temporal_events", "conversation_context")):
@@ -2268,17 +1785,6 @@ class UserContextInterface:
             items_count=items_count,
             conversation_id=conversation_id or "",
             user_id=user_id,
-        ))
-
-        asyncio.ensure_future(_emit_context_assembled_event(
-            sdk=self._sdk,
-            correlation_id=correlation_id,
-            response=response,
-            scope="user",
-            start_time=start_time,
-            conversation_id=conversation_id or "",
-            user_id=user_id,
-            customer_id=customer_id or "",
         ))
 
         # Periodic user summary injection
@@ -2382,21 +1888,17 @@ class CustomerContextInterface:
             else:
                 auth_context = await self._sdk._get_auth_context(correlation_id)
 
-                skip_server_st = _should_skip_server_st(self._sdk, conversation_id)
-                body = {
-                    "customer_id": customer_id,
-                    "conversation_id": conversation_id,
-                    "search_query": search_query,
-                    "max_results": max_results,
-                    "types": types or ["all"],
-                    "mode": mode,
-                }
-                if skip_server_st:
-                    body["include_conversation_context"] = False
                 result = await self._sdk._http_transport.post(
                     "/v1/context/customer/fetch",
                     auth_context=auth_context,
-                    json=body,
+                    json={
+                        "customer_id": customer_id,
+                        "conversation_id": conversation_id,
+                        "search_query": search_query,
+                        "max_results": max_results,
+                        "types": types or ["all"],
+                        "mode": mode,
+                    },
                     correlation_id=correlation_id,
                 )
 
@@ -2410,9 +1912,6 @@ class CustomerContextInterface:
                 if "conversation_context" in result:
                     context_data["conversation_context"] = result["conversation_context"]
                 response = ContextResponse.from_cloud_response(context_data, metadata)
-
-                if skip_server_st:
-                    _merge_local_st_into_response(self._sdk, response, conversation_id)
 
                 # Skip caching empty responses to avoid caching transient failures
                 if any(context_data.get(k) for k in ("facts", "preferences", "episodes", "emotions", "temporal_events", "conversation_context")):
@@ -2447,16 +1946,6 @@ class CustomerContextInterface:
             mode=mode,
             source=response.metadata.source,
             items_count=items_count,
-            conversation_id=conversation_id or "",
-            customer_id=customer_id,
-        ))
-
-        asyncio.ensure_future(_emit_context_assembled_event(
-            sdk=self._sdk,
-            correlation_id=correlation_id,
-            response=response,
-            scope="customer",
-            start_time=start_time,
             conversation_id=conversation_id or "",
             customer_id=customer_id,
         ))
@@ -2561,20 +2050,16 @@ class ClientContextInterface:
             else:
                 auth_context = await self._sdk._get_auth_context(correlation_id)
 
-                skip_server_st = _should_skip_server_st(self._sdk, conversation_id)
-                body = {
-                    "conversation_id": conversation_id,
-                    "search_query": search_query,
-                    "max_results": max_results,
-                    "types": types or ["all"],
-                    "mode": mode,
-                }
-                if skip_server_st:
-                    body["include_conversation_context"] = False
                 result = await self._sdk._http_transport.post(
                     "/v1/context/client/fetch",
                     auth_context=auth_context,
-                    json=body,
+                    json={
+                        "conversation_id": conversation_id,
+                        "search_query": search_query,
+                        "max_results": max_results,
+                        "types": types or ["all"],
+                        "mode": mode,
+                    },
                     correlation_id=correlation_id,
                 )
 
@@ -2588,9 +2073,6 @@ class ClientContextInterface:
                 if "conversation_context" in result:
                     context_data["conversation_context"] = result["conversation_context"]
                 response = ContextResponse.from_cloud_response(context_data, metadata)
-
-                if skip_server_st:
-                    _merge_local_st_into_response(self._sdk, response, conversation_id)
 
                 # Skip caching empty responses to avoid caching transient failures
                 if any(context_data.get(k) for k in ("facts", "preferences", "episodes", "emotions", "temporal_events", "conversation_context")):
@@ -2625,15 +2107,6 @@ class ClientContextInterface:
             mode=mode,
             source=response.metadata.source,
             items_count=items_count,
-            conversation_id=conversation_id or "",
-        ))
-
-        asyncio.ensure_future(_emit_context_assembled_event(
-            sdk=self._sdk,
-            correlation_id=correlation_id,
-            response=response,
-            scope="client",
-            start_time=start_time,
             conversation_id=conversation_id or "",
         ))
 
@@ -2717,15 +2190,6 @@ class InstanceInterface:
             )
 
         if bundle_type == "compaction_update":
-            # Apply to the SDK-authoritative ST store so subsequent
-            # get_compacted / get_context_for_prompt calls can serve from
-            # cache. Safe to do unconditionally — the store is harmless
-            # when the feature is off (just unused).
-            try:
-                self._sdk._st_store.apply_compaction(bundle_dict)
-            except Exception as e:
-                logger.warning("Failed to apply compaction to ST store: %s", e)
-
             conv_id = bundle_dict.get("_anticipation_conversation_id")
             if conv_id:
                 try:
@@ -2745,11 +2209,6 @@ class InstanceInterface:
                     )
                 except Exception:
                     pass  # Non-critical
-
-                # Phase 4: dispatch to typed subscribers for this conversation.
-                # Failures in user callbacks are swallowed and logged so a
-                # bad listener can't break the stream-reader loop.
-                _dispatch_compaction_subscribers(self._sdk, conv_id, bundle_dict)
 
         # Always invoke user callback regardless of type
         if hasattr(self, "_on_context_callback") and self._on_context_callback:
@@ -2831,24 +2290,6 @@ class InstanceInterface:
             payload["context_types"] = list(context_types)
 
         await self._controller._transport.send(payload)
-
-        # Mirror the turn locally for SDK-authoritative ST mode. gRPC send
-        # is fire-and-forget (no ack), so we treat the successful write to
-        # the stream as confirmation. Only mirror conversational events,
-        # not tool_call/context_request hints.
-        if (
-            self._sdk._is_st_authoritative()
-            and event_type in ("user_message", "assistant_message")
-            and conversation_id
-        ):
-            try:
-                self._sdk._st_store.append_turn(
-                    conversation_id=conversation_id,
-                    role=role,
-                    content=content,
-                )
-            except Exception as e:
-                logger.warning("Failed to append gRPC turn to ST store: %s", e)
 
     async def record_thinking(
         self,
