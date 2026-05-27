@@ -37,7 +37,7 @@ class SDKConfig(BaseModel):
     api_base_url: Optional[str] = None  # Override default API base URL
     grpc_host: Optional[str] = None  # Override default gRPC host
     grpc_port: Optional[int] = None  # Override default gRPC port (e.g. 50051)
-    grpc_use_tls: bool = True  # Set False for plaintext connections (testing)
+    grpc_use_tls: Optional[bool] = None  # None=use transport default (TLS on); False=plaintext
     storage_path: Optional[str] = None  # Override default cache path (~/.synap/)
     cache_backend: Optional[str] = "sqlite"  # "sqlite" or None
     session_timeout_minutes: int = Field(default=30, ge=5, le=1440)

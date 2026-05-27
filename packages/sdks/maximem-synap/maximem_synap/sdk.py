@@ -681,6 +681,33 @@ class MaximemSynapSDK:
         self.instance_id = instance_id or os.environ.get("SYNAP_INSTANCE_ID", "")
         self._api_key = api_key
         self._config = config or SDKConfig()
+        # Env-var fallbacks for transport endpoints. Priority:
+        # explicit SDKConfig field > env var > hardcoded transport default.
+        # Lets clients point a fresh SDK at staging/dev without instantiating
+        # SDKConfig — matches the SYNAP_API_KEY / SYNAP_INSTANCE_ID pattern.
+        if self._config.api_base_url is None:
+            env_base = os.environ.get("SYNAP_BASE_URL", "").strip()
+            if env_base:
+                self._config.api_base_url = env_base
+        if self._config.grpc_host is None:
+            env_host = os.environ.get("SYNAP_GRPC_HOST", "").strip()
+            if env_host:
+                self._config.grpc_host = env_host
+        if self._config.grpc_port is None:
+            env_port = os.environ.get("SYNAP_GRPC_PORT", "").strip()
+            if env_port:
+                try:
+                    self._config.grpc_port = int(env_port)
+                except ValueError:
+                    logger.warning(
+                        "Ignoring non-integer SYNAP_GRPC_PORT=%r", env_port
+                    )
+        if self._config.grpc_use_tls is None:
+            env_tls = os.environ.get("SYNAP_GRPC_USE_TLS", "").strip().lower()
+            if env_tls in {"1", "true", "yes", "on"}:
+                self._config.grpc_use_tls = True
+            elif env_tls in {"0", "false", "no", "off"}:
+                self._config.grpc_use_tls = False
         self._initialized = False
 
         # Components (initialized lazily or in initialize())
@@ -2665,11 +2692,14 @@ class InstanceInterface:
 
     def _create_transport(self, **kwargs) -> GRPCTransport:
         """Factory that creates a GRPCTransport with SDK configuration."""
+        # grpc_use_tls is Optional[bool]: None means "use transport default"
+        # (TLS on). False means caller explicitly wants plaintext.
+        cfg_tls = self._sdk._config.grpc_use_tls
         transport = GRPCTransport(
             instance_id=self._sdk.instance_id,
             host=self._sdk._config.grpc_host,
             port=self._sdk._config.grpc_port,
-            use_tls=self._sdk._config.grpc_use_tls,
+            use_tls=True if cfg_tls is None else cfg_tls,
             timeouts=self._sdk._config.timeouts,
             telemetry_callback=self._sdk._on_telemetry_event,
             **kwargs,
