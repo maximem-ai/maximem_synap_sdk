@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maximem-synap-langgraph"
-version = "0.3.0"
+version = "0.3.2"
 description = "Synap memory integration for LangGraph — BaseStore + BaseCheckpointSaver"
 readme = "README.md"
 requires-python = ">=3.11"

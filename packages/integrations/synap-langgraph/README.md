@@ -52,7 +52,11 @@ async def remember(state, runtime):
 - **Reads** (`get`, `search`, `get_tuple`, `list`) degrade gracefully — they log at `ERROR` and return `None`/`[]` rather than crashing the graph.
 - **Deletes** (`SynapStore.delete`, `SynapCheckpointSaver.delete_thread`) warn once and no-op — Synap has no public delete API.
 
-> **Note on exact key lookups.** `get`/`search` match memories by custom metadata markers. On instances that strip custom metadata during extraction (e.g. MACA atomization), exact-key `get` is unreliable and a one-time warning is logged — semantic `search` remains the reliable path. Job/document-level attribution (mapping fragments back to a source id) is not done in the store; build it in app code from the ids returned at write time.
+> **Note on metadata-stripping backends.** `get`/`search` identify items by custom metadata markers. On instances that atomize content during extraction (e.g. MACA), those markers are stripped, so:
+> - **`search`** falls back to returning the **scope-filtered** results Synap ranked (semantic retrieval still works). Scope (`user_id`/`customer_id`) is enforced at the fetch layer, but sub-namespace isolation *within* a scope is not. A one-time warning is logged. Set `SynapStore(..., semantic_fallback=False)` for strict namespace semantics (search returns `[]` when markers are absent).
+> - **`get`** (exact key) returns `None` — there's no reliable way to resolve an exact key without the markers. Use `search` as the read path.
+>
+> Job/document-level attribution (mapping fragments back to a source id) is not done in the store; build it in app code.
 
 ## When to use which checkpointer
 

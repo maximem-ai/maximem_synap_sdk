@@ -31,9 +31,14 @@ Anticipation (optional, outside the BaseStore contract): construct with
 ``include_conversation_context=True`` and drive the conversation channel via
 :meth:`SynapStore.record_message` so just-stated context is in play on reads.
 
-Caveat: ``get``/``search`` match on custom metadata markers. Instances that
-strip custom metadata during extraction (e.g. MACA atomization) make exact
-key lookups unreliable — a one-time warning fires when this is detected.
+Caveat — metadata-stripping backends: ``get``/``search`` match on custom
+metadata markers, which instances that atomize content during extraction
+(e.g. MACA) strip. When that happens (detected + warned once):
+- ``search`` falls back to returning the scope-filtered results Synap ranked
+  (semantic retrieval still works; sub-namespace isolation within the
+  user/customer scope is not enforced). Disable with ``semantic_fallback=False``.
+- ``get`` (exact key) returns ``None`` — there's no reliable way to resolve an
+  exact key without the markers, so ``search`` is the supported read path.
 
 Error policy:
 
@@ -133,6 +138,7 @@ class SynapStore(BaseStore):
         *,
         mode: str = "accurate",
         include_conversation_context: bool = False,
+        semantic_fallback: bool = True,
     ) -> None:
         if sdk is None:
             raise ValueError("SynapStore requires a non-None sdk")
@@ -148,6 +154,14 @@ class SynapStore(BaseStore):
         self.customer_id = customer_id
         self.mode = mode
         self.include_conversation_context = include_conversation_context
+        # When the backend strips our namespace/key markers during extraction
+        # (e.g. MACA), exact-namespace matching is impossible. With this on
+        # (default), ``search`` falls back to returning the scope-filtered
+        # results Synap ranked — semantic retrieval still works, but sub-
+        # namespace isolation within a scope is NOT enforced (only user/
+        # customer scope, applied at the fetch layer). Set False for strict
+        # namespace semantics (search returns [] when markers are absent).
+        self.semantic_fallback = semantic_fallback
         # A user_id pins the store to user scope; with only a customer_id it
         # operates on the customer-wide shared pool (visible to every user in
         # the deployment). The scope drives both the write owner and which
@@ -289,6 +303,18 @@ class SynapStore(BaseStore):
 
         if items and not saw_marker:
             self._warn_markers_stripped()
+            if self.semantic_fallback:
+                # Markers were stripped during extraction, so we can't match by
+                # namespace/key. Scope (user/customer) is already enforced by
+                # fetch, so return what Synap ranked rather than nothing. Keyed
+                # by Synap memory id; namespace stamped as the search prefix.
+                # NOTE: sub-namespace isolation within the scope is not enforced
+                # in this path (disable via semantic_fallback=False).
+                fallback = [
+                    _item_to_search_item(it, namespace_prefix, str(getattr(it, "id", "")))
+                    for it in items
+                ]
+                return fallback[offset : offset + limit]
         return matches[offset : offset + limit]
 
     async def _adelete(
