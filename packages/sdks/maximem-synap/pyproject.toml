@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maximem-synap"
-version = "0.2.5"
+version = "0.2.6"
 description = "Python SDK for MaximemSynap context management system"
 readme = "README.md"
 requires-python = ">=3.11"

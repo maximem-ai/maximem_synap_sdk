@@ -6,17 +6,34 @@ individual ops (:class:`PutOp`, :class:`GetOp`, :class:`SearchOp`,
 (``put``/``get``/``search``/``delete``/``list_namespaces`` + async variants)
 is inherited unchanged from ``BaseStore`` and rides through ``(a)batch``.
 
+Scope:
+
+- A ``user_id`` pins the store to **user scope**. With only a ``customer_id``
+  (``user_id=None``) it operates on the **customer-wide shared pool** visible
+  to every user in the deployment. At least one must be provided.
+
 Storage strategy:
 
 - Each ``put`` is ingested as a Synap memory via ``sdk.memories.create`` with
   the value JSON-encoded in ``document`` and ``metadata`` tagging the
   namespace tuple (joined by ``/``) plus the key.
 - ``get`` retrieves via ``sdk.fetch`` with ``search_query=[namespace+key]``
-  and filters the returned facts by the namespace/key metadata markers.
+  and filters by the namespace/key metadata markers.
 - ``search`` uses ``sdk.fetch(search_query=[query])`` and filters by
   namespace-prefix in metadata. Scores flow through from ``confidence``.
+- Reads scan **all** memory types Synap returns (facts, preferences,
+  episodes, emotions, temporal_events) — not just facts — so stated
+  preferences are no longer silently dropped.
 - ``delete`` and ``list_namespaces`` warn + no-op (Synap has no public
   delete API, same pattern as synap-crewai).
+
+Anticipation (optional, outside the BaseStore contract): construct with
+``include_conversation_context=True`` and drive the conversation channel via
+:meth:`SynapStore.record_message` so just-stated context is in play on reads.
+
+Caveat: ``get``/``search`` match on custom metadata markers. Instances that
+strip custom metadata during extraction (e.g. MACA atomization) make exact
+key lookups unreliable — a one-time warning fires when this is detected.
 
 Error policy:
 
@@ -76,6 +93,17 @@ def _matches_namespace_prefix(
     return item_ns == pref_str or item_ns.startswith(pref_str + "/")
 
 
+def _matches_namespace_prefix(
+    item_ns: str,
+    prefix: tuple[str, ...],
+) -> bool:
+    """Return True iff ``item_ns`` sits at or below ``prefix``."""
+    if not prefix:
+        return True
+    pref_str = _ns_str(prefix)
+    return item_ns == pref_str or item_ns.startswith(pref_str + "/")
+
+
 class SynapStore(BaseStore):
     """LangGraph cross-thread long-term memory store backed by Synap.
 
@@ -86,7 +114,11 @@ class SynapStore(BaseStore):
         from synap_langgraph import SynapStore
 
         sdk = MaximemSynapSDK(api_key="sk-...")
+
+        # User-scoped private memory:
         store = SynapStore(sdk, user_id="alice", customer_id="acme")
+        # Customer-wide shared pool (no user_id):
+        shared = SynapStore(sdk, customer_id="acme")
 
         graph = StateGraph(MyState)
         # ... add nodes / edges ...
@@ -96,23 +128,34 @@ class SynapStore(BaseStore):
     def __init__(
         self,
         sdk: MaximemSynapSDK,
-        user_id: str,
+        user_id: Optional[str] = None,
         customer_id: str = "",
         *,
         mode: str = "accurate",
+        include_conversation_context: bool = False,
     ) -> None:
         if sdk is None:
             raise ValueError("SynapStore requires a non-None sdk")
-        if not user_id:
-            raise ValueError("SynapStore requires a non-empty user_id")
+        if not user_id and not customer_id:
+            raise ValueError(
+                "SynapStore requires at least one of user_id (user scope) or "
+                "customer_id (customer-wide shared scope)"
+            )
 
         super().__init__()
         self.sdk = sdk
-        self.user_id = user_id
+        self.user_id = user_id or ""
         self.customer_id = customer_id
         self.mode = mode
+        self.include_conversation_context = include_conversation_context
+        # A user_id pins the store to user scope; with only a customer_id it
+        # operates on the customer-wide shared pool (visible to every user in
+        # the deployment). The scope drives both the write owner and which
+        # scope `fetch` queries.
+        self._scopes = ["user"] if user_id else ["customer"]
         self._delete_warned = False
         self._listns_warned = False
+        self._marker_warned = False
 
     # ── abstract methods ────────────────────────────────────────────────────
 
@@ -164,7 +207,7 @@ class SynapStore(BaseStore):
         ):
             await self.sdk.memories.create(
                 document=document,
-                user_id=self.user_id,
+                user_id=self.user_id or None,
                 customer_id=self.customer_id or None,
                 metadata=metadata,
             )
@@ -177,12 +220,13 @@ class SynapStore(BaseStore):
         ns = _ns_str(namespace)
         try:
             response = await self.sdk.fetch(
-                user_id=self.user_id,
+                user_id=self.user_id or None,
                 customer_id=self.customer_id or None,
                 search_query=[f"{ns} {key}"],
                 max_results=50,
                 mode=self.mode,
-                include_conversation_context=False,
+                scopes=self._scopes,
+                include_conversation_context=self.include_conversation_context,
             )
         except Exception as exc:  # noqa: BLE001 — read-side degrades gracefully
             logger.error(
@@ -191,10 +235,13 @@ class SynapStore(BaseStore):
             )
             return None
 
-        for fact in getattr(response, "facts", None) or []:
-            md = getattr(fact, "metadata", None) or {}
+        items = _iter_items(response)
+        for item in items:
+            md = getattr(item, "metadata", None) or {}
             if md.get(_MARKER) and md.get(_NS) == ns and md.get(_KEY) == key:
-                return _fact_to_item(fact, namespace, key)
+                return _item_to_item(item, namespace, key)
+        if items and not any((getattr(i, "metadata", None) or {}).get(_MARKER) for i in items):
+            self._warn_markers_stripped()
         return None
 
     async def _asearch(
@@ -208,12 +255,13 @@ class SynapStore(BaseStore):
         q = query or _ns_str(namespace_prefix) or ""
         try:
             response = await self.sdk.fetch(
-                user_id=self.user_id,
+                user_id=self.user_id or None,
                 customer_id=self.customer_id or None,
                 search_query=[q] if q else None,
                 max_results=max(limit + offset, 10),
                 mode=self.mode,
-                include_conversation_context=False,
+                scopes=self._scopes,
+                include_conversation_context=self.include_conversation_context,
             )
         except Exception as exc:  # noqa: BLE001 — read-side degrades gracefully
             logger.error(
@@ -222,20 +270,25 @@ class SynapStore(BaseStore):
             )
             return []
 
+        items = _iter_items(response)
         matches: list[SearchItem] = []
-        for fact in getattr(response, "facts", None) or []:
-            md = getattr(fact, "metadata", None) or {}
+        saw_marker = False
+        for item in items:
+            md = getattr(item, "metadata", None) or {}
             if not md.get(_MARKER):
                 continue
+            saw_marker = True
             item_ns_str = md.get(_NS) or ""
             if not _matches_namespace_prefix(item_ns_str, namespace_prefix):
                 continue
             if filter_ and not _filter_matches(md, filter_):
                 continue
             item_ns = tuple(item_ns_str.split("/")) if item_ns_str else ()
-            key = md.get(_KEY) or str(fact.id)
-            matches.append(_fact_to_search_item(fact, item_ns, key))
+            key = md.get(_KEY) or str(getattr(item, "id", ""))
+            matches.append(_item_to_search_item(item, item_ns, key))
 
+        if items and not saw_marker:
+            self._warn_markers_stripped()
         return matches[offset : offset + limit]
 
     async def _adelete(
@@ -259,13 +312,118 @@ class SynapStore(BaseStore):
             self._listns_warned = True
         return []
 
+    def _warn_markers_stripped(self) -> None:
+        if not self._marker_warned:
+            logger.warning(
+                "SynapStore: fetch returned memories but none carried the "
+                "SynapStore markers. This instance is stripping custom metadata "
+                "during extraction (e.g. MACA atomization), so exact get/search "
+                "by key is unreliable here. This warning fires once."
+            )
+            self._marker_warned = True
+
+    # ── anticipation (not part of BaseStore) ────────────────────────────────
+
+    async def arecord_message(
+        self,
+        conversation_id: str,
+        role: str,
+        content: str,
+        *,
+        session_id: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Feed a turn to Synap's conversation channel so anticipation can
+        surface just-stated context on subsequent reads (construct the store
+        with ``include_conversation_context=True``).
+
+        Anticipation has no key/value analogue, so this lives alongside — not
+        inside — the BaseStore contract; it lets a LangGraph node drive the
+        conversation channel without reaching for the raw SDK. Best-effort: a
+        failure here is logged and swallowed so it never breaks an agent turn.
+        """
+        if not self.user_id or not self.customer_id:
+            logger.warning(
+                "SynapStore.record_message needs both user_id and customer_id "
+                "(anticipation is user+customer scoped); skipping."
+            )
+            return
+        try:
+            await self.sdk.conversation.record_message(
+                conversation_id=conversation_id,
+                role=role,
+                content=content,
+                user_id=self.user_id,
+                customer_id=self.customer_id,
+                session_id=session_id,
+                metadata=metadata,
+            )
+        except Exception as exc:  # noqa: BLE001 — anticipation is best-effort
+            logger.warning("SynapStore.record_message failed (non-fatal): %s", exc)
+
+    def record_message(
+        self,
+        conversation_id: str,
+        role: str,
+        content: str,
+        *,
+        session_id: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Sync wrapper around :meth:`arecord_message`."""
+        run_async(
+            self.arecord_message(
+                conversation_id, role, content,
+                session_id=session_id, metadata=metadata,
+            )
+        )
+
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
 
-def _fact_to_item(fact: Any, namespace: tuple[str, ...], key: str) -> Item:
-    value = _parse_value(getattr(fact, "content", "") or "")
-    now = _as_datetime(getattr(fact, "extracted_at", None))
+def _iter_items(response: Any) -> list[Any]:
+    """Every memory item Synap returned, across all types — facts,
+    preferences, episodes, emotions, temporal_events — not just ``facts``.
+
+    Reading only ``facts`` silently drops stated *preferences* (and other
+    types), which Synap routes into their own lists.
+    """
+    all_items = getattr(response, "all_items", None)
+    if callable(all_items):
+        try:
+            return list(all_items() or [])
+        except Exception:  # noqa: BLE001 — fall back to manual bucket union
+            pass
+    items: list[Any] = []
+    for bucket in ("facts", "preferences", "episodes", "emotions", "temporal_events"):
+        items.extend(getattr(response, bucket, None) or [])
+    return items
+
+
+def _filter_matches(metadata: dict[str, Any], filter_: dict[str, Any]) -> bool:
+    """LangGraph ``SearchOp.filter`` semantics: every key/value pair in
+    ``filter_`` must equal the item's metadata. A list filter value matches
+    if the metadata value is one of its members.
+    """
+    for k, v in filter_.items():
+        actual = metadata.get(k)
+        if isinstance(v, (list, tuple, set)):
+            if actual not in v:
+                return False
+        elif actual != v:
+            return False
+    return True
+
+
+def _item_content(item: Any) -> str:
+    """Text of a memory item, regardless of type (episodes use ``summary``)."""
+    return getattr(item, "content", None) or getattr(item, "summary", None) or ""
+
+
+def _item_to_item(item: Any, namespace: tuple[str, ...], key: str) -> Item:
+    value = _parse_value(_item_content(item))
+    now = _as_datetime(getattr(item, "extracted_at", None))
     return Item(
         value=value,
         key=key,
@@ -275,14 +433,14 @@ def _fact_to_item(fact: Any, namespace: tuple[str, ...], key: str) -> Item:
     )
 
 
-def _fact_to_search_item(
-    fact: Any,
+def _item_to_search_item(
+    item: Any,
     namespace: tuple[str, ...],
     key: str,
 ) -> SearchItem:
-    value = _parse_value(getattr(fact, "content", "") or "")
-    now = _as_datetime(getattr(fact, "extracted_at", None))
-    score = getattr(fact, "confidence", None)
+    value = _parse_value(_item_content(item))
+    now = _as_datetime(getattr(item, "extracted_at", None))
+    score = getattr(item, "confidence", None)
     return SearchItem(
         namespace=namespace,
         key=key,
