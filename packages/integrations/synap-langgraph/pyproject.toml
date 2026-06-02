@@ -17,7 +17,7 @@ keywords = ["synap", "memory", "langgraph", "ai", "agents", "checkpointer", "sto
 dependencies = [
     "maximem-synap>=0.2.0",
     "maximem-synap-integrations-common>=0.1.0",
-    "synap-langchain>=0.1.0",
+    "maximem-synap-langchain>=0.2.4",
     "langgraph>=1.0",
 ]
 
