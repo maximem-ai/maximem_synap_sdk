@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maximem-synap-haystack"
-version = "0.1.2"
-description = "Synap memory integration for Haystack"
+version = "0.2.0"
+description = "Synap memory integration for Haystack — SynapMemoryStore + retriever/writer components"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = ["maximem-synap>=0.2.0", "maximem-synap-integrations-common>=0.1.0", "haystack-ai>=2.0"]

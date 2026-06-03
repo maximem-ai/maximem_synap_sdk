@@ -1,23 +1,62 @@
-"""Synap retriever component for Haystack pipelines.
+"""Synap retriever components for Haystack pipelines.
 
-A Haystack @component that retrieves memory context from Synap
-and returns it as a list of Haystack Documents.
+Two read components, both thin wrappers over :class:`SynapMemoryStore` (the store
+owns all SDK interaction — see ``store.py``):
+
+- :class:`SynapRetriever` — RAG-shaped: ``run(query)`` → ``documents`` as a list
+  of Haystack ``Document``s. Use when memory feeds a document-oriented pipeline.
+- :class:`SynapMemoryRetriever` — Mem0-shaped: ``run(query)`` → ``messages`` as a
+  list of ``ChatMessage``s, matching ``mem0_haystack.Mem0MemoryRetriever``. Use
+  when memory feeds a chat/agent pipeline.
+
+Either accept a ready ``store=SynapMemoryStore(...)`` or the ``sdk=...`` +
+scope kwargs (a store is then built internally for convenience).
 """
 
 import logging
 from typing import Dict, List, Optional
 
 from haystack import Document, component
+from haystack.dataclasses import ChatMessage
 
 from maximem_synap import MaximemSynapSDK
-from synap_integrations_common import run_async, wrap_sdk_errors_async
+from synap_haystack.store import SynapMemoryStore
 
 logger = logging.getLogger(__name__)
 
 
+def _resolve_store(
+    store: Optional[SynapMemoryStore],
+    sdk: Optional[MaximemSynapSDK],
+    user_id: str,
+    customer_id: str,
+    conversation_id: Optional[str],
+    mode: str,
+    max_results: int,
+    *,
+    component_name: str,
+) -> SynapMemoryStore:
+    if store is not None:
+        return store
+    if sdk is None:
+        raise ValueError(f"{component_name} requires either a store or an sdk")
+    if not user_id and not customer_id:
+        raise ValueError(
+            f"{component_name} requires a non-empty user_id or customer_id"
+        )
+    return SynapMemoryStore(
+        sdk=sdk,
+        user_id=user_id or None,
+        customer_id=customer_id,
+        conversation_id=conversation_id,
+        mode=mode,
+        max_results=max_results,
+    )
+
+
 @component
 class SynapRetriever:
-    """Haystack component that retrieves memory from Synap.
+    """Haystack component that retrieves memory from Synap as ``Document``s.
 
     Example::
 
@@ -27,81 +66,54 @@ class SynapRetriever:
 
     def __init__(
         self,
-        sdk: MaximemSynapSDK,
-        user_id: str,
+        sdk: Optional[MaximemSynapSDK] = None,
+        user_id: str = "",
+        customer_id: str = "",
+        conversation_id: Optional[str] = None,
+        mode: str = "accurate",
+        max_results: int = 20,
+        *,
+        store: Optional[SynapMemoryStore] = None,
+    ):
+        self.store = _resolve_store(
+            store, sdk, user_id, customer_id, conversation_id, mode, max_results,
+            component_name="SynapRetriever",
+        )
+
+    @component.output_types(documents=List[Document])
+    def run(self, query: str) -> Dict[str, List[Document]]:
+        return {"documents": self.store.search_documents(query=query)}
+
+
+@component
+class SynapMemoryRetriever:
+    """Haystack component that retrieves memory from Synap as ``ChatMessage``s.
+
+    Mirrors ``mem0_haystack.Mem0MemoryRetriever``: drop it into a chat pipeline
+    to surface long-term memory as messages.
+
+    Example::
+
+        retriever = SynapMemoryRetriever(store=store)
+        pipeline.add_component("memory", retriever)
+    """
+
+    def __init__(
+        self,
+        store: Optional[SynapMemoryStore] = None,
+        *,
+        sdk: Optional[MaximemSynapSDK] = None,
+        user_id: str = "",
         customer_id: str = "",
         conversation_id: Optional[str] = None,
         mode: str = "accurate",
         max_results: int = 20,
     ):
-        if sdk is None:
-            raise ValueError("SynapRetriever requires a non-None sdk")
-        if not user_id:
-            raise ValueError("SynapRetriever requires a non-empty user_id")
+        self.store = _resolve_store(
+            store, sdk, user_id, customer_id, conversation_id, mode, max_results,
+            component_name="SynapMemoryRetriever",
+        )
 
-        self.sdk = sdk
-        self.user_id = user_id
-        self.customer_id = customer_id
-        self.conversation_id = conversation_id
-        self.mode = mode
-        self.max_results = max_results
-
-    @component.output_types(documents=List[Document])
-    def run(self, query: str) -> Dict[str, List[Document]]:
-        return run_async(self._arun(query))
-
-    async def _arun(self, query: str) -> Dict[str, List[Document]]:
-        async with wrap_sdk_errors_async(
-            "haystack.SynapRetriever.run",
-            logger,
-            user_id=self.user_id,
-            query_len=len(query),
-        ):
-            response = await self.sdk.fetch(
-                conversation_id=self.conversation_id,
-                user_id=self.user_id,
-                customer_id=self.customer_id or None,
-                search_query=[query],
-                max_results=self.max_results,
-                mode=self.mode,
-                include_conversation_context=False,
-            )
-
-        docs: List[Document] = []
-
-        for fact in response.facts:
-            docs.append(Document(
-                content=fact.content,
-                meta={"type": "fact", "id": fact.id, "confidence": fact.confidence,
-                      "scope": response.scope_map.get(fact.id, "")},
-            ))
-
-        for pref in response.preferences:
-            docs.append(Document(
-                content=pref.content,
-                meta={"type": "preference", "id": pref.id, "strength": pref.strength,
-                      "scope": response.scope_map.get(pref.id, "")},
-            ))
-
-        for ep in response.episodes:
-            docs.append(Document(
-                content=ep.summary,
-                meta={"type": "episode", "id": ep.id, "significance": ep.significance,
-                      "scope": response.scope_map.get(ep.id, "")},
-            ))
-
-        for em in response.emotions:
-            docs.append(Document(
-                content=f"{em.emotion_type}: {em.context}",
-                meta={"type": "emotion", "id": em.id, "intensity": em.intensity,
-                      "scope": response.scope_map.get(em.id, "")},
-            ))
-
-        for te in response.temporal_events:
-            docs.append(Document(
-                content=te.content,
-                meta={"type": "temporal_event", "id": te.id,
-                      "scope": response.scope_map.get(te.id, "")},
-            ))
-
-        return {"documents": docs}
+    @component.output_types(messages=List[ChatMessage])
+    def run(self, query: str) -> Dict[str, List[ChatMessage]]:
+        return {"messages": self.store.search_memories(query=query)}
