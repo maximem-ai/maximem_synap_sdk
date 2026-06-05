@@ -101,3 +101,17 @@ async def fetch_context(
     if resp.status_code >= 400:
         raise SynapAPIError(resp.status_code, resp.text[:500])
     return resp.json()
+
+
+async def get_ingestion_status(ingestion_id: str) -> dict:
+    """Poll the status of a queued ingestion (the long-range pipeline is async).
+    Returns the REST status payload: { status, memories_created, completed_at, ... }."""
+    async with httpx.AsyncClient(
+        base_url=settings.synap_api_url, timeout=settings.recall_timeout_s
+    ) as client:
+        resp = await client.get(
+            f"/api/v1/memories/status/{ingestion_id}", headers=_auth_headers()
+        )
+    if resp.status_code >= 400:
+        raise SynapAPIError(resp.status_code, resp.text[:500])
+    return resp.json()

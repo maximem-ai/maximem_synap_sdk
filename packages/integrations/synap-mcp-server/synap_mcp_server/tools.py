@@ -9,9 +9,30 @@ Error policy:
                       blocks the agent's reply.
 """
 
-from .client import SynapAPIError, create_memory, fetch_context
+import asyncio
+
+from .client import (
+    SynapAPIError,
+    create_memory,
+    fetch_context,
+    get_ingestion_status,
+)
 from .config import settings
 from .context import MissingTokenError
+
+# Ingestion is async (long-range extraction). Terminal states reported by /status.
+_TERMINAL_STATUSES = {
+    "completed",
+    "complete",
+    "success",
+    "partial_success",
+    "failed",
+    "error",
+    "done",
+}
+# Cap how long we will block while polling, so platforms don't surface a timeout.
+_POLL_MAX_SECONDS = 12.0
+_POLL_INTERVAL_SECONDS = 2.0
 
 LOG_DESC = (
     "After each user message, send the exchange here so it can be remembered. "
@@ -19,7 +40,14 @@ LOG_DESC = (
     "(and your reply, if you have one) and Synap will keep what matters. "
     "If your app serves more than one end-user, pass that person's stable id as "
     "user_id (or an organization id as customer_id) so each person's memory stays "
-    "separate; if every conversation is the same single user, omit them."
+    "separate; if every conversation is the same single user, omit them. "
+    "Logging is fire-and-forget by default; set wait_for_processing=true only when "
+    "you need to confirm the memory finished extracting before continuing."
+)
+STATUS_DESC = (
+    "Check whether a logged exchange has finished processing. Pass the ingestion_id "
+    "returned by log_exchange. Returns the processing status and how many memories "
+    "were extracted. Useful to confirm a save completed (extraction is asynchronous)."
 )
 RECALL_DESC = (
     "Before replying, call this to recall anything already known about this user from "
@@ -31,6 +59,35 @@ LIST_DESC = (
     "List recent things remembered about this user. Useful for debugging or to confirm "
     "that memory is working. Pass user_id/customer_id to scope to one person."
 )
+
+
+def _summarize_status(data: dict) -> str:
+    status = str((data or {}).get("status", "unknown")).lower()
+    created = (data or {}).get("memories_created")
+    if status in ("completed", "complete", "success"):
+        if created is None:
+            return "Processing complete."
+        return f"Processing complete — {created} memor{'y' if created == 1 else 'ies'} stored."
+    if status == "partial_success":
+        return f"Processing finished with partial success — {created or 0} stored."
+    if status in ("failed", "error"):
+        msg = (data or {}).get("error_message") or "see logs"
+        return f"Processing failed ({msg})."
+    return f"Still processing (status={status})."
+
+
+async def _poll_until_terminal(ingestion_id: str) -> dict:
+    """Poll /status until terminal or the cap elapses. Best-effort; returns the last
+    payload seen (possibly non-terminal if it timed out)."""
+    elapsed = 0.0
+    last: dict = {"status": "processing"}
+    while elapsed < _POLL_MAX_SECONDS:
+        last = await get_ingestion_status(ingestion_id)
+        if str(last.get("status", "")).lower() in _TERMINAL_STATUSES:
+            return last
+        await asyncio.sleep(_POLL_INTERVAL_SECONDS)
+        elapsed += _POLL_INTERVAL_SECONDS
+    return last
 
 
 def _format_context(data: dict) -> str:
@@ -55,6 +112,7 @@ def register(mcp) -> None:
         conversation_id: str | None = None,
         user_id: str | None = None,
         customer_id: str | None = None,
+        wait_for_processing: bool = False,
     ) -> str:
         document = f"User: {user_message}"
         if assistant_message:
@@ -71,7 +129,31 @@ def register(mcp) -> None:
             return f"ERROR: {exc}"
         except SynapAPIError as exc:
             return f"ERROR: could not save to memory (status {exc.status})."
-        return f"Logged to memory (ingestion_id={res.get('ingestion_id')})."
+
+        ingestion_id = res.get("ingestion_id")
+        if wait_for_processing and ingestion_id:
+            try:
+                final = await _poll_until_terminal(ingestion_id)
+                return f"Logged to memory (ingestion_id={ingestion_id}). {_summarize_status(final)}"
+            except SynapAPIError:
+                # Saving succeeded; only the status check failed — don't hard-fail.
+                return (
+                    f"Logged to memory (ingestion_id={ingestion_id}). "
+                    "Could not read processing status."
+                )
+        return f"Logged to memory (ingestion_id={ingestion_id})."
+
+    @mcp.tool(description=STATUS_DESC)
+    async def check_memory_status(ingestion_id: str) -> str:
+        try:
+            data = await get_ingestion_status(ingestion_id)
+        except MissingTokenError as exc:
+            return f"ERROR: {exc}"
+        except SynapAPIError as exc:
+            if exc.status == 404:
+                return "Unknown ingestion_id (it may have expired or never existed)."
+            return f"ERROR: could not read status (status {exc.status})."
+        return _summarize_status(data)
 
     @mcp.tool(description=RECALL_DESC)
     async def recall_context(

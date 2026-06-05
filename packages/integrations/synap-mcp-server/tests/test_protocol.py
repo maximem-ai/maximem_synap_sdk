@@ -89,6 +89,34 @@ async def test_log_exchange_exposes_scope_args():
 
 
 @respx.mock
+async def test_check_memory_status_reports_completion(with_token):
+    """check_memory_status polls /status and summarizes the outcome."""
+    respx.get(f"{API_BASE}/api/v1/memories/status/ing_42").mock(
+        return_value=httpx.Response(200, json={"status": "completed", "memories_created": 2})
+    )
+    result = await mcp.call_tool("check_memory_status", {"ingestion_id": "ing_42"})
+    assert "complete" in _text(result).lower()
+    assert "2" in _text(result)
+
+
+@respx.mock
+async def test_log_exchange_wait_for_processing_polls_status(with_token):
+    """wait_for_processing=true blocks until the ingestion reaches a terminal state."""
+    respx.post(f"{API_BASE}/api/v1/memories/create").mock(
+        return_value=httpx.Response(200, json={"ingestion_id": "ing_7"})
+    )
+    respx.get(f"{API_BASE}/api/v1/memories/status/ing_7").mock(
+        return_value=httpx.Response(200, json={"status": "completed", "memories_created": 1})
+    )
+    result = await mcp.call_tool(
+        "log_exchange", {"user_message": "hi", "wait_for_processing": True}
+    )
+    text = _text(result)
+    assert "ing_7" in text
+    assert "complete" in text.lower()
+
+
+@respx.mock
 async def test_recall_soft_fails_on_backend_error(with_token):
     """TC-FAIL-03 (read): a backend 500 must not raise — recall degrades gracefully."""
     respx.post(f"{API_BASE}/v1/context/client/fetch").mock(
