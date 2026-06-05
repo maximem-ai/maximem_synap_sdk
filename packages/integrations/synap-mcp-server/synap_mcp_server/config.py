@@ -14,6 +14,17 @@ class Settings:
     default_max_results: int = int(os.getenv("MCP_DEFAULT_MAX_RESULTS", "10"))
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     environment: str = os.getenv("ENVIRONMENT", "production")
+    # Browser origins allowed to call the MCP endpoint directly (the dashboard's
+    # in-app "Test my memory"). Server-to-server callers (Gumloop/n8n) are unaffected.
+    cors_allow_origins: tuple = tuple(
+        o.strip()
+        for o in os.getenv(
+            "MCP_CORS_ALLOW_ORIGINS",
+            "https://synap.maximem.ai,https://synap-admin.maximem.ai,"
+            "http://localhost:3000,http://localhost:5173",
+        ).split(",")
+        if o.strip()
+    )
 
 
 settings = Settings()

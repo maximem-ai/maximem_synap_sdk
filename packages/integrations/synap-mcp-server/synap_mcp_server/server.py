@@ -10,6 +10,7 @@ import logging
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -54,6 +55,17 @@ class BearerCaptureMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(BearerCaptureMiddleware)
+
+# Allow the dashboard's in-app "Test my memory" (a browser → MCP call) cross-origin.
+# Added last so it's the outermost layer and answers CORS preflight first.
+# Server-to-server callers (Gumloop/n8n) don't send Origin and are unaffected.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=list(settings.cors_allow_origins),
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+    allow_credentials=False,
+)
 
 
 async def _health(_request: Request) -> JSONResponse:
