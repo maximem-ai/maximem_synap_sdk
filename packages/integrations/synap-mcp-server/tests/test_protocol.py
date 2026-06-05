@@ -134,3 +134,49 @@ async def test_log_hard_fails_on_backend_error(with_token):
     )
     result = await mcp.call_tool("log_exchange", {"user_message": "hi"})
     assert "ERROR" in _text(result)
+
+
+@respx.mock
+async def test_log_maps_rate_limit_with_retry_after(with_token):
+    """A 429 from ingestion is surfaced as a rate-limit error carrying Retry-After,
+    not a generic 'status 429' string."""
+    respx.post(f"{API_BASE}/api/v1/memories/create").mock(
+        return_value=httpx.Response(429, text="slow down", headers={"Retry-After": "7"})
+    )
+    text = _text(await mcp.call_tool("log_exchange", {"user_message": "hi"}))
+    assert "rate limit" in text.lower()
+    assert "7" in text
+
+
+@respx.mock
+async def test_log_maps_out_of_credits(with_token):
+    """A 402 maps to an explicit out-of-credits message."""
+    respx.post(f"{API_BASE}/api/v1/memories/create").mock(
+        return_value=httpx.Response(402, text="no credits")
+    )
+    text = _text(await mcp.call_tool("log_exchange", {"user_message": "hi"}))
+    assert "credit" in text.lower()
+
+
+@respx.mock
+async def test_recall_names_rate_limit(with_token):
+    """Recall stays soft, but a 429 is named rather than the generic benign message."""
+    respx.post(f"{API_BASE}/v1/context/client/fetch").mock(
+        return_value=httpx.Response(429, text="slow down")
+    )
+    text = _text(await mcp.call_tool("recall_context", {"query": "x"}))
+    assert "rate limited" in text.lower()
+
+
+@respx.mock
+async def test_log_echoes_scope(with_token):
+    """The success confirmation echoes the resolved scope so misrouting is visible."""
+    respx.post(f"{API_BASE}/api/v1/memories/create").mock(
+        return_value=httpx.Response(200, json={"ingestion_id": "ing_9"})
+    )
+    text = _text(
+        await mcp.call_tool(
+            "log_exchange", {"user_message": "hi", "user_id": "u1"}
+        )
+    )
+    assert "scope" in text.lower() and "user" in text.lower()

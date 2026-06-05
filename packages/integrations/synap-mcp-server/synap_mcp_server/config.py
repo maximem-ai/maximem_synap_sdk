@@ -25,6 +25,24 @@ class Settings:
         ).split(",")
         if o.strip()
     )
+    # DNS-rebinding protection. Enabled by default with an allowlist of the public
+    # Host(s) this server answers on. The endpoint sits behind Cloudflare -> nginx ->
+    # container, so allowed_hosts MUST include whatever Host the proxy forwards (the
+    # public domain). If the proxy can't be made to forward a matching Host, set
+    # MCP_DNS_REBINDING_PROTECTION=false to fall back to the previous behavior rather
+    # than 400-ing every /mcp request. allowed_origins reuses the CORS allowlist.
+    dns_rebinding_protection: bool = (
+        os.getenv("MCP_DNS_REBINDING_PROTECTION", "true").lower()
+        not in ("0", "false", "no")
+    )
+    allowed_hosts: tuple = tuple(
+        h.strip()
+        for h in os.getenv(
+            "MCP_ALLOWED_HOSTS",
+            "synap-mcp.maximem.ai,localhost,localhost:8090,127.0.0.1,127.0.0.1:8090",
+        ).split(",")
+        if h.strip()
+    )
 
 
 settings = Settings()

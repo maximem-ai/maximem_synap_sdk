@@ -12,10 +12,13 @@ Error policy:
 import asyncio
 
 from .client import (
+    NETWORK_STATUS,
+    TIMEOUT_STATUS,
     SynapAPIError,
     create_memory,
     fetch_context,
     get_ingestion_status,
+    scope_for,
 )
 from .config import settings
 from .context import MissingTokenError
@@ -59,6 +62,46 @@ LIST_DESC = (
     "List recent things remembered about this user. Useful for debugging or to confirm "
     "that memory is working. Pass user_id/customer_id to scope to one person."
 )
+
+
+# Human-readable scope labels for the echo we append to confirmations, so a
+# misrouted call (wrong/missing user_id => unexpected scope) is visible to the agent.
+_SCOPE_LABELS = {
+    "user": "this user",
+    "customer": "this customer/org",
+    "client": "the shared (account-wide) memory",
+}
+
+
+def _describe_api_error(exc: SynapAPIError, action: str) -> str:
+    """Map an upstream status to a clear, actionable tool error. The REST API returns
+    distinct codes (401 auth, 402 credits, 429 rate/credit cap, 5xx) — surface them so
+    a failure never looks like "memory silently did nothing"."""
+    s = exc.status
+    if s in (401, 403):
+        return f"ERROR: token rejected — check the Bearer token or its scope (status {s})."
+    if s == 402:
+        return "ERROR: out of credits — top up the workspace to keep using memory."
+    if s == 429:
+        hint = f" Retry after {exc.retry_after}s." if exc.retry_after else " Slow down and retry."
+        return f"ERROR: rate limit or credit cap reached while {action}.{hint}"
+    if s == TIMEOUT_STATUS:
+        return f"ERROR: the memory service timed out while {action}. Try again."
+    if s == NETWORK_STATUS:
+        return f"ERROR: couldn't reach the memory service while {action}. Try again shortly."
+    if s >= 500:
+        return f"ERROR: memory service unavailable (status {s}). Try again shortly."
+    return f"ERROR: could not {action} (status {s})."
+
+
+def _soft_recall_error(exc: SynapAPIError) -> str:
+    """Recall is non-blocking, so failures stay benign — but a rate-limit or credit
+    stop is worth naming so the builder understands why memory went quiet."""
+    if exc.status == 429:
+        return "Memory is rate limited right now — replying without it."
+    if exc.status == 402:
+        return "Memory is paused (out of credits) — replying without it."
+    return "No memory available right now."
 
 
 def _summarize_status(data: dict) -> str:
@@ -128,20 +171,24 @@ def register(mcp) -> None:
         except MissingTokenError as exc:
             return f"ERROR: {exc}"
         except SynapAPIError as exc:
-            return f"ERROR: could not save to memory (status {exc.status})."
+            return _describe_api_error(exc, "saving to memory")
 
         ingestion_id = res.get("ingestion_id")
+        scope_note = f"scope: {_SCOPE_LABELS[scope_for(user_id, customer_id)]}"
         if wait_for_processing and ingestion_id:
             try:
                 final = await _poll_until_terminal(ingestion_id)
-                return f"Logged to memory (ingestion_id={ingestion_id}). {_summarize_status(final)}"
+                return (
+                    f"Logged to memory (ingestion_id={ingestion_id}, {scope_note}). "
+                    f"{_summarize_status(final)}"
+                )
             except SynapAPIError:
                 # Saving succeeded; only the status check failed — don't hard-fail.
                 return (
-                    f"Logged to memory (ingestion_id={ingestion_id}). "
+                    f"Logged to memory (ingestion_id={ingestion_id}, {scope_note}). "
                     "Could not read processing status."
                 )
-        return f"Logged to memory (ingestion_id={ingestion_id})."
+        return f"Logged to memory (ingestion_id={ingestion_id}, {scope_note})."
 
     @mcp.tool(description=STATUS_DESC)
     async def check_memory_status(ingestion_id: str) -> str:
@@ -152,7 +199,7 @@ def register(mcp) -> None:
         except SynapAPIError as exc:
             if exc.status == 404:
                 return "Unknown ingestion_id (it may have expired or never existed)."
-            return f"ERROR: could not read status (status {exc.status})."
+            return _describe_api_error(exc, "reading status")
         return _summarize_status(data)
 
     @mcp.tool(description=RECALL_DESC)
@@ -171,9 +218,10 @@ def register(mcp) -> None:
             )
         except MissingTokenError as exc:
             return f"ERROR: {exc}"
-        except SynapAPIError:
-            return "No memory available right now."
-        return _format_context(data) or "Nothing known about this user yet."
+        except SynapAPIError as exc:
+            return _soft_recall_error(exc)
+        scope_label = _SCOPE_LABELS[scope_for(user_id, customer_id)]
+        return _format_context(data) or f"Nothing remembered yet for {scope_label}."
 
     @mcp.tool(description=LIST_DESC)
     async def list_recent_memories(
@@ -187,6 +235,6 @@ def register(mcp) -> None:
             )
         except MissingTokenError as exc:
             return f"ERROR: {exc}"
-        except SynapAPIError:
-            return "No memory available right now."
+        except SynapAPIError as exc:
+            return _soft_recall_error(exc)
         return _format_context(data) or "No memories yet."

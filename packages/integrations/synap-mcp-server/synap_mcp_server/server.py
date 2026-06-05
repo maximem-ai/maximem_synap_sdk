@@ -28,11 +28,18 @@ mcp = FastMCP(
         "remembered, and call recall_context before replying to use what is already known."
     ),
     stateless_http=True,
-    # This server sits behind a reverse proxy / Cloudflare and authenticates every
-    # request with a Bearer token, so the transport's DNS-rebinding Host/Origin check
-    # adds no security — it only rejects the proxied public Host ("Invalid Host header"
-    # on /mcp). Disable it so any proxy works without a Host-rewrite hack.
-    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    # DNS-rebinding protection restricts which Host/Origin headers the transport will
+    # answer, blocking a malicious page from rebinding a victim's browser onto this
+    # public endpoint. It's enabled with an explicit allowlist (settings.allowed_hosts
+    # = the public proxied Host; allowed_origins = the dashboard CORS list). Because the
+    # endpoint sits behind Cloudflare -> nginx, the proxy must forward a Host that is on
+    # the allowlist; if that can't be arranged, MCP_DNS_REBINDING_PROTECTION=false
+    # restores the prior permissive behavior without a code change.
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=settings.dns_rebinding_protection,
+        allowed_hosts=list(settings.allowed_hosts),
+        allowed_origins=list(settings.cors_allow_origins),
+    ),
 )
 tools.register(mcp)
 
