@@ -1,0 +1,8 @@
+tests/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+*.egg-info/
+README.md
