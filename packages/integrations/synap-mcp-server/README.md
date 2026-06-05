@@ -15,9 +15,13 @@ verbatim to `synap-cloud`, which owns auth.
 
 | Tool | REST operation | Notes |
 |---|---|---|
-| `log_exchange` | `POST /api/v1/memories/create` (`mode=long-range`) | Forward every turn; extraction decides what persists. |
-| `recall_context` | `POST /v1/context/{client\|user\|customer}/fetch` (`mode=fast`) | Hot path; no IDs ⇒ client scope. |
-| `list_recent_memories` | broad `/v1/context/.../fetch` (no query) | Debug / "test my memory". |
+| `log_exchange` | `POST /api/v1/memories/create` (`mode=long-range`) | Forward every turn; extraction decides what persists. Optional `user_id`/`customer_id` scope per end-user; optional `conversation_id`. |
+| `recall_context` | `POST /v1/context/{client\|user\|customer}/fetch` (`mode=fast`) | Hot path; no IDs ⇒ client scope. Optional `user_id`/`customer_id`. |
+| `list_recent_memories` | broad `/v1/context/.../fetch` (no query) | Debug / "test my memory". Optional `user_id`/`customer_id`. |
+
+**Scoping (PRD §6).** Pass no IDs ⇒ **client scope** (shared per credential). Pass `user_id` (and/or `customer_id`) on **both** `log_exchange` and `recall_context` to keep each end-user's memory separate — fill these from an n8n expression / Gumloop input. Note: client-scope writes are not surfaced on the dashboard Memories page (relational), so per-user scoping is recommended when dashboard visibility matters.
+
+**Host header.** The server disables the MCP transport's DNS-rebinding check (it sits behind a proxy + Bearer auth), so any reverse proxy can forward the real `Host` — no Host-rewrite hack needed.
 
 ## Run locally
 

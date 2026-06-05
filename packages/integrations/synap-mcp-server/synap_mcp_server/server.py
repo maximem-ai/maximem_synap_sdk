@@ -8,6 +8,7 @@ Stateless mode keeps the server safe for many concurrent no-code clients.
 import logging
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -26,6 +27,11 @@ mcp = FastMCP(
         "remembered, and call recall_context before replying to use what is already known."
     ),
     stateless_http=True,
+    # This server sits behind a reverse proxy / Cloudflare and authenticates every
+    # request with a Bearer token, so the transport's DNS-rebinding Host/Origin check
+    # adds no security — it only rejects the proxied public Host ("Invalid Host header"
+    # on /mcp). Disable it so any proxy works without a Host-rewrite hack.
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
 )
 tools.register(mcp)
 

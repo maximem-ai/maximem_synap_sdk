@@ -16,15 +16,20 @@ from .context import MissingTokenError
 LOG_DESC = (
     "After each user message, send the exchange here so it can be remembered. "
     "You do not need to decide what is important — just forward the user message "
-    "(and your reply, if you have one) and Synap will keep what matters."
+    "(and your reply, if you have one) and Synap will keep what matters. "
+    "If your app serves more than one end-user, pass that person's stable id as "
+    "user_id (or an organization id as customer_id) so each person's memory stays "
+    "separate; if every conversation is the same single user, omit them."
 )
 RECALL_DESC = (
     "Before replying, call this to recall anything already known about this user from "
-    "past conversations. Use the user's latest message as the query."
+    "past conversations. Use the user's latest message as the query. If you serve "
+    "multiple end-users, pass the same user_id (or customer_id) you log with so you "
+    "recall the right person's memory."
 )
 LIST_DESC = (
     "List recent things remembered about this user. Useful for debugging or to confirm "
-    "that memory is working."
+    "that memory is working. Pass user_id/customer_id to scope to one person."
 )
 
 
@@ -48,13 +53,20 @@ def register(mcp) -> None:
         user_message: str,
         assistant_message: str = "",
         conversation_id: str | None = None,
+        user_id: str | None = None,
+        customer_id: str | None = None,
     ) -> str:
         document = f"User: {user_message}"
         if assistant_message:
             document += f"\nAssistant: {assistant_message}"
         metadata = {"conversation_id": conversation_id} if conversation_id else None
         try:
-            res = await create_memory(document, metadata=metadata)
+            res = await create_memory(
+                document,
+                metadata=metadata,
+                user_id=user_id,
+                customer_id=customer_id,
+            )
         except MissingTokenError as exc:
             return f"ERROR: {exc}"
         except SynapAPIError as exc:
@@ -82,9 +94,15 @@ def register(mcp) -> None:
         return _format_context(data) or "Nothing known about this user yet."
 
     @mcp.tool(description=LIST_DESC)
-    async def list_recent_memories(max_results: int = 10) -> str:
+    async def list_recent_memories(
+        max_results: int = 10,
+        user_id: str | None = None,
+        customer_id: str | None = None,
+    ) -> str:
         try:
-            data = await fetch_context(None, max_results=max_results)
+            data = await fetch_context(
+                None, max_results=max_results, user_id=user_id, customer_id=customer_id
+            )
         except MissingTokenError as exc:
             return f"ERROR: {exc}"
         except SynapAPIError:

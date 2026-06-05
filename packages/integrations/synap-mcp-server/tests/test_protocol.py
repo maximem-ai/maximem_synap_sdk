@@ -67,6 +67,28 @@ async def test_call_log_exchange_returns_ingestion_id(with_token):
 
 
 @respx.mock
+async def test_log_exchange_forwards_user_id(with_token):
+    """log_exchange exposes optional user_id/customer_id (PRD §6 identifier overrides)
+    and forwards them to the create call so per-user scoping works from no-code tools."""
+    route = respx.post(f"{API_BASE}/api/v1/memories/create").mock(
+        return_value=httpx.Response(200, json={"ingestion_id": "ing_9"})
+    )
+    await mcp.call_tool("log_exchange", {"user_message": "hi", "user_id": "u1"})
+    import json
+
+    sent = json.loads(route.calls.last.request.read().decode())
+    assert sent["user_id"] == "u1"
+
+
+async def test_log_exchange_exposes_scope_args():
+    """The tool schema must advertise user_id/customer_id so the model/builder can set them."""
+    tools = await mcp.list_tools()
+    le = next(t for t in tools if t.name == "log_exchange")
+    props = (le.inputSchema or {}).get("properties", {})
+    assert "user_id" in props and "customer_id" in props
+
+
+@respx.mock
 async def test_recall_soft_fails_on_backend_error(with_token):
     """TC-FAIL-03 (read): a backend 500 must not raise — recall degrades gracefully."""
     respx.post(f"{API_BASE}/v1/context/client/fetch").mock(

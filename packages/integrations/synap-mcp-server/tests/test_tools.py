@@ -61,6 +61,21 @@ async def test_recall_user_scope_routes_to_user_fetch(with_token):
 
 
 @respx.mock
+async def test_create_includes_user_and_customer(with_token):
+    """log_exchange scope passthrough: create body carries user_id/customer_id."""
+    route = respx.post(f"{API_BASE}/api/v1/memories/create").mock(
+        return_value=httpx.Response(200, json={"ingestion_id": "ing_2"})
+    )
+    await client.create_memory("doc", user_id="u1", customer_id="c1")
+    import json
+
+    sent = json.loads(route.calls.last.request.read().decode())
+    assert sent["user_id"] == "u1"
+    assert sent["customer_id"] == "c1"
+    assert sent["mode"] == "long-range"
+
+
+@respx.mock
 async def test_list_recent_uses_broad_fetch(with_token):
     """TC-ADP-05: no search_query, client scope."""
     route = respx.post(f"{API_BASE}/v1/context/client/fetch").mock(
