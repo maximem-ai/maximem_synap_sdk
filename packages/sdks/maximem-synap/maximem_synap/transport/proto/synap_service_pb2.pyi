@@ -7,16 +7,18 @@ from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class StreamEvent(_message.Message):
-    __slots__ = ("conversation_event", "heartbeat_ping", "session_control", "context_used")
+    __slots__ = ("conversation_event", "heartbeat_ping", "session_control", "context_used", "context_assembled")
     CONVERSATION_EVENT_FIELD_NUMBER: _ClassVar[int]
     HEARTBEAT_PING_FIELD_NUMBER: _ClassVar[int]
     SESSION_CONTROL_FIELD_NUMBER: _ClassVar[int]
     CONTEXT_USED_FIELD_NUMBER: _ClassVar[int]
+    CONTEXT_ASSEMBLED_FIELD_NUMBER: _ClassVar[int]
     conversation_event: ConversationEvent
     heartbeat_ping: HeartbeatPing
     session_control: SessionControl
     context_used: ContextUsedEvent
-    def __init__(self, conversation_event: _Optional[_Union[ConversationEvent, _Mapping]] = ..., heartbeat_ping: _Optional[_Union[HeartbeatPing, _Mapping]] = ..., session_control: _Optional[_Union[SessionControl, _Mapping]] = ..., context_used: _Optional[_Union[ContextUsedEvent, _Mapping]] = ...) -> None: ...
+    context_assembled: ContextAssembledEvent
+    def __init__(self, conversation_event: _Optional[_Union[ConversationEvent, _Mapping]] = ..., heartbeat_ping: _Optional[_Union[HeartbeatPing, _Mapping]] = ..., session_control: _Optional[_Union[SessionControl, _Mapping]] = ..., context_used: _Optional[_Union[ContextUsedEvent, _Mapping]] = ..., context_assembled: _Optional[_Union[ContextAssembledEvent, _Mapping]] = ...) -> None: ...
 
 class ContextUsedEvent(_message.Message):
     __slots__ = ("bundle_id", "conversation_id", "user_id", "customer_id", "served_item_ids", "timestamp_ms", "scope", "source_bundle_ids")
@@ -37,6 +39,38 @@ class ContextUsedEvent(_message.Message):
     scope: str
     source_bundle_ids: _containers.RepeatedScalarFieldContainer[str]
     def __init__(self, bundle_id: _Optional[str] = ..., conversation_id: _Optional[str] = ..., user_id: _Optional[str] = ..., customer_id: _Optional[str] = ..., served_item_ids: _Optional[_Iterable[str]] = ..., timestamp_ms: _Optional[int] = ..., scope: _Optional[str] = ..., source_bundle_ids: _Optional[_Iterable[str]] = ...) -> None: ...
+
+class ContextAssembledEvent(_message.Message):
+    __slots__ = ("correlation_id", "conversation_id", "user_id", "customer_id", "final_item_ids", "final_total_tokens", "compaction_id", "recent_turn_count", "compaction_end_timestamp", "assembly_source", "assembly_duration_ms", "cache_hit", "timestamp_ms", "sdk_version")
+    CORRELATION_ID_FIELD_NUMBER: _ClassVar[int]
+    CONVERSATION_ID_FIELD_NUMBER: _ClassVar[int]
+    USER_ID_FIELD_NUMBER: _ClassVar[int]
+    CUSTOMER_ID_FIELD_NUMBER: _ClassVar[int]
+    FINAL_ITEM_IDS_FIELD_NUMBER: _ClassVar[int]
+    FINAL_TOTAL_TOKENS_FIELD_NUMBER: _ClassVar[int]
+    COMPACTION_ID_FIELD_NUMBER: _ClassVar[int]
+    RECENT_TURN_COUNT_FIELD_NUMBER: _ClassVar[int]
+    COMPACTION_END_TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
+    ASSEMBLY_SOURCE_FIELD_NUMBER: _ClassVar[int]
+    ASSEMBLY_DURATION_MS_FIELD_NUMBER: _ClassVar[int]
+    CACHE_HIT_FIELD_NUMBER: _ClassVar[int]
+    TIMESTAMP_MS_FIELD_NUMBER: _ClassVar[int]
+    SDK_VERSION_FIELD_NUMBER: _ClassVar[int]
+    correlation_id: str
+    conversation_id: str
+    user_id: str
+    customer_id: str
+    final_item_ids: _containers.RepeatedScalarFieldContainer[str]
+    final_total_tokens: int
+    compaction_id: str
+    recent_turn_count: int
+    compaction_end_timestamp: str
+    assembly_source: str
+    assembly_duration_ms: int
+    cache_hit: bool
+    timestamp_ms: int
+    sdk_version: str
+    def __init__(self, correlation_id: _Optional[str] = ..., conversation_id: _Optional[str] = ..., user_id: _Optional[str] = ..., customer_id: _Optional[str] = ..., final_item_ids: _Optional[_Iterable[str]] = ..., final_total_tokens: _Optional[int] = ..., compaction_id: _Optional[str] = ..., recent_turn_count: _Optional[int] = ..., compaction_end_timestamp: _Optional[str] = ..., assembly_source: _Optional[str] = ..., assembly_duration_ms: _Optional[int] = ..., cache_hit: bool = ..., timestamp_ms: _Optional[int] = ..., sdk_version: _Optional[str] = ...) -> None: ...
 
 class ConversationEvent(_message.Message):
     __slots__ = ("event_type", "conversation_id", "user_id", "role", "content", "customer_id", "session_id", "metadata", "timestamp_ms", "tool_name", "tool_args_json", "search_queries", "context_types")

@@ -62,6 +62,8 @@ export interface SynapSdkLike {
     context: {
       get_context_for_prompt(args: {
         conversation_id: string;
+        /** Optional formatting style — structured | narrative | bullet_points. */
+        style?: string;
       }): Promise<SynapPromptContext>;
     };
   };

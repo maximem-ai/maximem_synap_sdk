@@ -23,5 +23,13 @@ Error policy (matches every other Synap integration):
 """
 
 from synap_nemo_agent_toolkit.editor import SynapMemoryEditor
+from synap_nemo_agent_toolkit.short_term import (
+    SynapShortTermConfig,
+    SynapShortTermFunction,
+)
 
-__all__ = ["SynapMemoryEditor"]
+__all__ = [
+    "SynapMemoryEditor",
+    "SynapShortTermFunction",
+    "SynapShortTermConfig",
+]

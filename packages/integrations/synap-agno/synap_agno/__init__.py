@@ -29,5 +29,6 @@ warn + no-op because Synap has no public delete API).
 """
 
 from synap_agno.db import SynapDb
+from synap_agno.short_term import synap_st_instructions
 
-__all__ = ["SynapDb"]
+__all__ = ["SynapDb", "synap_st_instructions"]

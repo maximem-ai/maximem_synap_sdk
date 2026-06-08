@@ -28,5 +28,10 @@ Typical wiring::
 
 from synap_microsoft_agent.context_provider import SynapContextProvider
 from synap_microsoft_agent.history_provider import SynapHistoryProvider
+from synap_microsoft_agent.short_term import SynapShortTermContextProvider
 
-__all__ = ["SynapContextProvider", "SynapHistoryProvider"]
+__all__ = [
+    "SynapContextProvider",
+    "SynapHistoryProvider",
+    "SynapShortTermContextProvider",
+]

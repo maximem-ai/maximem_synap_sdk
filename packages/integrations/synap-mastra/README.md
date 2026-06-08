@@ -7,8 +7,20 @@ Drop Synap directly into `new Agent({ memory, tools })` — two plug points, com
 ## Install
 
 ```bash
-npm install @maximem/synap-mastra @mastra/core zod
+npm install @maximem/synap-mastra @maximem/synap-js-sdk @mastra/core zod
 ```
+
+## Initialize the SDK
+
+```ts
+import { createClient } from "@maximem/synap-js-sdk";
+
+// Reads SYNAP_API_KEY from the environment; pass `apiKey` to override.
+const sdk = createClient();
+await sdk.init();
+```
+
+You don't need to provide an instance ID — every Synap API key is bound to exactly one instance, and the SDK resolves it server-side on `init()`. Requires Node 18+ and Python 3.11+ on the host.
 
 ## 1. `SynapMemory` — Agent memory
 

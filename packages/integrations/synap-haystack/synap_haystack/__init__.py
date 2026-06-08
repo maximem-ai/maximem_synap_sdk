@@ -9,6 +9,8 @@ Store-centric, matching the official ``mem0-haystack`` shape:
   (Mem0-shaped chat read path).
 - :class:`SynapRetriever` — ``@component`` returning ``Document``s (RAG read path).
 - :class:`SynapMemoryWriter` — ``@component`` that records conversation turns.
+- :class:`SynapShortTermContext` — ``@component`` for the short-term conversation
+  context pipeline.
 
 The components accept a ready ``store=...`` or an ``sdk=...`` + scope kwargs.
 """
@@ -16,10 +18,12 @@ The components accept a ready ``store=...`` or an ``sdk=...`` + scope kwargs.
 from synap_haystack.store import SynapMemoryStore
 from synap_haystack.retriever import SynapMemoryRetriever, SynapRetriever
 from synap_haystack.writer import SynapMemoryWriter
+from synap_haystack.short_term import SynapShortTermContext
 
 __all__ = [
     "SynapMemoryStore",
     "SynapMemoryRetriever",
     "SynapRetriever",
     "SynapMemoryWriter",
+    "SynapShortTermContext",
 ]

@@ -22,10 +22,13 @@ log-and-swallow).
 
 from synap_livekit_agents.recording import attach_synap_recording
 from synap_livekit_agents.context import preload_synap_context
+from synap_livekit_agents.short_term import preload_synap_st, refresh_synap_st
 from synap_livekit_agents.tools import synap_search_tool, synap_store_tool
 
 __all__ = [
     "preload_synap_context",
+    "preload_synap_st",
+    "refresh_synap_st",
     "attach_synap_recording",
     "synap_search_tool",
     "synap_store_tool",

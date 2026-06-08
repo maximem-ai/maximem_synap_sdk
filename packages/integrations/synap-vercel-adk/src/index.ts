@@ -14,6 +14,21 @@ export {
   promptToTranscript,
 } from './transform/messages.js';
 
+// ─── Short-term context (v1: HTTP-only; cache-first port is follow-up) ────────
+export {
+  fetchShortTermContext,
+  buildShortTermSystemBlock,
+  injectShortTermIntoPrompt,
+} from './short_term.js';
+export type {
+  SynapShortTermStyle,
+  SynapShortTermResponse,
+  SynapShortTermOnError,
+  FetchShortTermContextOptions,
+  BuildShortTermSystemBlockOptions,
+  InjectShortTermOptions,
+} from './short_term.js';
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 export type {
   SynapProviderOptions,

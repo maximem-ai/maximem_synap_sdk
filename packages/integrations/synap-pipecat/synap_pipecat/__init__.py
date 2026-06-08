@@ -37,5 +37,6 @@ Synap blip must never break a live call; writes surface as
 """
 
 from synap_pipecat.processors import SynapMemoryProcessor, SynapRecorder
+from synap_pipecat.short_term import SynapShortTermProcessor
 
-__all__ = ["SynapMemoryProcessor", "SynapRecorder"]
+__all__ = ["SynapMemoryProcessor", "SynapRecorder", "SynapShortTermProcessor"]

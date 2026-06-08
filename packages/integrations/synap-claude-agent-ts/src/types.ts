@@ -40,10 +40,24 @@ export interface SynapFetchArgs {
   include_conversation_context?: boolean;
 }
 
+export interface SynapShortTermResponseLike {
+  /** Cache-first formatted block ready to embed in a system prompt. */
+  formatted_context?: string | null;
+  /** Whether the server reported any short-term content. */
+  available?: boolean;
+}
+
 export interface SynapSdkLike {
   fetch(args: SynapFetchArgs): Promise<SynapFetchResponseLike>;
   conversation: {
     record_message(args: SynapRecordMessageArgs): Promise<unknown>;
+    /** Optional — present on real SDKs; the short-term hook requires it. */
+    context?: {
+      get_context_for_prompt(args: {
+        conversation_id: string;
+        style?: string;
+      }): Promise<SynapShortTermResponseLike>;
+    };
   };
   memories: {
     create(args: SynapMemoryCreateArgs): Promise<SynapMemoryCreateResult>;

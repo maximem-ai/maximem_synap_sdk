@@ -12,6 +12,7 @@ Example:
     crew = Crew(agents=agents, tasks=tasks, memory=memory)
 """
 
+from synap_crewai.short_term import build_synap_st_backstory
 from synap_crewai.storage import SynapStorageBackend
 
-__all__ = ["SynapStorageBackend"]
+__all__ = ["SynapStorageBackend", "build_synap_st_backstory"]

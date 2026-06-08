@@ -37,13 +37,21 @@ class SDKConfig(BaseModel):
     api_base_url: Optional[str] = None  # Override default API base URL
     grpc_host: Optional[str] = None  # Override default gRPC host
     grpc_port: Optional[int] = None  # Override default gRPC port (e.g. 50051)
-    grpc_use_tls: bool = True  # Set False for plaintext connections (testing)
+    grpc_use_tls: Optional[bool] = None  # None=use transport default (TLS on); False=plaintext
     storage_path: Optional[str] = None  # Override default cache path (~/.synap/)
     cache_backend: Optional[str] = "sqlite"  # "sqlite" or None
     session_timeout_minutes: int = Field(default=30, ge=5, le=1440)
     timeouts: TimeoutConfig = Field(default_factory=TimeoutConfig)
     retry_policy: Optional[RetryPolicy] = Field(default_factory=RetryPolicy)
     log_level: str = "WARNING"
+    # Phase 1 rollout flag for SDK-authoritative short-term context.
+    # When true: SDK appends raw turns into a local ShortTermContextStore on
+    # record_message/send_message, applies compaction_update bundles into
+    # it, and serves get_compacted/get_context_for_prompt from cache before
+    # falling back to REST. Default off — flipped via env var or explicit
+    # config during the canary. See
+    # docs/internal/sdk_authoritative_short_term_context_plan.md.
+    sdk_st_authoritative: bool = False
 
 
 # Backward compatibility - deprecated dataclass-style models

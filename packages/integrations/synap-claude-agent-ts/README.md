@@ -7,8 +7,20 @@ Python sibling published as `synap-claude-agent`.
 ## Install
 
 ```bash
-npm install @maximem/synap-claude-agent @anthropic-ai/claude-agent-sdk zod
+npm install @maximem/synap-claude-agent @maximem/synap-js-sdk @anthropic-ai/claude-agent-sdk zod
 ```
+
+## Initialize the SDK
+
+```ts
+import { createClient } from "@maximem/synap-js-sdk";
+
+// Reads SYNAP_API_KEY from the environment; pass `apiKey` to override.
+const sdk = createClient();
+await sdk.init();
+```
+
+You don't need to provide an instance ID — every Synap API key is bound to exactly one instance, and the SDK resolves it server-side on `init()`. Requires Node 18+ and Python 3.11+ on the host.
 
 ## Two plug points
 
@@ -17,8 +29,6 @@ npm install @maximem/synap-claude-agent @anthropic-ai/claude-agent-sdk zod
 ```ts
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { createSynapHooks } from "@maximem/synap-claude-agent";
-
-const sdk = /* your Synap SDK instance */;
 
 for await (const message of query({
   prompt: "What did I tell you about my trial?",
