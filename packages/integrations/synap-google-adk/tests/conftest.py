@@ -1,35 +1,18 @@
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../../synap/sdk/python"))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../synap-integrations-common"))
+"""pytest conftest — re-exports shared harness fixtures.
 
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
-import pytest
-from maximem_synap import MaximemSynapSDK
-from maximem_synap.models.context import (
-    Fact, Preference, ResponseMetadata, UnifiedContextResponse,
+The canonical source of truth for mock_sdk / failing_sdk and all
+make_* factories is synap_integrations_common.testing.  Tests in this
+package import from there via conftest so individual test modules don't
+need to duplicate fixture wiring.
+"""
+
+from synap_integrations_common.testing import (  # noqa: F401
+    mock_sdk,
+    failing_sdk,
+    make_fact,
+    make_preference,
+    make_episode,
+    make_emotion,
+    make_temporal_event,
+    make_unified_response,
 )
-
-def _meta():
-    return ResponseMetadata(correlation_id="t", ttl_seconds=300, source="cloud", retrieved_at=datetime.now(timezone.utc))
-
-def _resp(**kw):
-    d = {"facts": [Fact(id="f1", content="User is an engineer", confidence=0.9, source="test", extracted_at=datetime.now(timezone.utc))],
-         "preferences": [], "scope_map": {"f1": "user"}, "scopes_queried": ["user"], "total_items": 1,
-         "formatted_context": "## User Context\n### Facts\n- User is an engineer", "metadata": _meta()}
-    d.update(kw)
-    return UnifiedContextResponse(**d)
-
-@pytest.fixture
-def mock_sdk():
-    sdk = MagicMock(spec=MaximemSynapSDK)
-    sdk.instance_id = "test"
-    sdk._initialized = True
-    sdk.fetch = AsyncMock(return_value=_resp())
-    sdk.memories = MagicMock()
-    r = MagicMock(); r.ingestion_id = "ing-001"
-    sdk.memories.create = AsyncMock(return_value=r)
-    sdk.conversation = MagicMock()
-    sdk.conversation.record_message = AsyncMock(return_value={"message_id": "m1"})
-    return sdk

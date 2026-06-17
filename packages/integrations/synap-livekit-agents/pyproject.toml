@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maximem-synap-livekit-agents"
-version = "0.1.4"
+version = "0.2.0"
 description = "Synap memory integration for LiveKit Agents — preload long-term memory, record turns, expose Synap as LLM tools"
 readme = "README.md"
 requires-python = ">=3.11"

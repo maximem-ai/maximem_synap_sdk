@@ -19,7 +19,11 @@
   "scripts": {
     "setup": "node bin/synap-js-sdk.js setup",
     "setup:ts": "node bin/synap-js-sdk.js setup-ts",
-    "check": "node -e \"const sdk=require('./src'); console.log(Object.keys(sdk));\""
+    "check": "node -e \"const sdk=require('./src'); console.log(Object.keys(sdk));\"",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.9"
   },
   "engines": {
     "node": ">=18"
