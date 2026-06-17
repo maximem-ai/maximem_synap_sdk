@@ -13,6 +13,7 @@ For Microsoft Agent Framework / Azure AI Agents.
 
 ```python
 import os
+import uuid
 from azure.ai.agents import AgentsClient
 from synap_microsoft_agent import SynapContextProvider, SynapHistoryProvider
 
@@ -29,7 +30,7 @@ agent = client.as_agent(
         SynapHistoryProvider(
             sdk=sdk,
             user_id="alice",
-            conversation_id="thread-001",
+            conversation_id=str(uuid.uuid4()),   # must be a valid UUID
         ),
     ],
 )

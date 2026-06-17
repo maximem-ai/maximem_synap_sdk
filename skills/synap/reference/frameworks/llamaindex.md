@@ -10,14 +10,15 @@
 ## SynapChatMemory — drop-in for chat engines
 
 ```python
+import uuid
 from llama_index.core.chat_engine import CondensePlusContextChatEngine
 from synap_llamaindex import SynapChatMemory
 
 memory = SynapChatMemory(
     sdk=sdk,
-    conversation_id="conv-001",   # UUID
+    conversation_id=str(uuid.uuid4()),   # must be a valid UUID
     user_id="alice",
-    customer_id="acme",           # optional
+    customer_id="acme",                  # optional
 )
 
 chat_engine = CondensePlusContextChatEngine.from_defaults(

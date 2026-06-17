@@ -1,6 +1,6 @@
 # SDK setup — install, init, lifecycle, errors
 
-The same `MaximemSynapSDK` is the foundation of every framework integration. Get this right once and everything else slots in.
+The core SDK — `MaximemSynapSDK` in Python, `createClient()` from `@maximem/synap-js-sdk` in TS — is the foundation of every framework integration. Get this right once and everything else slots in.
 
 ## Prerequisites — do this in the dashboard, not in code
 
@@ -35,17 +35,16 @@ Python 3.10+ required.
 **TypeScript / Node:**
 
 ```bash
-npm install @maximem/synap
+npm install @maximem/synap-js-sdk
 ```
 
 ## Environment variables (the canonical pattern)
 
 ```bash
-export SYNAP_INSTANCE_ID="inst_a1b2c3d4e5f67890"
 export SYNAP_API_KEY="synap_..."
 ```
 
-With these set, the SDK auto-loads them — no constructor args needed.
+With this set, the SDK auto-loads it — no constructor args needed. The instance is resolved from the API key; there is no `SYNAP_INSTANCE_ID`.
 
 ## Basic init
 
@@ -64,8 +63,7 @@ Or pass explicitly:
 
 ```python
 sdk = MaximemSynapSDK(
-    instance_id="inst_a1b2c3d4e5f67890",
-    api_key="synap_...",
+    api_key=os.environ["SYNAP_API_KEY"],
 )
 await sdk.initialize()
 ```
@@ -73,26 +71,25 @@ await sdk.initialize()
 **TypeScript:**
 
 ```typescript
-import { MaximemSynapSDK } from "@maximem/synap";
+import { createClient } from "@maximem/synap-js-sdk";
 
-const sdk = new MaximemSynapSDK({
-  instanceId: process.env.SYNAP_INSTANCE_ID!,
+const sdk = createClient({
   apiKey: process.env.SYNAP_API_KEY!,
 });
-await sdk.initialize();
+await sdk.init();
 ```
 
-`initialize()` validates the API key, opens the REST connection (and gRPC channel if configured), and sets up the local cache.
+`initialize()` (Python) / `init()` (TS) validates the API key, opens the REST connection (and gRPC channel if configured), and sets up the local cache.
 
-**Calling any SDK method before `await sdk.initialize()` raises `AuthenticationError`.**
+**Calling any SDK method before init raises `AuthenticationError`.**
 
 ## Singleton behavior
 
-By design, constructing `MaximemSynapSDK` twice with the same `instance_id` returns the same instance:
+By design, constructing `MaximemSynapSDK` twice with the same API key returns the same instance:
 
 ```python
-a = MaximemSynapSDK(instance_id="inst_...", api_key="...")
-b = MaximemSynapSDK(instance_id="inst_...", api_key="...")
+a = MaximemSynapSDK(api_key="synap_...")
+b = MaximemSynapSDK(api_key="synap_...")
 assert a is b   # True
 ```
 
@@ -128,7 +125,6 @@ config = SDKConfig(
 )
 
 sdk = MaximemSynapSDK(
-    instance_id=os.environ["SYNAP_INSTANCE_ID"],
     api_key=os.environ["SYNAP_API_KEY"],
     config=config,
 )

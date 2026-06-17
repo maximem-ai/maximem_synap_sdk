@@ -3,24 +3,24 @@ Minimal Synap example — Python, no framework.
 
 Run after:
     pip install maximem-synap
-    export SYNAP_INSTANCE_ID=inst_...
     export SYNAP_API_KEY=synap_...
 """
 
+import os
 import asyncio
-from uuid import uuid5, NAMESPACE_URL
+import uuid
 from maximem_synap import MaximemSynapSDK
 
 
 async def main():
-    sdk = MaximemSynapSDK()         # reads env vars
+    sdk = MaximemSynapSDK(api_key=os.environ["SYNAP_API_KEY"])  # instance resolved from the key
     await sdk.initialize()
 
     try:
         user_id = "alice"
         customer_id = "acme"
-        # conversation_id must be a UUID — wrap any session string
-        conv_id = str(uuid5(NAMESPACE_URL, "session-2026-05-04"))
+        # conversation_id must be a valid UUID
+        conv_id = str(uuid.uuid4())
 
         # 1. Ingest a turn
         ingest = await sdk.memories.create(

@@ -26,14 +26,15 @@ Synap injects context before each turn and records after. The model never sees t
 
 ```python
 import asyncio
+import uuid
 from anthropic.claude_agent_sdk import query, ClaudeAgentOptions
 from synap_claude_agent import create_synap_hooks
 
 hooks = create_synap_hooks(
     sdk=sdk,
     user_id="alice",
-    customer_id="acme",          # optional
-    conversation_id="conv-001",  # optional; auto-generated if omitted
+    customer_id="acme",                   # optional
+    conversation_id=str(uuid.uuid4()),    # optional UUID; auto-generated if omitted
 )
 
 async def main():
@@ -55,8 +56,8 @@ import { createSynapHooks } from "@maximem/synap-claude-agent";
 const hooks = createSynapHooks({
   sdk,
   userId: "alice",
-  customerId: "acme",         // optional
-  conversationId: "conv-001",  // optional
+  customerId: "acme",                   // optional
+  conversationId: crypto.randomUUID(),  // optional UUID; auto-generated if omitted
 });
 
 for await (const message of query({

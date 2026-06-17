@@ -19,8 +19,7 @@ import { anthropic } from "@ai-sdk/anthropic";
 import { createSynap } from "@maximem/synap-vercel-adk";
 
 const synap = await createSynap({
-  apiKey: process.env.SYNAP_API_KEY!,
-  instanceId: process.env.SYNAP_INSTANCE_ID!,
+  apiKey: process.env.SYNAP_API_KEY!,   // instance resolved from the key
 });
 
 const model = synap.wrap(anthropic("claude-sonnet-4-6"), {
@@ -101,4 +100,4 @@ Most users don't need this. Reach for it only when you can demonstrably predict 
 
 ## Live doc
 
-`https://docs.maximem.ai/integrations/vercel-adk`
+`https://docs.maximem.ai/integrations/vercel-ai-sdk`

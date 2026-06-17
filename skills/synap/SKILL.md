@@ -41,10 +41,10 @@ The 18 framework files in `reference/frameworks/` are listed and one-line-descri
 
 You will need this to follow any of the framework guides.
 
-**Three identifiers — copy from the user's Synap dashboard at synap.maximem.ai:**
+**You only need the API key — copy it from the user's Synap dashboard at synap.maximem.ai:**
 
-- `instance_id` — looks like `inst_a1b2c3d4e5f67890`. One per agent deployment.
-- `api_key` — looks like `synap_...`. Generated per instance, shown once.
+- `api_key` — looks like `synap_...`. Generated per instance, shown once. The SDK resolves the instance from the API key, so you never pass `instance_id` to the constructor.
+- An `instance_id` (`inst_...`) identifies the agent deployment, but it is derived from the API key — not a constructor argument.
 - A `client_id` (`cli_...`) at the org level, but the SDK does not need it directly.
 
 **Two operations — every integration is a thin wrapper around these:**
@@ -61,10 +61,10 @@ await sdk.memories.create(
 
 # Read side: fetch context for a turn
 context = await sdk.conversation.context.fetch(
-    conversation_id="conv-123",  # must be a UUID string
+    conversation_id=str(uuid.uuid4()),  # must be a UUID string
     search_query=["user preferences"],
     max_results=10,
-    mode="fast",                 # "fast" (~50-100ms) or "accurate" (~200-500ms)
+    mode="fast",                 # "fast" (low-latency) or "accurate" (deeper processing)
 )
 ```
 
@@ -81,8 +81,8 @@ Decide scoping at ingestion time by which `*_id` you pass. `user_id` only → us
 
 | | `fast` | `accurate` / `long-range` |
 | --- | --- | --- |
-| Ingestion | Lightweight extraction, seconds | Full pipeline + graph, seconds-to-minutes |
-| Retrieval | Vector only, ~50-100ms | Vector + graph + multi-signal rank, ~200-500ms |
+| Ingestion | Lightweight extraction, low-latency | Full pipeline + graph, deeper processing |
+| Retrieval | Vector + graph (no LLM subquery decomposition), low-latency | Vector + graph + LLM subquery decomposition + reranking, deeper processing |
 
 Default to `fast` for retrieval (it's in the agent hot path) and `long-range` for ingestion (extraction quality compounds).
 
@@ -95,8 +95,7 @@ import os
 from maximem_synap import MaximemSynapSDK
 
 sdk = MaximemSynapSDK(
-    instance_id=os.environ["SYNAP_INSTANCE_ID"],
-    api_key=os.environ["SYNAP_API_KEY"],
+    api_key=os.environ["SYNAP_API_KEY"],   # instance is resolved from the key
 )
 await sdk.initialize()      # validates key, opens connection
 # ... use sdk ...
@@ -106,16 +105,15 @@ await sdk.shutdown()        # flush telemetry, close connections
 TypeScript is identical:
 
 ```typescript
-import { MaximemSynapSDK } from "@maximem/synap";
+import { createClient } from "@maximem/synap-js-sdk";
 
-const sdk = new MaximemSynapSDK({
-  instanceId: process.env.SYNAP_INSTANCE_ID!,
+const sdk = createClient({
   apiKey: process.env.SYNAP_API_KEY!,
 });
-await sdk.initialize();
+await sdk.init();
 ```
 
-The SDK is a **singleton per `instance_id`** — constructing twice with the same id returns the same instance. This is intentional; do not work around it. For tests use `_force_new=True`.
+The SDK is a **singleton per `instance_id`** — constructing twice with the same key returns the same instance. This is intentional; do not work around it. For tests use `_force_new=True`.
 
 **Critical:** every SDK call is async. Forgetting `await` is the #1 mistake.
 
@@ -156,15 +154,15 @@ If the user's framework isn't in the list (rare), they wire `sdk.memories.create
 
 When generating code, default to:
 
-- Read environment variables `SYNAP_INSTANCE_ID` and `SYNAP_API_KEY`. Never hardcode.
+- Read environment variable `SYNAP_API_KEY`. Never hardcode. The instance is resolved from the key.
 - Ingestion `mode="long-range"`, `document_type="ai-chat-conversation"`.
 - Retrieval `mode="fast"`, `max_results=10`.
 - Always pass `user_id`. Add `customer_id` only if the user mentions multi-tenant / B2B / orgs.
-- `conversation_id` must be a valid UUID — if the user passes a session string, wrap it: `str(uuid5(NAMESPACE_URL, session_str))`.
+- `conversation_id` must be a valid UUID — generate one with `str(uuid.uuid4())` (Python) / `crypto.randomUUID()` (TS), or if the user passes a session string, wrap it: `str(uuid5(NAMESPACE_URL, session_str))`.
 
 ## What this skill does NOT do
 
-- Configure MACA (Memory Architecture Configuration). That's a YAML file in the dashboard. Mention it exists; point to `https://docs.maximem.ai/concepts/customized-memory-architectures` and let the user configure it themselves.
+- Configure MACA (Memory Architecture Configuration). That's a YAML file in the dashboard. Mention it exists; point to `https://docs.maximem.ai/concepts/memory-architecture` and let the user configure it themselves.
 - Create instances or API keys. The user must do this from `https://synap.maximem.ai`. The skill should never attempt to provision.
 - Migrate data from another memory vendor. Point to `https://docs.maximem.ai/migration/overview`.
 

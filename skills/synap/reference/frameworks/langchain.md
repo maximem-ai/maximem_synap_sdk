@@ -32,9 +32,12 @@ chain_with_history = RunnableWithMessageHistory(
     get_session_history=get_history,
 )
 
+import uuid
+
+session_id = str(uuid.uuid4())   # conversation_id must be a valid UUID
 response = await chain_with_history.ainvoke(
     {"question": "What did we discuss last time?"},
-    config={"configurable": {"session_id": "conv-123"}},
+    config={"configurable": {"session_id": session_id}},
 )
 ```
 
@@ -43,11 +46,12 @@ response = await chain_with_history.ainvoke(
 Drop into any chain or agent without touching application logic:
 
 ```python
+import uuid
 from synap_langchain import SynapCallbackHandler
 
 handler = SynapCallbackHandler(
     sdk=sdk,
-    conversation_id="conv-123",
+    conversation_id=str(uuid.uuid4()),   # must be a valid UUID
     user_id="alice",
 )
 
