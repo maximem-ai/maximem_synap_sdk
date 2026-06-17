@@ -47,8 +47,8 @@ console.log(result.text);
 const memory = new SynapMemory({
   sdk,
   userId: "alice",
-  customerId: "acme",      // optional — scopes to org
-  conversationId: "t-001",  // optional — scopes to session
+  customerId: "acme",                   // optional — scopes to org
+  conversationId: crypto.randomUUID(),  // optional UUID — scopes to session
   maxResults: 8,
   mode: "fast",            // "fast" | "accurate"
 });

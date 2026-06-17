@@ -15,6 +15,7 @@ For Pipecat's frame-processor voice pipeline. Two processors slot into the pipel
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.services.openai import OpenAILLMService
 from synap_pipecat import SynapMemoryProcessor, SynapRecorder
+import uuid
 
 memory = SynapMemoryProcessor(
     sdk=sdk,
@@ -27,7 +28,7 @@ recorder = SynapRecorder(
     sdk=sdk,
     user_id="alice",
     customer_id="acme",
-    conversation_id="call-001",   # optional; auto-generated if omitted
+    conversation_id=str(uuid.uuid4()),   # optional UUID; auto-generated if omitted
 )
 
 pipeline = Pipeline([
@@ -64,11 +65,13 @@ Failures degrade gracefully — the frame passes through unmodified.
 Intercepts `TranscriptionFrame` (user) and `LLMFullResponseEndFrame` (assistant) events and ingests the completed turn:
 
 ```python
+import uuid
+
 recorder = SynapRecorder(
     sdk=sdk,
     user_id="alice",
     customer_id="acme",
-    conversation_id="call-001",
+    conversation_id=str(uuid.uuid4()),   # valid UUID
 )
 ```
 

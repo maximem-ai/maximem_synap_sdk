@@ -6,7 +6,7 @@ Work through this before the user's first production deployment, and again befor
 
 - [ ] `SYNAP_API_KEY` is in a secret manager (AWS Secrets Manager, GCP Secret Manager, Vault, Doppler, etc.) — never in code, never in `.env` files committed to git.
 - [ ] Separate API keys per environment (dev / staging / prod). Revoke and rotate quarterly or on staff changes.
-- [ ] `SYNAP_INSTANCE_ID` for production points at a **separate instance** from staging/dev. Do not share an instance across environments — memories will mix.
+- [ ] The production `SYNAP_API_KEY` belongs to a **separate instance** from staging/dev (the instance is resolved from the key). Do not share an instance across environments — memories will mix.
 
 ## Scoping
 
@@ -19,7 +19,7 @@ Work through this before the user's first production deployment, and again befor
 
 - [ ] `await sdk.initialize()` runs once at process start, not per-request.
 - [ ] `await sdk.shutdown()` runs on graceful shutdown (SIGTERM handler, FastAPI lifespan, Lambda extension, etc.).
-- [ ] Single SDK instance per `instance_id` per process — singleton behavior is intentional, don't fight it.
+- [ ] Single SDK instance per API key per process — singleton behavior is intentional, don't fight it.
 - [ ] In serverless, the SDK is module-level and initialized lazily on first invocation; cold-start latency is documented.
 
 ## Read path
@@ -73,7 +73,7 @@ Work through this before the user's first production deployment, and again befor
 ## MACA configuration
 
 - [ ] Use-case markdown was uploaded when the instance was created, OR a custom MACA was reviewed and applied.
-- [ ] If the agent's domain shifts (new product, new user segment), the use-case markdown is updated and MACA is regenerated. See `https://docs.maximem.ai/concepts/customized-memory-architectures`.
+- [ ] If the agent's domain shifts (new product, new user segment), the use-case markdown is updated and MACA is regenerated. See `https://docs.maximem.ai/concepts/memory-architecture`.
 
 ## Upgrade path
 

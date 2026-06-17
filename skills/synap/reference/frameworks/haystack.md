@@ -41,11 +41,12 @@ Each `Document` returned has:
 Place at the end of your pipeline after the LLM response:
 
 ```python
+import uuid
 from synap_haystack import SynapRetriever, SynapMemoryWriter
 
 writer = SynapMemoryWriter(
     sdk=sdk,
-    conversation_id="conv-001",   # UUID
+    conversation_id=str(uuid.uuid4()),   # must be a valid UUID
     user_id="alice",
     customer_id="acme",
 )
@@ -70,7 +71,7 @@ from haystack.components.generators import OpenAIGenerator
 from synap_haystack import SynapRetriever, SynapMemoryWriter
 
 retriever = SynapRetriever(sdk=sdk, user_id="alice")
-writer = SynapMemoryWriter(sdk=sdk, conversation_id="conv-001", user_id="alice")
+writer = SynapMemoryWriter(sdk=sdk, conversation_id=str(uuid.uuid4()), user_id="alice")  # valid UUID
 
 template = """
 Given this context about the user:

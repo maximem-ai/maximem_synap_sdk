@@ -58,8 +58,7 @@ Then in the NAT YAML:
 memory:
   type: synap
   config:
-    instance_id: ${SYNAP_INSTANCE_ID}
-    api_key: ${SYNAP_API_KEY}
+    api_key: ${SYNAP_API_KEY}   # instance is resolved from the key
     mode: accurate
     customer_id: acme
 ```
@@ -72,8 +71,7 @@ For programmatic setup outside YAML — when you don't want to manage the SDK li
 from synap_nemo_agent_toolkit import synap_memory_client
 
 editor = synap_memory_client(
-    instance_id=os.environ["SYNAP_INSTANCE_ID"],
-    api_key=os.environ["SYNAP_API_KEY"],
+    api_key=os.environ["SYNAP_API_KEY"],   # instance is resolved from the key
     customer_id="acme",
     mode="accurate",
 )

@@ -10,7 +10,7 @@ Client (your org)              cli_<hex16>   one per Synap account
        └─ memories             scoped to one of: user / customer / client / world
 ```
 
-The SDK talks to one **instance** at a time. Multiple agents = multiple instances = multiple SDK constructions (each with its own `instance_id`).
+The SDK talks to one **instance** at a time. The instance is resolved from the API key, so you never pass `instance_id` in code. Multiple agents = multiple instances = multiple SDK constructions (each with its own API key).
 
 ## The four scope levels
 
@@ -70,8 +70,8 @@ Two orthogonal mode axes. Don't confuse them.
 
 **Retrieval mode** (depth of search):
 
-- `fast` — vector similarity only, ~50–100ms. **Default for the agent hot path.**
-- `accurate` — vector + graph traversal + multi-signal rank, ~200–500ms. Use for relationship-heavy queries ("What did Alice say about the project Bob is leading?").
+- `fast` — vector + graph retrieval with low latency. **Default for the agent hot path.**
+- `accurate` — adds LLM subquery decomposition and reranking on top of vector + graph retrieval; higher latency. Use for relationship-heavy queries ("What did Alice say about the project Bob is leading?").
 
 Most production agents: `long-range` ingest, `fast` retrieve.
 
@@ -93,7 +93,7 @@ For `image` and `audio`, you provide the **text** (description, transcript, OCR 
 
 ## Ingestion is async
 
-`sdk.memories.create()` returns immediately with an `ingestion_id` and `status="queued"`. Processing happens in the background and is typically done in seconds. You can:
+`sdk.memories.create()` returns immediately with an `ingestion_id` and `status="queued"`. Processing happens asynchronously in the background. You can:
 
 - Poll with `sdk.memories.status(ingestion_id=...)`
 - Subscribe to webhooks (configure in dashboard) for completion events
@@ -139,7 +139,7 @@ Each instance has a YAML **Memory Architecture Configuration** controlling extra
 
 - Memory scopes: `https://docs.maximem.ai/concepts/memory-scopes`
 - Memory types: `https://docs.maximem.ai/concepts/memory-types`
-- Customers vs users: `https://docs.maximem.ai/concepts/customers-and-users`
-- Clients vs instances: `https://docs.maximem.ai/concepts/clients-and-instances`
+- Customers vs users: `https://docs.maximem.ai/concepts/memory-scopes#customers-and-users`
+- Clients vs instances: `https://docs.maximem.ai/concepts/memory-scopes#clients-and-instances`
 - Multi-user scoping guide: `https://docs.maximem.ai/guides/multi-user-scoping`
-- MACA: `https://docs.maximem.ai/concepts/customized-memory-architectures`
+- MACA: `https://docs.maximem.ai/concepts/memory-architecture`

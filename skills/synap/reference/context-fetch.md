@@ -31,9 +31,9 @@ Cache the mapping if you need to do this often.
 
 | | `fast` | `accurate` |
 | --- | --- | --- |
-| Latency | ~50–100 ms | ~200–500 ms |
-| Search | vector similarity only | vector + graph traversal + re-rank |
-| Ranking | cosine similarity | similarity + recency + graph centrality |
+| Latency | low | higher |
+| Search | vector + graph retrieval | vector + graph + LLM subquery decomposition + reranking |
+| Ranking | similarity + recency | similarity + recency + graph centrality + LLM rerank |
 | Best for | every-turn retrieval | relationship-heavy queries |
 
 **Default to `fast`.** Switch to `accurate` only when the query crosses entities ("What did Alice say about the project Bob is leading?") or when latency budget allows.
@@ -184,7 +184,7 @@ This is what most integrations do under the hood.
 - **Smaller `max_results` is faster.** Default 10 is fine; drop to 5 for tight budgets.
 - **Filter `types`.** Don't fetch episodes if you only show facts.
 - **Cache aggressively.** The SDK cache already helps; reuse the same `search_query` if the conversation hasn't shifted topic.
-- **Streaming via gRPC** is available with `pip install 'maximem-synap[grpc]'` for sub-50ms. Most users don't need it.
+- **Streaming via gRPC** is available with `pip install 'maximem-synap[grpc]'` for lower-latency reads. Most users don't need it.
 
 ## Live doc
 

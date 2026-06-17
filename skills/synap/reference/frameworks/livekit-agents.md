@@ -80,12 +80,14 @@ Failures degrade gracefully — the session starts with empty context rather tha
 Subscribes to the `AgentSession`'s turn-commit events and ingests asynchronously. Returns the `conversation_id` for the session.
 
 ```python
+import uuid
+
 conversation_id = attach_synap_recording(
     session=session,
     sdk=sdk,
     user_id="alice",
     customer_id="acme",
-    conversation_id="call-001",   # optional; auto-generated if omitted
+    conversation_id=str(uuid.uuid4()),   # optional UUID; auto-generated if omitted
 )
 ```
 

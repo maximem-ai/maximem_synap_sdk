@@ -2,28 +2,23 @@
  * Minimal Synap example — TypeScript, no framework.
  *
  * Run after:
- *   npm install @maximem/synap
- *   export SYNAP_INSTANCE_ID=inst_...
+ *   npm install @maximem/synap-js-sdk
  *   export SYNAP_API_KEY=synap_...
  */
 
-import { MaximemSynapSDK } from "@maximem/synap";
-import { v5 as uuidv5 } from "uuid";
-
-const NAMESPACE_URL = "6ba7b811-9dad-11d1-80b4-00c04fd430c8";
+import { createClient } from "@maximem/synap-js-sdk";
 
 async function main() {
-  const sdk = new MaximemSynapSDK({
-    instanceId: process.env.SYNAP_INSTANCE_ID!,
-    apiKey: process.env.SYNAP_API_KEY!,
+  const sdk = createClient({
+    apiKey: process.env.SYNAP_API_KEY!,   // instance resolved from the key
   });
-  await sdk.initialize();
+  await sdk.init();
 
   try {
     const userId = "alice";
     const customerId = "acme";
-    // conversation_id must be a UUID — derive deterministically from any session string
-    const convId = uuidv5("session-2026-05-04", NAMESPACE_URL);
+    // conversation_id must be a valid UUID
+    const convId = crypto.randomUUID();
 
     // 1. Ingest a turn
     const ingest = await sdk.memories.create({
