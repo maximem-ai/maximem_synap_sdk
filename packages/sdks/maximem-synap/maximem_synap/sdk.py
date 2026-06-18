@@ -1033,6 +1033,8 @@ class MaximemSynapSDK:
         include_conversation_context: bool = True,
         scopes: Optional[List[str]] = None,
         include_scope_labels: bool = False,
+        skip_subquery_gen: bool = False,
+        skip_llm_filter: bool = False,
     ) -> UnifiedContextResponse:
         """Fetch and merge context across all relevant scopes in a single call.
 
@@ -1111,6 +1113,8 @@ class MaximemSynapSDK:
                 types=types,
                 mode=mode,
                 customer_id=customer_id,
+                skip_subquery_gen=skip_subquery_gen,
+                skip_llm_filter=skip_llm_filter,
             ))
             scope_labels.append("user")
 
@@ -1122,6 +1126,8 @@ class MaximemSynapSDK:
                 max_results=max_results,
                 types=types,
                 mode=mode,
+                skip_subquery_gen=skip_subquery_gen,
+                skip_llm_filter=skip_llm_filter,
             ))
             scope_labels.append("customer")
 
@@ -2120,6 +2126,8 @@ class UserContextInterface:
         types: Optional[List[str]] = None,
         mode: str = "fast",
         customer_id: Optional[str] = None,
+        skip_subquery_gen: bool = False,
+        skip_llm_filter: bool = False,
     ) -> ContextResponse:
         """Fetch context for a user.
 
@@ -2132,6 +2140,10 @@ class UserContextInterface:
             mode: Retrieval mode - "fast" (default) or "accurate"
             customer_id: Optional customer ID. Required for B2B instances.
                 For B2C instances, this is auto-resolved from user_id.
+            skip_subquery_gen: Skip server-side semantic query expansion — for
+                metadata-keyed lookups where the query is an exact key.
+            skip_llm_filter: Skip server-side LLM relevance re-ranking — for
+                callers that select their result by exact metadata afterward.
 
         Returns:
             ContextResponse with user facts, preferences, etc.
@@ -2153,6 +2165,8 @@ class UserContextInterface:
             "max_results": max_results,
             "types": types,
             "mode": mode,
+            "skip_subquery_gen": skip_subquery_gen,
+            "skip_llm_filter": skip_llm_filter,
         }
 
         # Check anticipation cache first (bundles pre-fetched via gRPC stream).
@@ -2214,6 +2228,10 @@ class UserContextInterface:
                 }
                 if skip_server_st:
                     body["include_conversation_context"] = False
+                if skip_subquery_gen:
+                    body["skip_subquery_gen"] = True
+                if skip_llm_filter:
+                    body["skip_llm_filter"] = True
                 result = await self._sdk._http_transport.post(
                     "/v1/context/user/fetch",
                     auth_context=auth_context,
@@ -2318,8 +2336,15 @@ class CustomerContextInterface:
         max_results: int = 10,
         types: Optional[List[str]] = None,
         mode: str = "fast",
+        skip_subquery_gen: bool = False,
+        skip_llm_filter: bool = False,
     ) -> ContextResponse:
-        """Fetch context for a customer (B2B)."""
+        """Fetch context for a customer (B2B).
+
+        skip_subquery_gen / skip_llm_filter: for metadata-keyed lookups (e.g.
+        checkpoint reads) where the caller selects its row by exact metadata —
+        skips the two server-side Groq round-trips that dominate latency.
+        """
         self._sdk._ensure_initialized()
 
         # Validate mode
@@ -2337,6 +2362,8 @@ class CustomerContextInterface:
             "max_results": max_results,
             "types": types,
             "mode": mode,
+            "skip_subquery_gen": skip_subquery_gen,
+            "skip_llm_filter": skip_llm_filter,
         }
 
         # Check anticipation cache first (bundles pre-fetched via gRPC stream).
@@ -2395,6 +2422,10 @@ class CustomerContextInterface:
                 }
                 if skip_server_st:
                     body["include_conversation_context"] = False
+                if skip_subquery_gen:
+                    body["skip_subquery_gen"] = True
+                if skip_llm_filter:
+                    body["skip_llm_filter"] = True
                 result = await self._sdk._http_transport.post(
                     "/v1/context/customer/fetch",
                     auth_context=auth_context,

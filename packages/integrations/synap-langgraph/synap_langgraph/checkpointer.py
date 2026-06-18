@@ -62,7 +62,7 @@ class SynapCheckpointSaver(BaseCheckpointSaver):
         user_id: str,
         customer_id: str = "",
         *,
-        mode: str = "accurate",
+        mode: str = "fast",
     ) -> None:
         if sdk is None:
             raise ValueError("SynapCheckpointSaver requires a non-None sdk")
@@ -295,6 +295,11 @@ class SynapCheckpointSaver(BaseCheckpointSaver):
         limit: int,
     ) -> list[CheckpointTuple]:
         try:
+            # Checkpoint lookup is keyed by thread_id metadata (the candidate
+            # filtering below matches _MARKER + thread_id exactly), so server-side
+            # semantic query expansion and LLM relevance re-ranking are wasted
+            # work whose cost also grows as checkpoints accumulate. Skip both
+            # Groq round-trips — this is the dominant per-turn Synap cost.
             response = await self.sdk.fetch(
                 user_id=self.user_id,
                 customer_id=self.customer_id or None,
@@ -302,6 +307,8 @@ class SynapCheckpointSaver(BaseCheckpointSaver):
                 max_results=limit,
                 mode=self.mode,
                 include_conversation_context=False,
+                skip_subquery_gen=True,
+                skip_llm_filter=True,
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(

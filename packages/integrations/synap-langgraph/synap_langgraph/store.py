@@ -176,13 +176,18 @@ class SynapStore(BaseStore):
     ) -> Optional[Item]:
         ns = _ns_str(namespace)
         try:
+            # Exact key lookup: the row is selected by exact (_NS, _KEY) metadata
+            # below, so server-side semantic query expansion and LLM relevance
+            # re-ranking are pure waste. Use fast + skip both Groq round-trips.
             response = await self.sdk.fetch(
                 user_id=self.user_id,
                 customer_id=self.customer_id or None,
                 search_query=[f"{ns} {key}"],
                 max_results=50,
-                mode=self.mode,
+                mode="fast",
                 include_conversation_context=False,
+                skip_subquery_gen=True,
+                skip_llm_filter=True,
             )
         except Exception as exc:  # noqa: BLE001 — read-side degrades gracefully
             logger.error(
