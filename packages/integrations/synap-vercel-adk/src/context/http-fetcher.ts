@@ -1,5 +1,6 @@
 import type { Credentials, FetchedContext, SynapModelOptions, RawContextItem, RawConversationContext } from '../types.js';
 import { rawItemToContextItem } from '../transform/messages.js';
+import { SDK_VERSION } from '../version.js';
 
 const DEFAULT_BASE_URL = 'https://synap-cloud-prod.maximem.ai';
 
@@ -79,13 +80,23 @@ function buildHeaders(creds: Credentials, correlationId: string): Record<string,
     'X-Instance-ID': creds.instance_id,
     'X-Correlation-ID': correlationId,
     'Content-Type': 'application/json',
-    'User-Agent': '@maximem/synap-vercel-adk/0.2.5',
+    'User-Agent': `@maximem/synap-vercel-adk/${SDK_VERSION}`,
   };
 }
 
 function parseContextResponse(data: Record<string, unknown>, correlationId: string): FetchedContext {
   const itemsByType = (data['items_by_type'] as Record<string, { items: RawContextItem[] }> | undefined) ?? {};
   const convCtxRaw = data['conversation_context'] as RawConversationContext | undefined;
+
+  const servedItemIds: string[] = [];
+  for (const list of Object.values(itemsByType)) {
+    for (const item of list?.items ?? []) {
+      if (item.item_id) servedItemIds.push(item.item_id);
+    }
+  }
+
+  const cacheHit = (data['metadata'] as Record<string, string> | undefined)?.['source'] === 'cache';
+  const bundleId = (data['bundle_id'] as string | undefined) ?? '';
 
   return {
     facts: (itemsByType['facts']?.items ?? []).map(rawItemToContextItem),
@@ -101,8 +112,14 @@ function parseContextResponse(data: Record<string, unknown>, correlationId: stri
       compactionId: convCtxRaw.compaction_id ?? null,
       conversationId: convCtxRaw.conversation_id ?? null,
     } : null,
-    source: (data['metadata'] as Record<string, string> | undefined)?.['source'] === 'cache' ? 'cache' : 'cloud',
+    source: cacheHit ? 'cache' : 'cloud',
     correlationId,
+    bundleId,
+    servedItemIds,
+    sourceBundleIds: bundleId ? [bundleId] : [],
+    totalTokens: (data['total_tokens'] as number | undefined) ?? 0,
+    assemblySource: cacheHit ? 'http_cache' : 'cloud',
+    cacheHit,
   };
 }
 

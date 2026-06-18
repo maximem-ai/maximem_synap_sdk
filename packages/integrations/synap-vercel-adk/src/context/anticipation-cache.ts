@@ -1,7 +1,7 @@
 import type { CachedBundle, FetchedContext, RawContextItem } from '../types.js';
 import { rawItemToContextItem } from '../transform/messages.js';
 
-const DEFAULT_TTL_MS = 300_000;   // 5 minutes — mirrors Python SDK
+const DEFAULT_TTL_MS = 1_800_000; // 30 minutes — matches Python SDK (ttl_seconds=1800)
 const MAX_ENTRIES = 100;
 const BM25_THRESHOLD = 1.5;
 const NOVEL_TERM_GATE = 0.45;     // cache miss if >45% query terms are unknown
@@ -164,6 +164,13 @@ export class AnticipationCache {
   }
 
   private bundleToContext(bundle: CachedBundle): FetchedContext {
+    const servedItemIds: string[] = [];
+    for (const list of Object.values(bundle.itemsByType)) {
+      for (const item of list) {
+        if (item.item_id) servedItemIds.push(item.item_id);
+      }
+    }
+
     return {
       facts: (bundle.itemsByType['facts'] ?? []).map(rawItemToContextItem),
       preferences: (bundle.itemsByType['preferences'] ?? []).map(rawItemToContextItem),
@@ -180,6 +187,12 @@ export class AnticipationCache {
       } : null,
       source: 'anticipation',
       correlationId: '',
+      bundleId: bundle.bundleId,
+      servedItemIds,
+      sourceBundleIds: bundle.sourceBundleIds.length ? bundle.sourceBundleIds : (bundle.bundleId ? [bundle.bundleId] : []),
+      totalTokens: bundle.totalTokens,
+      assemblySource: 'anticipation_cache',
+      cacheHit: true,
     };
   }
 

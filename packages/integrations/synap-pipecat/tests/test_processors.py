@@ -264,8 +264,10 @@ class TestSynapMemoryProcessorHappyPaths:
         sdk.fetch.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_multiple_transcriptions_append_multiple_system_messages(self):
-        """Long-term memory processor appends on every turn (no dedup)."""
+    async def test_multiple_transcriptions_replace_system_message(self):
+        """Processor keeps a single rolling system message: each turn replaces
+        the previously injected one instead of appending, so the context does
+        not grow unboundedly across turns."""
         sdk = _sdk(formatted="ctx")
         ctx = LLMContext(messages=[])
         proc = SynapMemoryProcessor(sdk, user_id="u1", context=ctx)
@@ -273,7 +275,7 @@ class TestSynapMemoryProcessorHappyPaths:
         await proc._inject_context("turn 1")
         await proc._inject_context("turn 2")
 
-        assert len(_system_messages(ctx)) == 2
+        assert len(_system_messages(ctx)) == 1
 
     @pytest.mark.asyncio
     async def test_set_context_after_construction_enables_injection(self):

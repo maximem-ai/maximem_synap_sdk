@@ -59,6 +59,7 @@ function makeRawItem(content: string): RawContextItem {
 
 function makeBundle(overrides: Partial<CachedBundle> = {}): CachedBundle {
   return {
+    bundleId: 'bundle-1',
     itemsByType: {
       facts: [makeRawItem('User loves distributed systems sharding')],
     },
@@ -69,6 +70,10 @@ function makeBundle(overrides: Partial<CachedBundle> = {}): CachedBundle {
     conversationId: 'conv-1',
     searchKeywords: ['distributed', 'systems', 'sharding'],
     searchQueries: ['distributed systems sharding'],
+    sourceBundleIds: ['bundle-1'],
+    totalTokens: 100,
+    bundleConfidence: 0.9,
+    originPatternId: '',
     storedAt: Date.now(),
     ttl: 300_000,
     ...overrides,

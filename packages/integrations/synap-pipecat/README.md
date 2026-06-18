@@ -32,20 +32,27 @@ asst_agg = LLMAssistantAggregator(context=context)
 pipeline = Pipeline([
     transport.input(),
     stt,
-    SynapMemoryProcessor(sdk, user_id="alice", customer_id="acme"),
+    SynapMemoryProcessor(sdk, user_id="alice", customer_id="acme", context=context),
     user_agg,
     llm,
     tts,
     transport.output(),
     asst_agg,
-    SynapRecorder(sdk, user_id="alice", customer_id="acme"),
+    SynapRecorder(sdk, user_id="alice", customer_id="acme", context=context),
 ])
 ```
+
+> **Pass `context=` to both processors.** `SynapMemoryProcessor` without a
+> context is a read-only tap — it fetches nothing into the prompt. And on
+> Pipecat ≥1.x the universal aggregators consume `TranscriptionFrame` while
+> TTS services consume `LLMTextFrame`, so a `SynapRecorder` at the end of the
+> pipeline only sees the turns via the shared context (user) and the
+> `TTSTextFrame` stream (assistant). Without `context=` it records nothing.
 
 ## Scope
 
 - **`SynapMemoryProcessor`** — sits BEFORE the user context aggregator. On each `TranscriptionFrame`, fetches relevant context from Synap via `sdk.fetch()` and appends it as a system message to the shared `LLMContext`. The transcription frame itself flows through unchanged so the user aggregator can record it as the user turn.
-- **`SynapRecorder`** — sits AFTER the assistant context aggregator. Buffers the latest user transcription and the streamed assistant response; on `LLMFullResponseEndFrame`, calls `sdk.conversation.record_message()` for both turns.
+- **`SynapRecorder`** — sits AFTER the assistant context aggregator. On `LLMFullResponseEndFrame`, calls `sdk.conversation.record_message()` for both turns. The user turn comes from the latest `TranscriptionFrame` to reach the processor, or — on universal-aggregator pipelines where that frame never arrives — from the shared `context`. The assistant turn comes from streamed `LLMTextFrame`s, or from the `TTSTextFrame` stream (the words actually spoken, which is also the correct record under interruption).
 
 ## Error policy
 

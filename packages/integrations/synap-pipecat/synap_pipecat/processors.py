@@ -38,6 +38,7 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame,
     LLMTextFrame,
     TranscriptionFrame,
+    TTSTextFrame,
 )
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
@@ -106,10 +107,33 @@ class SynapMemoryProcessor(FrameProcessor):
         self.mode = mode
         self.max_results = max_results
         self.include_conversation_context = include_conversation_context
+        self._last_injected_message: Optional[dict] = None
 
     def set_context(self, context: LLMContext) -> None:
         """Attach or swap the shared :class:`LLMContext` at runtime."""
         self._context = context
+        self._last_injected_message = None
+
+    def inject_memory_message(self, formatted_context: str) -> None:
+        """Replace the previously injected Synap memory block with a fresh
+        one. Appending a new system message every turn would make the
+        context grow with stale (and potentially contradictory) memory
+        blocks over a long call — each turn should see exactly one,
+        current, memory block."""
+        if self._context is None:
+            return
+        if self._last_injected_message is not None:
+            current = self._context.messages
+            if self._last_injected_message in current:
+                self._context.set_messages(
+                    [m for m in current if m is not self._last_injected_message]
+                )
+        message = {
+            "role": "system",
+            "content": _SYSTEM_MEMORY_PREAMBLE.format(body=formatted_context),
+        }
+        self._context.add_message(message)
+        self._last_injected_message = message
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
@@ -143,21 +167,29 @@ class SynapMemoryProcessor(FrameProcessor):
         if not formatted.strip():
             return  # nothing to inject — pass through silently
 
-        self._context.add_message({
-            "role": "system",
-            "content": _SYSTEM_MEMORY_PREAMBLE.format(body=formatted.strip()),
-        })
+        self.inject_memory_message(formatted.strip())
 
 
 class SynapRecorder(FrameProcessor):
     """Records user + assistant turns to Synap at end-of-response.
 
     Placement: AFTER the assistant context aggregator in the pipeline.
-    Buffers the most recent user transcription (from
-    :class:`TranscriptionFrame`) and the streamed assistant tokens (from
-    :class:`LLMTextFrame`); on :class:`LLMFullResponseEndFrame`, flushes
-    both turns via ``sdk.conversation.record_message`` and resets the
-    buffer.
+    On :class:`LLMFullResponseEndFrame`, flushes the user and assistant
+    turns via ``sdk.conversation.record_message`` and resets its buffers.
+
+    Turn capture works across both pipeline generations:
+
+    - Direct frames — :class:`TranscriptionFrame` (user) and
+      :class:`LLMTextFrame` (assistant) are buffered when they reach this
+      processor. This is how pre-universal-aggregator pipelines behave.
+    - Pipecat ≥1.x universal aggregators + TTS — ``LLMUserAggregator``
+      consumes ``TranscriptionFrame`` and TTS services consume
+      ``LLMTextFrame``, so NEITHER reaches a recorder placed at the end of
+      a standard voice pipeline. For those, the assistant text is rebuilt
+      from the :class:`TTSTextFrame` stream (what was actually spoken —
+      correct under interruption), and the user turn is recovered from the
+      shared ``context`` at flush time. Pass ``context=`` whenever your
+      pipeline uses the universal aggregators.
 
     Args:
         sdk: Configured :class:`MaximemSynapSDK`.
@@ -166,6 +198,9 @@ class SynapRecorder(FrameProcessor):
             customer-less.
         conversation_id: Stable id for this call. Auto-generated per
             processor lifetime when absent.
+        context: Optional shared :class:`LLMContext` (the one given to the
+            user/assistant aggregators). Used to recover the user turn when
+            ``TranscriptionFrame`` never reaches this processor.
     """
 
     def __init__(
@@ -175,6 +210,7 @@ class SynapRecorder(FrameProcessor):
         user_id: str,
         customer_id: str = "",
         conversation_id: Optional[str] = None,
+        context: Optional[LLMContext] = None,
         name: Optional[str] = None,
         **kwargs,
     ) -> None:
@@ -187,9 +223,15 @@ class SynapRecorder(FrameProcessor):
         self.user_id = user_id
         self.customer_id = customer_id
         self.conversation_id = conversation_id or f"pipecat-{uuid.uuid4().hex[:12]}"
+        self._context = context
 
         self._user_buffer: Optional[str] = None
         self._assistant_parts: List[str] = []
+        self._assistant_tts_parts: List[str] = []
+        # Index of the last context message we recorded as a user turn, so
+        # a turn that ends twice (e.g. function-call follow-ups) doesn't
+        # record the same user message twice.
+        self._last_user_msg_index: int = -1
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
@@ -199,6 +241,11 @@ class SynapRecorder(FrameProcessor):
             # refinements before the LLM responds; only the last is the
             # committed user turn.
             self._user_buffer = frame.text
+        elif isinstance(frame, TTSTextFrame) and frame.text:
+            # Spoken-text stream from the TTS service (universal-aggregator
+            # pipelines). Kept separate from _assistant_parts so pipelines
+            # where both frame types arrive don't double-count.
+            self._assistant_tts_parts.append(frame.text)
         elif isinstance(frame, LLMTextFrame) and frame.text:
             self._assistant_parts.append(frame.text)
         elif isinstance(frame, LLMFullResponseEndFrame):
@@ -206,13 +253,48 @@ class SynapRecorder(FrameProcessor):
 
         await self.push_frame(frame, direction)
 
+    def _user_text_from_context(self) -> Optional[str]:
+        """Recover the latest not-yet-recorded user message from the shared
+        LLM context (used when TranscriptionFrames never reach us)."""
+        if self._context is None:
+            return None
+        try:
+            messages = self._context.get_messages()
+        except Exception:  # noqa: BLE001 — context shape is LLM-specific
+            return None
+        for idx in range(len(messages) - 1, -1, -1):
+            message = messages[idx]
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            if idx <= self._last_user_msg_index:
+                return None  # already recorded on a previous flush
+            content = message.get("content")
+            if isinstance(content, list):
+                text = " ".join(
+                    item.get("text", "")
+                    for item in content
+                    if isinstance(item, dict) and item.get("type") == "text"
+                ).strip()
+            else:
+                text = (content or "").strip() if isinstance(content, str) else ""
+            if text:
+                self._last_user_msg_index = idx
+                return text
+            return None
+        return None
+
     async def _flush(self) -> None:
-        user_text = self._user_buffer
+        user_text = self._user_buffer or self._user_text_from_context()
         assistant_text = "".join(self._assistant_parts).strip()
+        if not assistant_text:
+            assistant_text = " ".join(
+                part.strip() for part in self._assistant_tts_parts if part.strip()
+            ).strip()
         # Reset buffers before we await — the next turn may start flowing
         # while we're still writing to Synap.
         self._user_buffer = None
         self._assistant_parts = []
+        self._assistant_tts_parts = []
 
         if not user_text and not assistant_text:
             return

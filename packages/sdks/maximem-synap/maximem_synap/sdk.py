@@ -34,6 +34,7 @@ from .transport.grpc_client import GRPCTransport
 from .telemetry.collector import TelemetryCollector, emit_fetch_event
 from .telemetry.transport import TelemetryTransport
 from .utils.correlation import generate_correlation_id
+from .utils.validators import validate_conversation_id, validate_instance_id
 from ._version import __version__
 from .memories.interface import MemoriesInterface
 from .facade.instance import InstanceController
@@ -683,6 +684,7 @@ class MaximemSynapSDK:
                 return
 
         self.instance_id = instance_id or os.environ.get("SYNAP_INSTANCE_ID", "")
+        validate_instance_id(self.instance_id)
         self._api_key = api_key
         self._config = config or SDKConfig()
         # Env-var fallbacks for transport endpoints. Priority:
@@ -1406,6 +1408,7 @@ class ConversationInterface:
         Returns:
             Dict with message_id, conversation_id, session_id, recorded_at
         """
+        validate_conversation_id(conversation_id)
         controller = self._ensure_controller()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         result = await controller.record_message(
@@ -1455,6 +1458,8 @@ class ConversationInterface:
         Returns:
             Dict with total, succeeded, failed, results[]
         """
+        for _msg in messages:
+            validate_conversation_id(_msg.get("conversation_id"))
         controller = self._ensure_controller()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         result = await controller.record_messages_batch(
@@ -1608,6 +1613,7 @@ class ConversationContextInterface:
             ContextResponse with facts, preferences, episodes, etc.
         """
         self._sdk._ensure_initialized()
+        validate_conversation_id(conversation_id)
 
         # Validate mode
         valid_modes = ("fast", "accurate")
@@ -1806,6 +1812,7 @@ class ConversationContextInterface:
             CompactionTriggerResponse with compaction_id and status
         """
         self._sdk._ensure_initialized()
+        validate_conversation_id(conversation_id)
 
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = datetime.now(timezone.utc)
@@ -1886,6 +1893,7 @@ class ConversationContextInterface:
             CompactionResponse if exists, None otherwise
         """
         self._sdk._ensure_initialized()
+        validate_conversation_id(conversation_id)
 
         correlation_id = generate_correlation_id(self._sdk.instance_id)
 
@@ -2001,6 +2009,7 @@ class ConversationContextInterface:
             CompactionStatusResponse with status information
         """
         self._sdk._ensure_initialized()
+        validate_conversation_id(conversation_id)
 
         # Check anticipation cache for a compaction_update bundle
         try:
@@ -2053,6 +2062,7 @@ class ConversationContextInterface:
             ContextForPromptResponse with formatted_context, recent_messages, and metadata
         """
         self._sdk._ensure_initialized()
+        validate_conversation_id(conversation_id)
 
         # Stamp start_time + correlation_id up front so every return branch
         # can fire `_emit_context_assembled_event` with consistent assembly

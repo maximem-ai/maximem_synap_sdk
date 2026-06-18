@@ -7,6 +7,7 @@ import { fetchContext } from './context/http-fetcher.js';
 import { injectContextIntoPrompt, extractSearchQuery, promptToTranscript } from './transform/messages.js';
 import { writeMemory } from './memory/writer.js';
 import type { GrpcStreamClient } from './grpc/stream-client.js';
+import { SDK_VERSION } from './version.js';
 
 export interface SynapMiddlewareOptions extends SynapModelOptions {
   credentials: Credentials;
@@ -40,8 +41,13 @@ export function createSynapMiddleware(opts: SynapMiddlewareOptions): LanguageMod
       if (opts.injectContext === false) return params;
       if (!opts.userId && !opts.conversationId && !opts.customerId) return params;
 
+      const startedAt = Date.now();
       const ctx = await resolveContext(opts, params.prompt);
       if (!ctx) return params;
+
+      // Fire-and-forget learning-loop telemetry (ids only, never prompt content).
+      emitContextTelemetry(opts, ctx, Date.now() - startedAt)
+        .catch((err: unknown) => console.warn('[synap] context telemetry failed:', err));
 
       return { ...params, prompt: injectContextIntoPrompt(params.prompt, ctx) };
     },
@@ -115,6 +121,63 @@ export function createSynapMiddleware(opts: SynapMiddlewareOptions): LanguageMod
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function resolveScope(opts: SynapModelOptions): string {
+  if (opts.conversationId) return 'conversation';
+  if (opts.userId) return 'user';
+  if (opts.customerId) return 'customer';
+  return 'client';
+}
+
+/**
+ * Emit the learning-loop telemetry events after a context fetch resolves:
+ *   - ContextAssembledEvent on every fetch (any source)
+ *   - ContextUsedEvent only when served from the anticipation cache
+ * Both are fire-and-forget and carry ids/metadata only — never prompt content.
+ */
+async function emitContextTelemetry(
+  opts: SynapMiddlewareOptions,
+  ctx: FetchedContext,
+  durationMs: number,
+): Promise<void> {
+  const grpc = opts.grpcClient;
+  if (!grpc?.isConnected) return;
+
+  const now = Date.now();
+  const conversationId = opts.conversationId ?? '';
+  const userId = opts.userId ?? '';
+  const customerId = opts.customerId ?? '';
+
+  await grpc.sendContextAssembledEvent({
+    correlation_id: ctx.correlationId || crypto.randomUUID(),
+    conversation_id: conversationId,
+    user_id: userId,
+    customer_id: customerId,
+    final_item_ids: ctx.servedItemIds,
+    final_total_tokens: ctx.totalTokens,
+    compaction_id: ctx.conversationContext?.compactionId ?? '',
+    recent_turn_count: ctx.conversationContext?.recentTurns.length ?? 0,
+    compaction_end_timestamp: '',
+    assembly_source: ctx.assemblySource,
+    assembly_duration_ms: durationMs,
+    cache_hit: ctx.cacheHit,
+    timestamp_ms: now,
+    sdk_version: SDK_VERSION,
+  });
+
+  if (ctx.source === 'anticipation') {
+    await grpc.sendContextUsedEvent({
+      bundle_id: ctx.bundleId,
+      conversation_id: conversationId,
+      user_id: userId,
+      customer_id: customerId,
+      served_item_ids: ctx.servedItemIds,
+      timestamp_ms: now,
+      scope: resolveScope(opts),
+      source_bundle_ids: ctx.sourceBundleIds,
+    });
+  }
+}
 
 async function resolveContext(
   opts: SynapMiddlewareOptions,

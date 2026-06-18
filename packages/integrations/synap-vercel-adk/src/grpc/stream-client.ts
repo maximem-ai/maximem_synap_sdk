@@ -12,10 +12,22 @@
 
 import path from 'path';
 import { fileURLToPath } from 'url';
-import type { Credentials, ContextBundleMsg, ConversationEventMsg } from '../types.js';
+import type {
+  Credentials,
+  ContextBundleMsg,
+  ConversationEventMsg,
+  ContextUsedEventMsg,
+  ContextAssembledEventMsg,
+  CachedBundleType,
+} from '../types.js';
 import type { AnticipationCache } from '../context/anticipation-cache.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Anticipation cache TTL — matches the Python SDK default (1800s / 30 min).
+// ttl_hint_seconds from the server is honored when present, with a 60s floor.
+const DEFAULT_TTL_MS = 1_800_000;
+const MIN_TTL_SECONDS = 60;
 
 // Backoff + heartbeat settings — mirrors Python GRPCTransport constants
 const MAX_RECONNECT_ATTEMPTS = 10;
@@ -100,6 +112,28 @@ export class GrpcStreamClient {
         },
       };
       (this.call as { write: (msg: unknown) => void }).write(msg);
+    } catch {
+      // Non-fatal — fire-and-forget telemetry event
+    }
+  }
+
+  /** Emit ContextUsedEvent after a fetch is served from the anticipation cache.
+   *  Drives the server's learning loop. IDs only — never prompt/item content. */
+  async sendContextUsedEvent(event: ContextUsedEventMsg): Promise<void> {
+    if (!this.isConnected || !this.call) return;
+    try {
+      (this.call as { write: (msg: unknown) => void }).write({ context_used: { ...event } });
+    } catch {
+      // Non-fatal — fire-and-forget telemetry event
+    }
+  }
+
+  /** Emit ContextAssembledEvent after a fetch resolves (any source). Drives the
+   *  Requests-page audit enrichment. IDs + composition metadata only. */
+  async sendContextAssembledEvent(event: ContextAssembledEventMsg): Promise<void> {
+    if (!this.isConnected || !this.call) return;
+    try {
+      (this.call as { write: (msg: unknown) => void }).write({ context_assembled: { ...event } });
     } catch {
       // Non-fatal — fire-and-forget telemetry event
     }
@@ -193,29 +227,46 @@ export class GrpcStreamClient {
   }
 
   private handleBundle(bundle: ContextBundleMsg): void {
+    const bundleType = (bundle.bundle_type as CachedBundleType) || 'anticipation';
+
+    // Compaction updates are a control signal, not cached context: invalidate the
+    // conversation's entries and stop. Reactive bundles are not cached either
+    // (matches the Python SDK — only anticipation/user_summary are stored).
+    if (bundleType === 'compaction_update') {
+      if (bundle.anticipation_conversation_id) {
+        this.cache.invalidateConversation(bundle.anticipation_conversation_id);
+      }
+      return;
+    }
+    if (bundleType === 'reactive') return;
+
     // Normalise items_by_type from proto shape → cache shape
     const itemsByType: Record<string, import('../types.js').RawContextItem[]> = {};
     for (const [type, list] of Object.entries(bundle.items_by_type ?? {})) {
       itemsByType[type] = (list as { items: import('../types.js').RawContextItem[] }).items ?? [];
     }
 
+    // Honor server ttl_hint_seconds (floored); fall back to the SDK default.
+    const ttlHint = bundle.ttl_hint_seconds ?? 0;
+    const ttl = ttlHint > 0 ? Math.max(ttlHint, MIN_TTL_SECONDS) * 1000 : DEFAULT_TTL_MS;
+
     this.cache.store({
+      bundleId: bundle.bundle_id ?? '',
       itemsByType,
       conversationContext: bundle.conversation_context ?? null,
-      bundleType: (bundle.bundle_type as 'anticipation' | 'user_summary' | 'compaction_update') ?? 'anticipation',
+      bundleType,
       userId: bundle.anticipation_user_id ?? '',
       customerId: bundle.anticipation_customer_id ?? '',
       conversationId: bundle.anticipation_conversation_id ?? '',
       searchKeywords: bundle.search_keywords ?? [],
       searchQueries: bundle.search_queries ?? [],
+      sourceBundleIds: bundle.bundle_id ? [bundle.bundle_id] : [],
+      totalTokens: bundle.total_tokens ?? 0,
+      bundleConfidence: bundle.bundle_confidence ?? 0,
+      originPatternId: bundle.origin_pattern_id ?? '',
       storedAt: Date.now(),
-      ttl: 300_000,
+      ttl,
     });
-
-    // If this is a compaction update, invalidate conversation cache entries
-    if (bundle.bundle_type === 'compaction_update' && bundle.anticipation_conversation_id) {
-      this.cache.invalidateConversation(bundle.anticipation_conversation_id);
-    }
   }
 
   private async handleDisconnect(reason: string): Promise<void> {

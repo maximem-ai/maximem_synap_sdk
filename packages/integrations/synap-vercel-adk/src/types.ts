@@ -64,19 +64,44 @@ export interface FetchedContext {
   /** Where the context came from */
   source: 'anticipation' | 'cache' | 'cloud';
   correlationId: string;
+  // ─── Telemetry provenance (drives ContextUsedEvent / ContextAssembledEvent) ──
+  /** Merged/source bundle id this context was served from ('' for HTTP cloud fetch). */
+  bundleId: string;
+  /** IDs of every context item served (no content — ids only, privacy rule). */
+  servedItemIds: string[];
+  /** Server-side source bundles that contributed items (anticipation merges). */
+  sourceBundleIds: string[];
+  /** Total tokens reported for the assembled bundle. */
+  totalTokens: number;
+  /** How the bundle was assembled — matches ContextAssembledEvent.assembly_source. */
+  assemblySource: 'anticipation_cache' | 'http_cache' | 'cloud' | 'hybrid';
+  /** Whether this fetch was served from a cache (anticipation or HTTP). */
+  cacheHit: boolean;
 }
 
 // ─── Anticipation cache types (mirrors Python AnticipationCache) ──────────────
 
+export type CachedBundleType = 'anticipation' | 'user_summary' | 'reactive' | 'compaction_update';
+
 export interface CachedBundle {
+  bundleId: string;
   itemsByType: Record<string, RawContextItem[]>;
   conversationContext: RawConversationContext | null;
-  bundleType: 'anticipation' | 'user_summary' | 'compaction_update';
+  bundleType: CachedBundleType;
   userId: string;
   customerId: string;
   conversationId: string;
   searchKeywords: string[];
   searchQueries: string[];
+  /** Source bundle ids that contributed items (for ContextUsedEvent attribution). */
+  sourceBundleIds: string[];
+  /** Total tokens reported by the server for this bundle. */
+  totalTokens: number;
+  /** Server-assigned 0..1 confidence. Carried for telemetry; not used for ranking
+   *  (matches the Python SDK, which ranks on BM25 only). */
+  bundleConfidence: number;
+  /** MACA pattern that produced this bundle. Carried for per-pattern attribution. */
+  originPatternId: string;
   storedAt: number;
   ttl: number;
 }
@@ -135,6 +160,40 @@ export interface ContextBundleMsg {
   search_keywords: string[];
   search_queries: string[];
   conversation_context?: RawConversationContext;
+  // Section 16 — bundle composition (proto fields 21-23).
+  bundle_confidence: number;
+  origin_pattern_id: string;
+  ttl_hint_seconds: number;
+}
+
+// Client → server learning-loop telemetry (StreamEvent oneof fields 4 & 5).
+// IDs and metadata only — never raw prompts or item content.
+export interface ContextUsedEventMsg {
+  bundle_id: string;
+  conversation_id: string;
+  user_id: string;
+  customer_id: string;
+  served_item_ids: string[];
+  timestamp_ms: number;
+  scope: string;
+  source_bundle_ids: string[];
+}
+
+export interface ContextAssembledEventMsg {
+  correlation_id: string;
+  conversation_id: string;
+  user_id: string;
+  customer_id: string;
+  final_item_ids: string[];
+  final_total_tokens: number;
+  compaction_id: string;
+  recent_turn_count: number;
+  compaction_end_timestamp: string;
+  assembly_source: string;
+  assembly_duration_ms: number;
+  cache_hit: boolean;
+  timestamp_ms: number;
+  sdk_version: string;
 }
 
 // ─── Credentials ──────────────────────────────────────────────────────────────

@@ -25,7 +25,64 @@ message StreamEvent {
     ConversationEvent conversation_event = 1;
     HeartbeatPing heartbeat_ping = 2;
     SessionControl session_control = 3;
+    ContextUsedEvent context_used = 4;
+    ContextAssembledEvent context_assembled = 5;
   }
+}
+
+// Emitted by the SDK after synap.fetch(...) is served from the anticipation
+// cache. Drives the server's learning loop: per-prefetch outcome scoring,
+// per-pattern hit rates, per-query-family priors. v1 reports "items served"
+// from cache; "items used by the downstream LLM" is a follow-up that requires
+// post-response inspection on the SDK side.
+//
+// Privacy: this event MUST NOT carry raw user prompts. Only bundle id, item
+// ids, and scope identifiers.
+message ContextUsedEvent {
+  string bundle_id = 1;                  // Synthetic merged id (for log correlation)
+  string conversation_id = 2;
+  string user_id = 3;
+  string customer_id = 4;
+  repeated string served_item_ids = 5;   // IDs of items served from cache
+  int64 timestamp_ms = 6;
+  string scope = 7;                      // "conversation" | "user" | "customer" | "client"
+  repeated string source_bundle_ids = 8; // Server-side source bundles that contributed items
+}
+
+// Emitted by the SDK after fetch() resolves and the response composition is
+// finalized client-side. Drives the Requests-page audit enrichment by
+// recording what the LLM actually consumed (which can differ from what the
+// server returned, due to SDK-side budget trimming, dedup, or tool inspection).
+//
+// Privacy: MUST NOT carry raw user prompts or item content. Only ids,
+// counts, source flags, and assembly metadata.
+//
+// Reliability: fire-and-forget. Server tolerates missing events — a
+// finalize-on-timeout watcher writes a synthetic enrichment row from the
+// server's own ST snapshot if no SDK event arrives within the window.
+message ContextAssembledEvent {
+  string correlation_id = 1;             // Joins to server-side audit row
+  string conversation_id = 2;
+  string user_id = 3;
+  string customer_id = 4;
+
+  // Composition: which items ended up in the final bundle the consumer LLM
+  // saw. May differ from what the server sent.
+  repeated string final_item_ids = 5;
+  int32 final_total_tokens = 6;
+
+  // Short-term context composition
+  string compaction_id = 7;              // empty if no ST included
+  int32 recent_turn_count = 8;
+  string compaction_end_timestamp = 9;   // ISO 8601, source_message_range.end_timestamp
+
+  // Assembly metadata
+  string assembly_source = 10;           // "anticipation_cache" | "http_cache" | "cloud" | "hybrid"
+  int32 assembly_duration_ms = 11;       // SDK-observed
+  bool cache_hit = 12;
+
+  int64 timestamp_ms = 13;
+  string sdk_version = 14;
 }
 
 message ConversationEvent {
@@ -109,6 +166,19 @@ message ContextBundleProto {
   repeated string search_keywords = 18;  // Expanded vocabulary keywords for SDK-side BM25 matching
   string bundle_type = 19;               // "anticipation" | "user_summary" | "reactive"
   ConversationContextProto conversation_context = 20; // Current session context (separate from long-term items)
+
+  // Section 16 — bundle composition. Carried per-bundle so the SDK can rank,
+  // attribute, and TTL-manage anticipated content correctly.
+  float bundle_confidence = 21;          // 0..1 overall confidence. SDK uses
+                                          // as a tiebreaker when multiple
+                                          // bundles match a query.
+  string origin_pattern_id = 22;         // Server-side MACA pattern that
+                                          // produced this bundle. Drives
+                                          // per-pattern hit-rate attribution
+                                          // in the learning loop (§4).
+  int32 ttl_hint_seconds = 23;           // Server-suggested time-to-live for
+                                          // this bundle. SDK enforces a floor;
+                                          // 0 = use SDK default.
 }
 
 // Current session context from compaction + raw buffer.
