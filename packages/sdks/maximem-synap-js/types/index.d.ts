@@ -296,6 +296,86 @@ export interface DeleteMemoryResult {
   bridgeTiming?: BridgeTiming;
 }
 
+// ---------------------------------------------------------------------------
+// Python-parallel namespaced API (mirrors the maximem-synap Python SDK).
+// Accepts snake_case or camelCase argument keys; returns the raw Python
+// response shape (snake_case: formatted_context, facts, preferences,
+// ingestion_id, ...). Return types are intentionally loose (`any`) because
+// these calls cross the Python subprocess bridge and must remain assignable to
+// the duck-typed `SynapSdkLike` interfaces that the integration packages
+// (@maximem/synap-mastra, @maximem/synap-claude-agent) define independently.
+// Use the flat methods above (fetchUserContext, getContextForPrompt, ...) for
+// fully-typed camelCase results.
+// ---------------------------------------------------------------------------
+export interface SynapNamespacedFetchInput {
+  userId?: string | null;
+  user_id?: string | null;
+  customerId?: string | null;
+  customer_id?: string | null;
+  conversationId?: string | null;
+  conversation_id?: string | null;
+  searchQuery?: string[] | null;
+  search_query?: string[] | null;
+  maxResults?: number;
+  max_results?: number;
+  types?: string[];
+  mode?: string;
+}
+
+export interface SynapRecordMessageInput {
+  conversationId?: string | null;
+  conversation_id?: string | null;
+  role: string;
+  content: string;
+  userId?: string | null;
+  user_id?: string | null;
+  customerId?: string | null;
+  customer_id?: string | null;
+  sessionId?: string | null;
+  session_id?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface SynapCreateMemoryInput {
+  document: string;
+  userId?: string | null;
+  user_id?: string | null;
+  customerId?: string | null;
+  customer_id?: string | null;
+  documentType?: string | null;
+  document_type?: string | null;
+  documentId?: string | null;
+  document_id?: string | null;
+  documentCreatedAt?: string | null;
+  document_created_at?: string | null;
+  mode?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface SynapGetContextForPromptInput {
+  conversationId?: string;
+  conversation_id?: string;
+  style?: string;
+}
+
+export interface SynapScopeContextApi {
+  context: {
+    fetch(input?: SynapNamespacedFetchInput): Promise<any>;
+  };
+}
+
+export interface SynapConversationApi {
+  record_message(input: SynapRecordMessageInput): Promise<any>;
+  context: {
+    get_context_for_prompt(input: SynapGetContextForPromptInput): Promise<any>;
+    fetch(input?: SynapNamespacedFetchInput): Promise<any>;
+  };
+}
+
+export interface SynapMemoriesApi {
+  create(input: SynapCreateMemoryInput): Promise<any>;
+}
+
 export class SynapClient {
   constructor(options?: SynapClientOptions);
   init(): Promise<void>;
@@ -308,6 +388,16 @@ export class SynapClient {
   getContextForPrompt(input: GetContextForPromptInput): Promise<ContextForPromptResult>;
   deleteMemory(input: DeleteMemoryInput): Promise<DeleteMemoryResult>;
   shutdown(): Promise<void>;
+
+  // Python-parallel namespaced API — see the interfaces above. Installed at
+  // construction; mirrors sdk.fetch / sdk.conversation.* / sdk.memories.* /
+  // sdk.{user,customer,client}.context.fetch from the Python SDK.
+  fetch(input?: SynapNamespacedFetchInput): Promise<any>;
+  readonly conversation: SynapConversationApi;
+  readonly memories: SynapMemoriesApi;
+  readonly user: SynapScopeContextApi;
+  readonly customer: SynapScopeContextApi;
+  readonly client: SynapScopeContextApi;
 }
 
 export interface SetupPythonRuntimeOptions {
