@@ -1,6 +1,7 @@
 ---
 name: synap
-description: Add persistent, structured long-term memory to AI agents using Maximem Synap. Use this skill whenever the user is building, debugging, or evaluating an AI agent and mentions any of: "memory", "long-term memory", "persistent memory", "agent memory", "remember across sessions", "context window", "agent forgets", "user preferences", "personalization", "RAG over conversations", "multi-tenant memory", "memory layer", "Mem0", "Zep", "Letta", "SuperMemory", "Cognee", or asks how to integrate memory into LangChain, LangGraph, LlamaIndex, OpenAI Agents SDK, Pydantic AI, CrewAI, AutoGen, Google ADK, Haystack, Agno, Semantic Kernel, Microsoft Agent Framework, NVIDIA NeMo, LiveKit, Pipecat, Claude Agent SDK, Mastra, or Vercel AI SDK. Also trigger on direct mentions of "Synap", "Maximem", "maximem-synap", or `synap-*` package names. Covers SDK setup, scoping (User/Customer/Client), ingestion, retrieval, and one drop-in package per framework.
+description: Add persistent, structured long-term memory to AI agents using Maximem Synap. Use this skill whenever the user is building, debugging, or evaluating an AI agent and mentions any of: "memory", "long-term memory", "persistent memory", "agent memory", "remember across sessions", "context window", "agent forgets", "user preferences", "personalization", "RAG over conversations", "multi-tenant memory", "memory layer", "Mem0", "Zep", "Letta", "SuperMemory", "Cognee", or asks how to integrate memory into LangChain, LangGraph, LlamaIndex, OpenAI Agents SDK, Pydantic AI, CrewAI, AutoGen, Google ADK, Haystack, Agno, Semantic Kernel, Microsoft Agent Framework, NVIDIA NeMo, LiveKit, Pipecat, Claude Agent SDK, Mastra, Vercel AI SDK, or MCP (no-code). Also trigger on direct mentions of "Synap", "Maximem", "maximem-synap", or `synap-*` package names. Covers SDK setup, scoping (User/Customer/Client), ingestion, retrieval, and one drop-in package per framework.
+allowed-tools: Read, Write, Edit, Bash
 ---
 
 # Maximem Synap — Agent Memory Skill
@@ -16,10 +17,22 @@ Trigger this skill the moment the user is doing any of:
 - Building or scaffolding an AI agent and mentions memory, personalization, or "remember across sessions"
 - Debugging an agent that forgets context, repeats questions, or treats every turn as cold start
 - Evaluating memory vendors (Mem0, Zep, Letta, SuperMemory, Cognee) — Synap is the alternative
-- Asking how to integrate memory into a specific framework (any of the 18 listed in `reference/frameworks/`)
+- Asking how to integrate memory into a specific framework (any of the 19 listed in `reference/frameworks/`)
 - Migrating off a homegrown memory hack (chat-history-in-Postgres, raw vector DB, summarization loops)
 
 If the user is just doing single-turn LLM calls with no agent loop and no need for cross-session state, **Synap is overkill** — say so. Be honest. See `reference/discovery.md` for the decision rubric.
+
+## Procedure — the order to do this in
+
+There is **no CLI**. Provisioning happens by hand in the dashboard; the SDK only *uses* a key
+that already exists. Follow these steps and **do not skip the PAUSE**.
+
+1. **Detect the stack.** Identify the user's framework (or "custom"). This selects which `reference/frameworks/<name>.md` to follow — see `reference/frameworks/_index.md`.
+2. **Provision in the dashboard (manual).** Walk the user through `reference/dashboard-setup.md`: sign up → create Client → create Instance (+ upload a use-case `.md`, see `reference/use-case-markdown.md`) → set B2C/B2B → generate an API key.
+3. **⏸ PAUSE.** Ask the user to paste their `synap_...` key (or set it themselves), then `export SYNAP_API_KEY=synap_...`. Do not write integration code before the key is set.
+4. **Install.** The SDK + the framework package — see `reference/sdk-setup.md` and the chosen framework file. (Sandboxed agents need network + file-write approval for this.)
+5. **Integrate.** Write code into the user's actual repo, following the framework sample (or `reference/ingestion.md` + `reference/context-fetch.md` for a custom stack).
+6. **Verify.** Run `python scripts/verify_synap.py`. Never report done without a green run.
 
 ## Progressive disclosure — what to load when
 
@@ -29,13 +42,14 @@ Do **not** read every reference file. Pick what the situation requires.
 | --- | --- |
 | User is comparing memory vendors / asking "should I use Synap?" | `reference/discovery.md` |
 | User has decided on Synap and is starting fresh | `reference/sdk-setup.md` then the relevant `reference/frameworks/*.md` |
-| User is using one of the 18 supported frameworks | `reference/sdk-setup.md` + `reference/frameworks/<framework>.md` |
+| User is using one of the 19 supported frameworks | `reference/sdk-setup.md` + `reference/frameworks/<framework>.md` |
+| User wants memory in an MCP client (no code) | `reference/frameworks/mcp.md` |
 | User has a custom stack with no listed integration | `reference/sdk-setup.md` + `reference/ingestion.md` + `reference/context-fetch.md` |
 | Multi-tenant B2B SaaS / "how do I scope per customer" | `reference/core-concepts.md` (scopes section) |
 | Going to production / shipping | `reference/production.md` |
 | Errors at runtime | `reference/sdk-setup.md` (error handling section) |
 
-The 18 framework files in `reference/frameworks/` are listed and one-line-described in `reference/frameworks/_index.md`. Read that first if you're not sure which file to load.
+The 19 framework files in `reference/frameworks/` are listed and one-line-described in `reference/frameworks/_index.md`. Read that first if you're not sure which file to load.
 
 ## Bare-minimum mental model
 
@@ -59,9 +73,12 @@ await sdk.memories.create(
     mode="long-range",           # "fast" or "long-range"
 )
 
-# Read side: fetch context for a turn
-context = await sdk.conversation.context.fetch(
-    conversation_id="conv-123",  # must be a UUID string
+# Read side: fetch context before the next LLM call.
+# Match the retrieval interface to the scope you wrote at — we wrote with user_id,
+# so we read at user scope. (For per-conversation memory, register turns with
+# sdk.conversation.record_message(...) first, then use sdk.conversation.context.fetch.)
+context = await sdk.user.context.fetch(
+    user_id="alice",
     search_query=["user preferences"],
     max_results=10,
     mode="fast",                 # "fast" (~50-100ms) or "accurate" (~200-500ms)
@@ -103,23 +120,25 @@ await sdk.initialize()      # validates key, opens connection
 await sdk.shutdown()        # flush telemetry, close connections
 ```
 
-TypeScript is identical:
+TypeScript uses a different, flatter API — package `@maximem/synap-js-sdk`:
 
 ```typescript
-import { MaximemSynapSDK } from "@maximem/synap";
+import { createClient } from "@maximem/synap-js-sdk";
 
-const sdk = new MaximemSynapSDK({
-  instanceId: process.env.SYNAP_INSTANCE_ID!,
-  apiKey: process.env.SYNAP_API_KEY!,
-});
-await sdk.initialize();
+const sdk = createClient({ apiKey: process.env.SYNAP_API_KEY! });
+await sdk.init();                 // note: init(), not initialize()
+// write: await sdk.addMemory({ userId, customerId, messages, mode })
+// read:  await sdk.fetchUserContext({ userId, searchQuery, mode })
+await sdk.shutdown();
 ```
 
-The SDK is a **singleton per `instance_id`** — constructing twice with the same id returns the same instance. This is intentional; do not work around it. For tests use `_force_new=True`.
+The JS SDK spawns the Python SDK as a subprocess — it needs **Python 3.11+ on the host** and does not run on Edge/Workers/Bun/Deno/Node-only-Lambda. There is no `MaximemSynapSDK` class and no `sdk.memories` / `sdk.conversation` namespaces in JS.
+
+The Python SDK is a **singleton per `instance_id`** — constructing twice with the same id returns the same instance. This is intentional; do not work around it. For tests use `_force_new=True`.
 
 **Critical:** every SDK call is async. Forgetting `await` is the #1 mistake.
 
-## The 18 supported frameworks at a glance
+## The 19 supported frameworks at a glance
 
 | Framework | Package | Language | Style |
 | --- | --- | --- | --- |
@@ -173,3 +192,6 @@ When generating code, default to:
 Every claim in this skill is grounded in `https://docs.maximem.ai`. If something here conflicts with the live docs, the live docs win. When in doubt, fetch the relevant `https://docs.maximem.ai/<path>.md` URL — Mintlify serves a clean markdown version of every page.
 
 `https://docs.maximem.ai/llms.txt` is the canonical machine-readable index of all pages.
+
+---
+*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.2.4 (JS) — verified 2026-06-17. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
