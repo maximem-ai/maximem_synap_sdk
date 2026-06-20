@@ -203,6 +203,7 @@ class SynapClient {
     };
 
     this.#registerShutdownHooks();
+    this.#installNamespacedApi();
   }
 
   async init() {
@@ -357,6 +358,137 @@ class SynapClient {
       await close();
       process.exit(0);
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Python-parallel namespaced API.
+  //
+  // The flat methods above (addMemory, fetchUserContext, getContextForPrompt,
+  // ...) return camelCase-normalized objects. The namespaced surface installed
+  // here mirrors the Python SDK 1:1 — sdk.conversation.record_message,
+  // sdk.memories.create, sdk.user/customer/client.context.fetch,
+  // sdk.conversation.context.get_context_for_prompt — and returns the raw
+  // Python response shape (snake_case: formatted_context, facts, preferences,
+  // ingestion_id). This is the surface the integration packages
+  // (@maximem/synap-mastra, @maximem/synap-claude-agent) duck-type against, so
+  // a real client can be passed straight into SynapMemory / createSynapHooks.
+  // Both snake_case and camelCase argument keys are accepted.
+  // ---------------------------------------------------------------------------
+  #installNamespacedApi() {
+    const buildParams = (args = {}) => {
+      const params = {};
+      const conv = pickDefined(args.conversation_id, args.conversationId);
+      const sq = pickDefined(args.search_query, args.searchQuery);
+      const mr = pickDefined(args.max_results, args.maxResults);
+      if (conv !== undefined && conv !== null) params.conversation_id = conv;
+      if (sq !== undefined && sq !== null) params.search_query = sq;
+      if (mr !== undefined) params.max_results = mr;
+      if (args.types !== undefined) params.types = args.types;
+      if (args.mode !== undefined) params.mode = args.mode;
+      return params;
+    };
+
+    // Unified fetch — routes to the scope-appropriate command based on the ids
+    // present (user > customer > client). Returns the raw ContextResponse shape.
+    const fetch = async (args = {}) => {
+      const userId = pickDefined(args.user_id, args.userId);
+      const customerId = pickDefined(args.customer_id, args.customerId);
+      const params = buildParams(args);
+
+      let command;
+      if (userId !== undefined && userId !== null) {
+        command = 'fetch_user_context';
+        params.user_id = userId;
+        if (customerId !== undefined && customerId !== null) params.customer_id = customerId;
+      } else if (customerId !== undefined && customerId !== null) {
+        command = 'fetch_customer_context';
+        params.customer_id = customerId;
+      } else {
+        command = 'fetch_client_context';
+      }
+
+      const result = await this.bridge.call(command, params);
+      return result.context || {};
+    };
+
+    // Explicit per-scope fetchers (sdk.user.context.fetch, etc.).
+    const fetchScope = (command, idKeys) => async (args = {}) => {
+      const params = buildParams(args);
+      if (idKeys.includes('user_id')) {
+        const userId = pickDefined(args.user_id, args.userId);
+        if (userId !== undefined && userId !== null) params.user_id = userId;
+      }
+      if (idKeys.includes('customer_id')) {
+        const customerId = pickDefined(args.customer_id, args.customerId);
+        if (customerId !== undefined && customerId !== null) params.customer_id = customerId;
+      }
+      const result = await this.bridge.call(command, params);
+      return result.context || {};
+    };
+
+    this.fetch = fetch;
+
+    this.conversation = {
+      record_message: async (args = {}) => {
+        const conversationId = pickDefined(args.conversation_id, args.conversationId);
+        const userId = pickDefined(args.user_id, args.userId);
+        const customerId = pickDefined(args.customer_id, args.customerId);
+        this.#assert(conversationId, 'conversation_id is required');
+        this.#assert(userId, 'user_id is required');
+        this.#assert(customerId, 'customer_id is required');
+
+        const params = {
+          conversation_id: conversationId,
+          role: args.role,
+          content: args.content,
+          user_id: userId,
+          customer_id: customerId,
+        };
+        const sessionId = pickDefined(args.session_id, args.sessionId);
+        if (sessionId !== undefined) params.session_id = sessionId;
+        if (args.metadata !== undefined) params.metadata = args.metadata;
+
+        const result = await this.bridge.call('record_message', params);
+        return pickDefined(result.result, result);
+      },
+      context: {
+        get_context_for_prompt: async (args = {}) => {
+          const conversationId = pickDefined(args.conversation_id, args.conversationId);
+          this.#assert(conversationId, 'conversation_id is required');
+          const params = { conversation_id: conversationId };
+          if (args.style !== undefined) params.style = args.style;
+          const result = await this.bridge.call('get_context_for_prompt', params);
+          return pickDefined(result.context_for_prompt, result.contextForPrompt, {});
+        },
+        fetch,
+      },
+    };
+
+    this.memories = {
+      create: async (args = {}) => {
+        this.#assert(args.document, 'document is required');
+        const params = { document: args.document };
+        const userId = pickDefined(args.user_id, args.userId);
+        const customerId = pickDefined(args.customer_id, args.customerId);
+        const documentType = pickDefined(args.document_type, args.documentType);
+        const documentId = pickDefined(args.document_id, args.documentId);
+        const documentCreatedAt = pickDefined(args.document_created_at, args.documentCreatedAt);
+        if (userId !== undefined) params.user_id = userId;
+        if (customerId !== undefined) params.customer_id = customerId;
+        if (documentType !== undefined) params.document_type = documentType;
+        if (documentId !== undefined) params.document_id = documentId;
+        if (documentCreatedAt !== undefined) params.document_created_at = documentCreatedAt;
+        if (args.mode !== undefined) params.mode = args.mode;
+        if (args.metadata !== undefined) params.metadata = args.metadata;
+
+        const result = await this.bridge.call('create_memory', params, this.options.ingestTimeoutMs);
+        return pickDefined(result.result, result);
+      },
+    };
+
+    this.user = { context: { fetch: fetchScope('fetch_user_context', ['user_id', 'customer_id']) } };
+    this.customer = { context: { fetch: fetchScope('fetch_customer_context', ['customer_id']) } };
+    this.client = { context: { fetch: fetchScope('fetch_client_context', []) } };
   }
 }
 
