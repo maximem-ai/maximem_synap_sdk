@@ -1,6 +1,6 @@
 {
   "name": "@maximem/synap-js-sdk",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "JavaScript wrapper around the Synap Python SDK",
   "main": "src/index.js",
   "types": "types/index.d.ts",
