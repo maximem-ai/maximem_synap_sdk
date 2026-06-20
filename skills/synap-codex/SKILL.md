@@ -59,4 +59,4 @@ One file per integration under `reference/frameworks/` (router: `reference/frame
 Everything here is grounded in `https://docs.maximem.ai` (Mintlify serves a clean `.md` for any page; `https://docs.maximem.ai/llms.txt` is the index). If this skill ever conflicts with the live docs, the live docs win.
 
 ---
-*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.2.4 (JS) — verified 2026-06-17. Codex skill format confirmed against OpenAI Codex docs (developers.openai.com/codex/skills); re-verify if the format changes.*
+*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.3.0 (JS) — verified 2026-06-20. Codex skill format confirmed against OpenAI Codex docs (developers.openai.com/codex/skills); re-verify if the format changes.*

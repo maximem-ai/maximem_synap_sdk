@@ -48,5 +48,5 @@ framework's env loader). Resolution order and auth errors: `reference/sdk-setup.
 Only after the key is set do you install the SDK and write integration code.
 
 ---
-> **Accurate as of** `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.2.4 (JS) — verified 2026-06-17.
+> **Accurate as of** `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.3.0 (JS) — verified 2026-06-20.
 > Live, changing detail: https://docs.maximem.ai (Mintlify serves a clean `.md` for any page).

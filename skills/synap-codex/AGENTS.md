@@ -27,4 +27,4 @@ State it up front, don't assume silent execution: **network** (pip/npm install +
 Source of truth: `https://docs.maximem.ai`.
 
 ---
-*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.2.4 (JS) — verified 2026-06-17.*
+*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.3.0 (JS) — verified 2026-06-20.*

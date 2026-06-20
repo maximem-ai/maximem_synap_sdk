@@ -40,4 +40,4 @@ Every integration:
 If the user has a custom or unsupported framework, fall back to `reference/ingestion.md` and `reference/context-fetch.md` — every integration is a thin wrapper over those two primitives.
 
 ---
-*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.2.4 (JS) — verified 2026-06-17. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.3.0 (JS) — verified 2026-06-20. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
