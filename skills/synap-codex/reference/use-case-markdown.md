@@ -46,5 +46,5 @@ A good brief makes extraction sharper. A vague one makes memory noisy. It's wort
 - If the agent is multi-domain, list the domains; the MACA can weight them differently.
 
 ---
-> **Accurate as of** `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.2.4 (JS) — verified 2026-06-17.
+> **Accurate as of** `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.3.0 (JS) — verified 2026-06-20.
 > MACA / memory-architecture detail: https://docs.maximem.ai/concepts/customized-memory-architectures

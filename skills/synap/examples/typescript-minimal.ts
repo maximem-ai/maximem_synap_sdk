@@ -68,4 +68,20 @@ main().catch((e) => {
   process.exit(1);
 });
 
-// Accurate as of @maximem/synap-js-sdk 0.2.4 — verified 2026-06-17. Docs: https://docs.maximem.ai
+// ---------------------------------------------------------------------------
+// Namespaced API (mirrors the Python SDK 1:1), available from
+// @maximem/synap-js-sdk 0.3.0. The flat methods used above (addMemory,
+// fetchUserContext) still work; the namespaced surface is added alongside them
+// and accepts camelCase OR snake_case argument keys:
+//
+//   await sdk.conversation.record_message({ conversationId, role, content, userId, customerId });
+//   await sdk.memories.create({ document, userId, customerId });
+//   const ctx = await sdk.user.context.fetch({ userId, customerId, searchQuery: ["..."] });
+//   const promptCtx = await sdk.conversation.context.get_context_for_prompt({ conversationId });
+//
+// Also: sdk.fetch(...), sdk.customer.context.fetch(...), sdk.client.context.fetch(...).
+// Namespaced calls return the raw (snake_case) response shape that the framework
+// integrations (@maximem/synap-mastra, @maximem/synap-claude-agent) consume.
+// ---------------------------------------------------------------------------
+//
+// Accurate as of @maximem/synap-js-sdk 0.3.0 — verified 2026-06-20. Docs: https://docs.maximem.ai
