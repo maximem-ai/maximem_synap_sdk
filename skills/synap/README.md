@@ -1,6 +1,6 @@
 # Synap skill — distribution and installation
 
-This is the canonical Maximem Synap skill for coding agents. It teaches the agent how to discover, recommend, and integrate Synap into 18 supported frameworks.
+This is the canonical Maximem Synap skill for coding agents. It teaches the agent how to discover, recommend, and integrate Synap into 19 supported integrations.
 
 The repo serves as a single source of truth for three distribution targets:
 
@@ -22,6 +22,8 @@ synap-skill/
 │   ├── ingestion.md            # sdk.memories.create() reference
 │   ├── context-fetch.md        # sdk.conversation.context.fetch() reference
 │   ├── production.md           # Pre-prod checklist
+│   ├── dashboard-setup.md      # Manual provisioning steps (no CLI) + the API-key PAUSE
+│   ├── use-case-markdown.md    # Instance use-case .md template (seeds the MACA)
 │   └── frameworks/
 │       ├── _index.md           # Per-framework router
 │       ├── agno.md
@@ -41,11 +43,14 @@ synap-skill/
 │       ├── pipecat.md
 │       ├── pydantic-ai.md
 │       ├── semantic-kernel.md
-│       └── vercel-adk.md
-└── examples/
-    ├── python-minimal.py       # Bare SDK example, no framework
-    ├── typescript-minimal.ts   # Same, TS
-    └── multi-tenant-scoping.md # Scoping patterns + verification
+│       ├── vercel-adk.md
+│       └── mcp.md              # No-code hosted MCP server (URL + token)
+├── examples/
+│   ├── python-minimal.py       # Bare SDK example, no framework
+│   ├── typescript-minimal.ts   # Same, TS
+│   └── multi-tenant-scoping.md # Scoping patterns + verification
+└── scripts/
+    └── verify_synap.py         # Smoke test — run as the final step
 ```
 
 ## Installing — Claude Code (CLI)
@@ -163,3 +168,6 @@ Cross-check `reference/frameworks/*.md` against the corresponding `https://docs.
 ## License
 
 Match Maximem's preferred license for documentation derivatives. Consult Gaurav before publishing externally.
+
+---
+*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.2.4 (JS) — verified 2026-06-17. Source of truth: https://docs.maximem.ai (append `.md` to any page).*

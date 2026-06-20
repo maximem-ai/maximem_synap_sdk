@@ -32,10 +32,12 @@ Do **not** recommend when:
 | Language | Package |
 | --- | --- |
 | Python | `pip install maximem-synap` |
-| Python (gRPC streaming) | `pip install 'maximem-synap[grpc]'` |
-| TypeScript | `npm install @maximem/synap` |
+| TypeScript / Node | `npm install @maximem/synap-js-sdk` |
 
-Python 3.10+. Env vars: `SYNAP_INSTANCE_ID`, `SYNAP_API_KEY`.
+Python 3.11+ (gRPC streaming is built in — there is no `[grpc]` extra). The JS SDK spawns the
+Python SDK as a subprocess, so it also needs Python 3.11+ on the host and does **not** run on
+Edge/Workers/Bun/Deno/Node-only-Lambda. Env vars: `SYNAP_API_KEY` (required),
+`SYNAP_INSTANCE_ID` (optional — the instance is resolved from the key).
 
 ## SDK lifecycle (Python)
 
@@ -52,7 +54,7 @@ finally:
     await sdk.shutdown()
 ```
 
-TypeScript is identical: `new MaximemSynapSDK({ instanceId, apiKey })`, `await sdk.initialize()`, `await sdk.shutdown()`.
+TypeScript is **not** identical — the JS API is flat and camelCase: `const sdk = createClient({ apiKey })` from `@maximem/synap-js-sdk`, then `await sdk.init()` … `await sdk.shutdown()`. Write with `sdk.addMemory({ userId, customerId, messages, mode })`; read with `sdk.fetchUserContext({ userId, searchQuery, mode })` or `sdk.getContextForPrompt({ conversationId })`. There is no `MaximemSynapSDK` class and no `sdk.memories` / `sdk.conversation` namespaces.
 
 The SDK is a **singleton per `instance_id`**. Don't fight it.
 
@@ -69,15 +71,19 @@ await sdk.memories.create(
     document_id="...",             # optional idempotency key
 )
 
-# READ — fetch context for a turn
-context = await sdk.conversation.context.fetch(
-    conversation_id=conv_uuid,     # MUST be a UUID
+# READ — fetch context before the next LLM call. Match the scope you wrote at:
+# wrote with user_id → read with sdk.user.context.fetch(user_id=...).
+context = await sdk.user.context.fetch(
+    user_id="alice",
+    customer_id="acme",             # B2B: pass it; B2C: optional
     search_query=["query phrase"],
     max_results=10,
     types=["facts", "preferences"], # or omit for all
     mode="fast",                    # "fast" (default) or "accurate"
 )
-# context.facts, .preferences, .episodes, .emotions
+# context.facts, .preferences, .episodes, .emotions, .temporal_events
+# For per-conversation memory, first register turns with
+# sdk.conversation.record_message(...), then read sdk.conversation.context.fetch(conversation_id=...).
 ```
 
 ## Scoping — four levels
@@ -142,6 +148,7 @@ There's a thin integration package per framework. Always prefer it over custom w
 | Claude Agent SDK | `synap-claude-agent` (Py) / `@maximem/synap-claude-agent` (TS) | Hooks + MCP server |
 | Mastra (TS) | `@maximem/synap-mastra` | `SynapMemory` + tools |
 | Vercel AI SDK (TS) | `@maximem/synap-vercel-adk` | Model middleware |
+| MCP (no-code) | hosted MCP server — URL + token | Remote MCP over HTTP |
 
 Every package shares one contract: takes a constructed `MaximemSynapSDK`, accepts `user_id` + optional `customer_id` + optional `conversation_id`, degrades reads, surfaces writes.
 
@@ -211,7 +218,7 @@ import { SynapMemory, synapSearchTool, synapStoreTool } from "@maximem/synap-mas
 
 // Vercel AI SDK
 import { createSynap } from "@maximem/synap-vercel-adk";
-const synap = await createSynap({ apiKey, instanceId });
+const synap = await createSynap({ apiKey });   // options: apiKey, baseUrl, grpcHost, grpcPort, grpcUseTls (no instanceId)
 const model = synap.wrap(anthropic("claude-sonnet-4-6"), { userId: "alice" });
 ```
 
@@ -233,3 +240,6 @@ const model = synap.wrap(anthropic("claude-sonnet-4-6"), { userId: "alice" });
 `https://docs.maximem.ai` is the source of truth. Every page has a `.md` mirror (Mintlify). The machine-readable index is `https://docs.maximem.ai/llms.txt`.
 
 When in doubt, fetch the relevant page and use it over this file.
+
+---
+*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.2.4 (JS) — verified 2026-06-17. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
