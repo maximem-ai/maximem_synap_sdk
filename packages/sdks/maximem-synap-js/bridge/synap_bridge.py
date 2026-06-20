@@ -5,9 +5,9 @@ Protocol:
   stdin  -> {"id": 1, "method": "init", "params": {...}}\n
   stdout <- {"id": 1, "result": {...}, "error": null}\n
 Methods:
-  init, add_memory, create_memory, record_message, search_memory,
-  get_memories, fetch_user_context, fetch_customer_context,
-  fetch_client_context, get_context_for_prompt, delete_memory, shutdown
+  init, add_memory, create_memory, record_message, search_memory, get_memories,
+  fetch_user_context, fetch_customer_context, fetch_client_context,
+  get_context_for_prompt, delete_memory, shutdown
 """
 
 import asyncio
@@ -640,14 +640,12 @@ async def handle_shutdown(_params: dict) -> dict:
 async def handle_record_message(params: dict) -> dict:
     """Record a single conversation turn (registers the conversation_id).
 
-    Mirrors the Python SDK's ``sdk.conversation.record_message(...)`` so the
-    JS client can expose the same namespaced surface the integration packages
-    (@maximem/synap-mastra, @maximem/synap-claude-agent) duck-type against.
+    Mirrors sdk.conversation.record_message(...) so the JS client can expose
+    the same namespaced surface the integration packages duck-type against.
     """
     handler_start = time.perf_counter()
     timings: List[dict] = []
     start = time.perf_counter()
-
     step = time.perf_counter()
     result = await sdk.conversation.record_message(
         conversation_id=params["conversation_id"],
@@ -659,45 +657,31 @@ async def handle_record_message(params: dict) -> dict:
         metadata=params.get("metadata"),
     )
     append_step(timings, "record_message", step)
-
     return {
         "success": True,
         "latencyMs": ms_since(start),
         "result": result,
-        "bridgeTiming": {
-            "python_total_ms": ms_since(handler_start),
-            "steps": timings,
-        },
+        "bridgeTiming": {"python_total_ms": ms_since(handler_start), "steps": timings},
     }
 
 
 async def handle_create_memory(params: dict) -> dict:
     """Create a durable memory from a single document string.
 
-    Mirrors the Python SDK's ``sdk.memories.create(document=...)``. Distinct
-    from ``add_memory``, which builds a transcript from a messages array.
+    Mirrors sdk.memories.create(document=...). Distinct from add_memory,
+    which builds a transcript from a messages array.
     """
     handler_start = time.perf_counter()
     timings: List[dict] = []
     start = time.perf_counter()
-
     create_kwargs: dict = {"document": params["document"]}
-    for key in (
-        "user_id",
-        "customer_id",
-        "document_type",
-        "document_id",
-        "document_created_at",
-        "mode",
-        "metadata",
-    ):
+    for key in ("user_id", "customer_id", "document_type", "document_id",
+                "document_created_at", "mode", "metadata"):
         if params.get(key) is not None:
             create_kwargs[key] = params[key]
-
     step = time.perf_counter()
     result = await sdk.memories.create(**create_kwargs)
     append_step(timings, "memories_create", step)
-
     status = result.status.value if hasattr(result.status, "value") else result.status
     return {
         "success": True,
@@ -707,10 +691,7 @@ async def handle_create_memory(params: dict) -> dict:
             "document_id": result.document_id,
             "status": status,
         },
-        "bridgeTiming": {
-            "python_total_ms": ms_since(handler_start),
-            "steps": timings,
-        },
+        "bridgeTiming": {"python_total_ms": ms_since(handler_start), "steps": timings},
     }
 
 

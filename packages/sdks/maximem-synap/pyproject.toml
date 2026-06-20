@@ -54,12 +54,12 @@ Homepage = "https://github.com/maximem-synap/sdk-python"
 Documentation = "https://docs.synap.example.com"
 Repository = "https://github.com/maximem-synap/sdk-python"
 
-[tool.setuptools.dynamic]
-version = {attr = "maximem_synap._version.__version__"}
-
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["maximem_synap*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "maximem_synap._version.__version__"}
 
 [tool.black]
 line-length = 88

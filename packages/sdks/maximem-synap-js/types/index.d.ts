@@ -296,17 +296,6 @@ export interface DeleteMemoryResult {
   bridgeTiming?: BridgeTiming;
 }
 
-// ---------------------------------------------------------------------------
-// Python-parallel namespaced API (mirrors the maximem-synap Python SDK).
-// Accepts snake_case or camelCase argument keys; returns the raw Python
-// response shape (snake_case: formatted_context, facts, preferences,
-// ingestion_id, ...). Return types are intentionally loose (`any`) because
-// these calls cross the Python subprocess bridge and must remain assignable to
-// the duck-typed `SynapSdkLike` interfaces that the integration packages
-// (@maximem/synap-mastra, @maximem/synap-claude-agent) define independently.
-// Use the flat methods above (fetchUserContext, getContextForPrompt, ...) for
-// fully-typed camelCase results.
-// ---------------------------------------------------------------------------
 export interface SynapNamespacedFetchInput {
   userId?: string | null;
   user_id?: string | null;
@@ -388,10 +377,6 @@ export class SynapClient {
   getContextForPrompt(input: GetContextForPromptInput): Promise<ContextForPromptResult>;
   deleteMemory(input: DeleteMemoryInput): Promise<DeleteMemoryResult>;
   shutdown(): Promise<void>;
-
-  // Python-parallel namespaced API — see the interfaces above. Installed at
-  // construction; mirrors sdk.fetch / sdk.conversation.* / sdk.memories.* /
-  // sdk.{user,customer,client}.context.fetch from the Python SDK.
   fetch(input?: SynapNamespacedFetchInput): Promise<any>;
   readonly conversation: SynapConversationApi;
   readonly memories: SynapMemoriesApi;
