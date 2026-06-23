@@ -52,6 +52,18 @@ class SDKConfig(BaseModel):
     # config during the canary. See
     # docs/internal/sdk_authoritative_short_term_context_plan.md.
     sdk_st_authoritative: bool = False
+    # Read-your-writes verbatim short-term overlay (correctness, not an
+    # optimization). When true: a turn the SDK has just emitted via
+    # record_message/send_message is overlaid onto the next fetch's
+    # conversation_context.recent_turns, even with sdk_st_authoritative off and
+    # before any compaction has landed — so a fast follow-up reflects the
+    # just-said turn instead of an async-lagged server buffer. Independent of
+    # sdk_st_authoritative (that flag governs the *skip server ST assembly*
+    # cost optimization; this one governs *freshness*). Defaults ON; the
+    # overlay is a no-op when the local store is cold, and can be disabled as a
+    # kill-switch via config or SYNAP_ST_VERBATIM_OVERLAY=0. See
+    # docs/internal/short_term_context_freshness_plan.md.
+    st_verbatim_overlay: bool = True
 
 
 # Backward compatibility - deprecated dataclass-style models

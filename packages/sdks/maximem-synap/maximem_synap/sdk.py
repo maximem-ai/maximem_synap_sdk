@@ -285,62 +285,119 @@ def _should_skip_server_st(sdk: "MaximemSynapSDK", conversation_id: Optional[str
     return entry is not None and entry.has_compaction()
 
 
-def _merge_local_st_into_response(
+# Conv-ctx budget the server applies to ``recent_turns`` before returning them
+# (the budget trim in retrieval_manager.py). The overlay re-applies it [C2] so a
+# long pre-compaction local tail can't silently re-inflate the prompt past what
+# the server would have allowed. ~4 chars/token, matching server-side heuristics.
+_ST_OVERLAY_MAX_TURNS = 20
+_ST_OVERLAY_TOKEN_BUDGET = 2000
+
+
+def _budget_recent_turns(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Cap the verbatim tail to the server's ``recent_turns`` window (20) and
+    then drop oldest turns until it fits the conv-ctx token budget [C2]."""
+    turns = list(turns)[-_ST_OVERLAY_MAX_TURNS:]
+
+    def _est_tokens(t: Dict[str, Any]) -> int:
+        content = t.get("content") or ""
+        return max(1, len(str(content)) // 4)
+
+    total = sum(_est_tokens(t) for t in turns)
+    while turns and total > _ST_OVERLAY_TOKEN_BUDGET:
+        total -= _est_tokens(turns[0])
+        turns.pop(0)
+    return turns
+
+
+def _overlay_local_recent_turns(
     sdk: "MaximemSynapSDK",
     response: Any,
     conversation_id: Optional[str],
 ) -> None:
-    """Splice the SDK-side cached short-term block onto ``response.conversation_context``.
+    """Overlay the SDK's local verbatim short-term tail onto ``response``
+    (read-your-writes).
 
-    Called after a Phase 2 fetch where the server returned no ST blob
-    (because the SDK told it to skip via include_conversation_context=False).
-    The response shape stays identical to the legacy form: callers see a
-    ``ConversationContextModel`` whether the data came from the server or
-    from the local cache.
+    When the SDK holds locally-appended turns for this conversation (because it
+    just emitted them via ``record_message``/``send_message``), serve them as
+    ``conversation_context.recent_turns`` so a fast follow-up reflects the
+    just-said turn instead of the server's async-lagged buffer.
 
-    No-op when the cache entry is missing — callers should already have
-    been guarded by ``_should_skip_server_st`` upstream, but be defensive.
+    Design (docs/internal/short_term_context_freshness_plan.md):
+      * **Verbatim tail = local store, wholesale.** The local store is a single
+        ordered append-log per conversation (no internal duplicates, one clock),
+        so we *replace* the server's ``recent_turns`` with it rather than
+        union+dedup — removing the cross-clock dedup hazard entirely [C3/C4].
+      * **Compacted fields stay server-authoritative.** ``summary`` /
+        ``current_state`` / ``key_extractions`` / ``compaction_id`` are kept from
+        the server's response when present, and fall back to the local entry
+        only when the server omitted them (the skip-server-ST path). So the
+        seeded semantic recall the server returns is preserved; only the
+        verbatim tail is refreshed.
+      * **Token re-budget [C2].** Capped at 20 turns AND trimmed to the server's
+        conv-ctx token budget so the tail can't silently re-inflate the prompt.
+      * **No-op when cold.** No local entry → the server's response is returned
+        untouched (graceful fallback; fresh SDK or post-restart).
+
+    Runs on every fetch branch (cloud, http-cache, anticipation), independent of
+    ``_should_skip_server_st`` and of ``has_compaction()`` — that is the fix: the
+    pre-compaction window is exactly when the playground's fast follow-ups happen.
+    Defensive: never raises into the fetch path.
     """
     if not conversation_id:
         return
-    entry = sdk._st_store.get(conversation_id)
-    if entry is None:
-        return
     try:
-        from .models.context import ConversationContextModel
+        entry = sdk._st_store.get(conversation_id)
     except Exception:
-        logger.debug("ConversationContextModel import failed; skipping local merge")
         return
-
-    recent_turns = []
-    for t in entry.recent_turns:
-        ts = t.get("timestamp")
-        if isinstance(ts, datetime):
-            ts = ts.isoformat()
-        recent_turns.append({
-            "role": t.get("role", "user"),
-            "content": t.get("content", ""),
-            "timestamp": ts,
-        })
-
+    if entry is None:
+        # Cold store: nothing locally; leave the server's response as-is.
+        return
     try:
+        existing_cc = getattr(response, "conversation_context", None)
+
+        # Server returned a conversation_context AND the overlay is disabled
+        # (kill-switch): leave it exactly as the server sent it. When the server
+        # omitted it (skip-server-ST path), we still splice from local below so
+        # that optimization keeps working regardless of the overlay switch.
+        if existing_cc is not None and not sdk._is_st_verbatim_overlay():
+            return
+
+        from .models.context import ConversationContextModel
+
+        def _field(obj: Any, name: str) -> Any:
+            if obj is None:
+                return None
+            if isinstance(obj, dict):
+                return obj.get(name)
+            return getattr(obj, name, None)
+
+        local_turns: List[Dict[str, Any]] = []
+        for t in entry.recent_turns:
+            ts = t.get("timestamp")
+            if isinstance(ts, datetime):
+                ts = ts.isoformat()
+            local_turns.append({
+                "role": t.get("role", "user"),
+                "content": t.get("content", ""),
+                "timestamp": ts,
+            })
+        local_turns = _budget_recent_turns(local_turns)
+
         merged = ConversationContextModel(
-            summary=entry.summary,
-            current_state=dict(entry.current_state or {}),
-            key_extractions=dict(entry.key_extractions or {}),
-            recent_turns=recent_turns,
-            compaction_id=entry.compaction_id,
-            compacted_at=entry.compacted_at.isoformat() if entry.compacted_at else None,
+            summary=_field(existing_cc, "summary") or entry.summary,
+            current_state=_field(existing_cc, "current_state") or dict(entry.current_state or {}),
+            key_extractions=_field(existing_cc, "key_extractions") or dict(entry.key_extractions or {}),
+            recent_turns=local_turns,
+            compaction_id=_field(existing_cc, "compaction_id") or entry.compaction_id,
+            compacted_at=(
+                _field(existing_cc, "compacted_at")
+                or (entry.compacted_at.isoformat() if entry.compacted_at else None)
+            ),
             conversation_id=conversation_id,
         )
-    except Exception as e:
-        logger.warning("Failed to build local-merged conversation_context: %s", e)
-        return
-
-    try:
         response.conversation_context = merged
     except Exception as e:
-        logger.warning("Failed to attach merged conversation_context to response: %s", e)
+        logger.warning("Failed to overlay local recent_turns: %s", e)
 
 
 def _dispatch_compaction_subscribers(
@@ -824,6 +881,41 @@ class MaximemSynapSDK:
 
         self._st_authoritative_enabled = enabled
         return enabled
+
+    def _is_st_verbatim_overlay(self) -> bool:
+        """Whether to overlay the SDK's local verbatim short-term tail onto
+        fetch responses (read-your-writes freshness).
+
+        This is the *correctness* switch — a just-emitted turn must surface on
+        the next fetch — and is independent of ``sdk_st_authoritative`` (the
+        *cost* switch that tells the server to skip ST assembly). Defaults ON.
+
+        Resolution order:
+          1. Env var ``SYNAP_ST_VERBATIM_OVERLAY`` — an explicit override /
+             kill-switch (truthy enables, falsy disables).
+          2. ``SDKConfig.st_verbatim_overlay`` (defaults True).
+        """
+        env_val = os.environ.get("SYNAP_ST_VERBATIM_OVERLAY", "").strip().lower()
+        if env_val in {"0", "false", "no", "off"}:
+            return False
+        if env_val in {"1", "true", "yes", "on"}:
+            return True
+        return bool(getattr(self._config, "st_verbatim_overlay", True))
+
+    def _st_store_active(self) -> bool:
+        """Whether the local ShortTermContextStore should be populated on the
+        write path.
+
+        True when EITHER the read-your-writes overlay (``st_verbatim_overlay``,
+        default on) OR the ST-authoritative skip-optimization
+        (``sdk_st_authoritative``) is enabled — both read the store, so either
+        being on means the write must populate it. Decouples the *write* gate
+        from ``sdk_st_authoritative`` alone (the architect's C1): with the
+        overlay defaulting on, a just-emitted turn is captured even when the
+        authoritative flag is off, so the read-side overlay has something to
+        surface.
+        """
+        return self._is_st_verbatim_overlay() or self._is_st_authoritative()
 
     def _should_inject_user_summary(self, conversation_id: Optional[str]) -> bool:
         """Check if user summary should be injected this turn."""
@@ -1421,11 +1513,15 @@ class ConversationInterface:
             metadata=metadata,
             correlation_id=correlation_id,
         )
-        # Mirror the turn into the SDK-authoritative ST cache only AFTER
-        # the server acknowledges the write (D3 in the plan). Append on
-        # success guarantees the SDK cache and the server's view stay
-        # consistent w.r.t. which turns the next compaction will see.
-        if self._sdk._is_st_authoritative():
+        # Mirror the turn into the local ST store only AFTER the server
+        # acknowledges the write (D3 in the plan). Append on success guarantees
+        # the SDK cache and the server's view stay consistent w.r.t. which turns
+        # the next compaction will see. Gated on ``_st_store_active`` (overlay OR
+        # authoritative) — NOT on ``_is_st_authoritative`` alone — so the
+        # read-your-writes overlay (default on) captures the turn even with the
+        # authoritative flag off [C1]. The server's ``recorded_at`` is adopted as
+        # the timestamp so SDK-local and server clocks don't diverge.
+        if self._sdk._st_store_active():
             try:
                 recorded_at = result.get("recorded_at") if isinstance(result, dict) else None
                 ts = None
@@ -1466,7 +1562,7 @@ class ConversationInterface:
             messages=messages,
             correlation_id=correlation_id,
         )
-        if self._sdk._is_st_authoritative():
+        if self._sdk._st_store_active():
             # Best-effort mirror: only the rows the server confirmed succeeded
             # should be reflected in local cache. The batch result has a
             # per-message ``results`` array aligned with the input order; rows
@@ -1719,11 +1815,10 @@ class ConversationContextInterface:
                 if "conversation_context" in result:
                     context_data["conversation_context"] = result["conversation_context"]
                 response = ContextResponse.from_cloud_response(context_data, metadata)
-
-                # Phase 2: splice the locally-cached ST block onto the
-                # response so consumers see a unified shape.
-                if skip_server_st:
-                    _merge_local_st_into_response(self._sdk, response, conversation_id)
+                # NB: when skip_server_st is set the server omits
+                # conversation_context; the local ST block is spliced back on by
+                # _overlay_local_recent_turns in the common tail below (which also
+                # refreshes the verbatim tail on the non-skip path).
 
                 # Cache the result (skip empty responses to avoid caching transient failures)
                 if any(context_data.get(k) for k in ("facts", "preferences", "episodes", "emotions", "temporal_events", "conversation_context")):
@@ -1748,6 +1843,14 @@ class ConversationContextInterface:
                 mode=mode,
                 cache_origin=cache_origin,
             )
+
+        # Read-your-writes: overlay the SDK's local verbatim short-term tail
+        # onto whatever branch produced `response` (cloud, http-cache, or
+        # anticipation-cache). Self-gates on st_verbatim_overlay and on a warm
+        # local store entry; no-op otherwise, so a cold store leaves the
+        # server's recent_turns untouched. Runs before the audit/telemetry
+        # emits so the ContextAssembled snapshot reflects what the consumer sees.
+        _overlay_local_recent_turns(self._sdk, response, conversation_id)
 
         # Auto-emit context_fetch for server-side retrieval history
         items_count = len(response.facts) + len(response.preferences) + len(response.episodes) + len(response.emotions)
@@ -2308,9 +2411,9 @@ class UserContextInterface:
                 if "conversation_context" in result:
                     context_data["conversation_context"] = result["conversation_context"]
                 response = ContextResponse.from_cloud_response(context_data, metadata)
-
-                if skip_server_st:
-                    _merge_local_st_into_response(self._sdk, response, conversation_id)
+                # skip_server_st → server omits conversation_context; the local
+                # ST block is spliced back on by _overlay_local_recent_turns in
+                # the common tail below.
 
                 # Cache (skip empty responses to avoid caching transient failures)
                 if any(context_data.get(k) for k in ("facts", "preferences", "episodes", "emotions", "temporal_events", "conversation_context")):
@@ -2334,6 +2437,11 @@ class UserContextInterface:
                 mode=mode,
                 cache_origin=cache_origin,
             )
+
+        # Read-your-writes: overlay the SDK's local verbatim short-term tail
+        # (see ConversationContextInterface.fetch). No-op when the local store
+        # is cold; refreshes recent_turns when warm.
+        _overlay_local_recent_turns(self._sdk, response, conversation_id)
 
         # Auto-emit context_fetch for server-side retrieval history
         items_count = len(response.facts) + len(response.preferences) + len(response.episodes) + len(response.emotions)
@@ -2490,8 +2598,9 @@ class CustomerContextInterface:
                     context_data["conversation_context"] = result["conversation_context"]
                 response = ContextResponse.from_cloud_response(context_data, metadata)
 
-                if skip_server_st:
-                    _merge_local_st_into_response(self._sdk, response, conversation_id)
+                # skip_server_st → server omits conversation_context; the local
+                # ST block is spliced back on by _overlay_local_recent_turns in
+                # the common tail below.
 
                 # Skip caching empty responses to avoid caching transient failures
                 if any(context_data.get(k) for k in ("facts", "preferences", "episodes", "emotions", "temporal_events", "conversation_context")):
@@ -2515,6 +2624,11 @@ class CustomerContextInterface:
                 mode=mode,
                 cache_origin=cache_origin,
             )
+
+        # Read-your-writes: overlay the SDK's local verbatim short-term tail
+        # (see ConversationContextInterface.fetch). No-op when the local store
+        # is cold; refreshes recent_turns when warm.
+        _overlay_local_recent_turns(self._sdk, response, conversation_id)
 
         # Auto-emit context_fetch for server-side retrieval history
         items_count = len(response.facts) + len(response.preferences) + len(response.episodes) + len(response.emotions)
@@ -2668,8 +2782,9 @@ class ClientContextInterface:
                     context_data["conversation_context"] = result["conversation_context"]
                 response = ContextResponse.from_cloud_response(context_data, metadata)
 
-                if skip_server_st:
-                    _merge_local_st_into_response(self._sdk, response, conversation_id)
+                # skip_server_st → server omits conversation_context; the local
+                # ST block is spliced back on by _overlay_local_recent_turns in
+                # the common tail below.
 
                 # Skip caching empty responses to avoid caching transient failures
                 if any(context_data.get(k) for k in ("facts", "preferences", "episodes", "emotions", "temporal_events", "conversation_context")):
@@ -2693,6 +2808,11 @@ class ClientContextInterface:
                 mode=mode,
                 cache_origin=cache_origin,
             )
+
+        # Read-your-writes: overlay the SDK's local verbatim short-term tail
+        # (see ConversationContextInterface.fetch). No-op when the local store
+        # is cold; refreshes recent_turns when warm.
+        _overlay_local_recent_turns(self._sdk, response, conversation_id)
 
         # Auto-emit context_fetch for server-side retrieval history
         items_count = len(response.facts) + len(response.preferences) + len(response.episodes) + len(response.emotions)
@@ -2914,12 +3034,14 @@ class InstanceInterface:
 
         await self._controller._transport.send(payload)
 
-        # Mirror the turn locally for SDK-authoritative ST mode. gRPC send
-        # is fire-and-forget (no ack), so we treat the successful write to
-        # the stream as confirmation. Only mirror conversational events,
-        # not tool_call/context_request hints.
+        # Mirror the turn into the local ST store (read-your-writes). gRPC send
+        # is fire-and-forget (no ack), so we treat the successful write to the
+        # stream as confirmation. Gated on ``_st_store_active`` (overlay OR
+        # authoritative) so the overlay captures the turn with the authoritative
+        # flag off [C1] — this is the path the playground emits on. Only mirror
+        # conversational events, not tool_call/context_request hints.
         if (
-            self._sdk._is_st_authoritative()
+            self._sdk._st_store_active()
             and event_type in ("user_message", "assistant_message")
             and conversation_id
         ):
