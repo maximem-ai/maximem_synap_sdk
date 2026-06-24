@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import random
 import logging
 from typing import Any, Dict, Optional, Callable
@@ -52,7 +53,10 @@ class HTTPTransport:
         telemetry_callback: Optional[Callable[[Dict], None]] = None,
     ):
         self.instance_id = instance_id
-        self.base_url = base_url or self.DEFAULT_BASE_URL
+        # Precedence: explicit base_url (SDKConfig.api_base_url) > SYNAP_BASE_URL
+        # env var > prod default. The env var lets a deployment target staging
+        # (or any backend) without code changes, matching the JS SDK.
+        self.base_url = base_url or os.environ.get("SYNAP_BASE_URL") or self.DEFAULT_BASE_URL
         self.timeouts = timeouts or TimeoutConfig()
         self.retry_policy = retry_policy
         self.telemetry_callback = telemetry_callback

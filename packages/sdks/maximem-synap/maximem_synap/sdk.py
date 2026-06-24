@@ -1002,11 +1002,13 @@ class MaximemSynapSDK:
                 client_id=self._client_id,
                 storage_path=self._config.storage_path,
                 enabled=True,
+                instance_id=self.instance_id,
             )
         else:
             self._cache_manager = CacheManager(
                 client_id=self._client_id,
                 enabled=False,
+                instance_id=self.instance_id,
             )
 
         # Initialize telemetry transport
