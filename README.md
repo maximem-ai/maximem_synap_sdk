@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="https://www.maximem.ai/docs"><strong>Docs</strong></a> ·
+  <a href="https://docs.maximem.ai"><strong>Docs</strong></a> ·
   <a href="https://synap.maximem.ai"><strong>Dashboard</strong></a> ·
   <a href="https://www.maximem.ai/blog/synap-benchmark-results"><strong>Benchmarks</strong></a> ·
   <a href="https://www.maximem.ai/synap"><strong>Website</strong></a>
@@ -39,6 +39,8 @@ Your AI agents forget everything between conversations. Synap fixes that — wit
 <p align="center">
   <strong>LangChain · LangGraph · LlamaIndex · CrewAI · AutoGen · Haystack · Google ADK · OpenAI Agents · Semantic Kernel · Pydantic AI · Agno · LiveKit · Pipecat · Claude Agent · Mastra · Vercel AI SDK · NeMo Agent Toolkit · Microsoft Agent Framework</strong>
 </p>
+
+> **What's in this repo:** the open-source Python and JavaScript SDKs plus all framework integrations, licensed under Apache 2.0. The Synap memory engine itself — ingestion, entity resolution, retrieval, anticipation — runs as a fully managed cloud service operated by Maximem and is **not** open source. The SDKs in this repo are clients for that service; there is nothing to self-host, and an [API key](https://www.maximem.ai/synap) is required.
 
 ---
 
@@ -74,6 +76,8 @@ npm install @maximem/synap-js-sdk
 ## 60-second quickstart
 
 Your agent forgets. Synap remembers — across conversations, sessions, and devices.
+
+The SDK connects to the hosted Synap cloud service — you'll need an [API key](https://www.maximem.ai/synap). There's no local server to run: memory processing happens in Synap's cloud, not in this package.
 
 ```python
 import asyncio
@@ -286,7 +290,7 @@ Drop-in instructions for coding agents (Claude Code, Cursor, etc.) that teach th
 
 ## Resources & community
 
-- 📖 [Documentation](https://www.maximem.ai/docs)
+- 📖 [Documentation](https://docs.maximem.ai)
 - 🚀 [Dashboard](https://synap.maximem.ai)
 - 𝕏 [Twitter / X](https://x.com/maximem_ai)
 - 💼 [LinkedIn](https://www.linkedin.com/company/maximem-ai)
