@@ -37,7 +37,7 @@
 Your AI agents forget everything between conversations. Synap fixes that — with a production-grade memory layer built for applications that serve real users at scale. **#1 on [LongMemEval](https://www.maximem.ai/blog/synap-benchmark-results) (92%) and [LoCoMo](https://www.maximem.ai/blog/synap-benchmark-results) (93.2%)**, sub-15ms anticipatory retrieval, and native integrations with every major AI framework.
 
 <p align="center">
-  <strong>LangChain · LangGraph · LlamaIndex · CrewAI · AutoGen · Haystack · Google ADK · OpenAI Agents · Semantic Kernel · Pydantic AI · Agno · LiveKit · Pipecat · Claude Agent · Mastra · Vercel AI SDK · NeMo Agent Toolkit · Microsoft Agent Framework</strong>
+  <strong>LangChain · LangGraph · LlamaIndex · CrewAI · AutoGen · Haystack · Google ADK · OpenAI Agents · Semantic Kernel · Pydantic AI · Agno · LiveKit · Pipecat · Claude Agent · Mastra · Vercel AI SDK · NeMo Agent Toolkit · Microsoft Agent Framework · DSPy · Smolagents · Camel-AI · Marvin · Mirascope</strong>
 </p>
 
 > **What's in this repo:** the open-source Python and JavaScript SDKs plus all framework integrations, licensed under Apache 2.0. The Synap memory engine itself — ingestion, entity resolution, retrieval, anticipation — runs as a fully managed cloud service operated by Maximem and is **not** open source. The SDKs in this repo are clients for that service; there is nothing to self-host, and an [API key](https://www.maximem.ai/synap) is required.
@@ -257,6 +257,11 @@ agent = ReActAgent.from_tools(tools, memory=memory)
 | Vercel AI SDK | [`@maximem/synap-vercel-adk`](packages/integrations/synap-vercel-adk/) | `npm i @maximem/synap-vercel-adk` |
 | NVIDIA NeMo Agent Toolkit | [`maximem-synap-nemo-agent-toolkit`](packages/integrations/synap-nemo-agent-toolkit/) | `pip install maximem-synap-nemo-agent-toolkit` |
 | Microsoft Agent Framework | [`maximem-synap-microsoft-agent`](packages/integrations/synap-microsoft-agent/) | `pip install maximem-synap-microsoft-agent` |
+| DSPy | [`maximem-synap-dspy`](packages/integrations/synap-dspy/) | `pip install maximem-synap-dspy` |
+| Smolagents | [`maximem-synap-smolagents`](packages/integrations/synap-smolagents/) | `pip install maximem-synap-smolagents` |
+| Camel-AI | [`maximem-synap-camel`](packages/integrations/synap-camel/) | `pip install maximem-synap-camel` |
+| Marvin | [`maximem-synap-marvin`](packages/integrations/synap-marvin/) | `pip install maximem-synap-marvin` |
+| Mirascope | [`maximem-synap-mirascope`](packages/integrations/synap-mirascope/) | `pip install maximem-synap-mirascope` |
 
 <!-- END integrations -->
 
