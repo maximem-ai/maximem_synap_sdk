@@ -54,6 +54,7 @@ class ConversationContextController:
         max_results: int = 10,
         types: Optional[List["ContextType"]] = None,
         mode: str = "fast",
+        precision_level: str = "high",
     ):
         """Fetch context for a conversation.
 
@@ -77,6 +78,7 @@ class ConversationContextController:
             "max_results": max_results,
             "types": [t.value for t in types] if types else ["all"],
             "mode": mode,
+            **({"precision_level": precision_level} if precision_level != "high" else {}),
         }
 
         result = await self._transport.post(
@@ -217,6 +219,7 @@ class UserContextController:
         max_results: int = 10,
         types: Optional[List["ContextType"]] = None,
         mode: str = "fast",
+        precision_level: str = "high",
     ):
         """Fetch context for a user.
 
@@ -242,6 +245,7 @@ class UserContextController:
             "max_results": max_results,
             "types": [t.value for t in types] if types else ["all"],
             "mode": mode,
+            **({"precision_level": precision_level} if precision_level != "high" else {}),
         }
 
         result = await self._transport.post(
@@ -280,6 +284,7 @@ class CustomerContextController:
         max_results: int = 10,
         types: Optional[List["ContextType"]] = None,
         mode: str = "fast",
+        precision_level: str = "high",
     ):
         """Fetch context for a customer.
 
@@ -305,6 +310,7 @@ class CustomerContextController:
             "max_results": max_results,
             "types": [t.value for t in types] if types else ["all"],
             "mode": mode,
+            **({"precision_level": precision_level} if precision_level != "high" else {}),
         }
 
         result = await self._transport.post(
@@ -342,6 +348,7 @@ class ClientContextController:
         max_results: int = 10,
         types: Optional[List["ContextType"]] = None,
         mode: str = "fast",
+        precision_level: str = "high",
     ):
         """Fetch context for a client (org-level).
 
@@ -365,6 +372,7 @@ class ClientContextController:
             "max_results": max_results,
             "types": [t.value for t in types] if types else ["all"],
             "mode": mode,
+            **({"precision_level": precision_level} if precision_level != "high" else {}),
         }
 
         result = await self._transport.post(
