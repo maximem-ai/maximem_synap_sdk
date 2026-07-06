@@ -267,7 +267,7 @@ class SynapClient {
     return normalizeGetMemoriesResult(await this.bridge.call('get_memories', params));
   }
 
-  async fetchUserContext({ userId, customerId, conversationId, searchQuery, maxResults = 10, types, mode }) {
+  async fetchUserContext({ userId, customerId, conversationId, searchQuery, maxResults = 10, types, mode, precisionLevel }) {
     this.#assert(userId, 'userId is required');
     this.#assertArray(searchQuery, 'searchQuery must be an array when provided');
     this.#assertArray(types, 'types must be an array when provided');
@@ -278,11 +278,12 @@ class SynapClient {
     if (searchQuery !== undefined) params.search_query = searchQuery;
     if (types !== undefined) params.types = types;
     if (mode !== undefined) params.mode = mode;
+    if (precisionLevel !== undefined) params.precision_level = precisionLevel;
 
     return normalizeContextResponse(await this.bridge.call('fetch_user_context', params));
   }
 
-  async fetchCustomerContext({ customerId, conversationId, searchQuery, maxResults = 10, types, mode }) {
+  async fetchCustomerContext({ customerId, conversationId, searchQuery, maxResults = 10, types, mode, precisionLevel }) {
     this.#assert(customerId, 'customerId is required');
     this.#assertArray(searchQuery, 'searchQuery must be an array when provided');
     this.#assertArray(types, 'types must be an array when provided');
@@ -292,11 +293,12 @@ class SynapClient {
     if (searchQuery !== undefined) params.search_query = searchQuery;
     if (types !== undefined) params.types = types;
     if (mode !== undefined) params.mode = mode;
+    if (precisionLevel !== undefined) params.precision_level = precisionLevel;
 
     return normalizeContextResponse(await this.bridge.call('fetch_customer_context', params));
   }
 
-  async fetchClientContext({ conversationId, searchQuery, maxResults = 10, types, mode } = {}) {
+  async fetchClientContext({ conversationId, searchQuery, maxResults = 10, types, mode, precisionLevel } = {}) {
     this.#assertArray(searchQuery, 'searchQuery must be an array when provided');
     this.#assertArray(types, 'types must be an array when provided');
 
@@ -305,6 +307,7 @@ class SynapClient {
     if (searchQuery !== undefined) params.search_query = searchQuery;
     if (types !== undefined) params.types = types;
     if (mode !== undefined) params.mode = mode;
+    if (precisionLevel !== undefined) params.precision_level = precisionLevel;
 
     return normalizeContextResponse(await this.bridge.call('fetch_client_context', params));
   }

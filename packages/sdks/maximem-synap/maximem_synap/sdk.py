@@ -522,6 +522,15 @@ def _tool_input_schema(scope: str, *, has_conversation_id: bool) -> Dict[str, An
                 "LLM-decomposed multi-query (~200-500ms). Default 'fast'."
             ),
         },
+        "precision_level": {
+            "type": "string",
+            "enum": ["high", "medium"],
+            "description": (
+                "Result filtering precision. 'high' (default) applies an extra "
+                "relevance-refinement pass; 'medium' skips it for faster, less "
+                "precisely filtered results (recall unaffected)."
+            ),
+        },
     }
     if scope == "conversation" and not has_conversation_id:
         # Closed-over conversation_id wasn't provided; LLM must supply per call.
@@ -558,6 +567,7 @@ async def _invoke_scope_fetch(
     max_results = int(call_args.get("max_results") or 10)
     types = call_args.get("types")
     mode = str(call_args.get("mode") or "fast")
+    precision_level = str(call_args.get("precision_level") or "high")
     call_conv_id = call_args.get("conversation_id") or conversation_id
 
     if scope == "unified":
@@ -569,6 +579,7 @@ async def _invoke_scope_fetch(
             max_results=max_results,
             types=types,
             mode=mode,
+            precision_level=precision_level,
         )
         return {
             "formatted_context": response.formatted_context,
@@ -585,6 +596,7 @@ async def _invoke_scope_fetch(
             max_results=max_results,
             types=types,
             mode=mode,
+            precision_level=precision_level,
             user_id=user_id,
         )
     elif scope == "user":
@@ -595,6 +607,7 @@ async def _invoke_scope_fetch(
             max_results=max_results,
             types=types,
             mode=mode,
+            precision_level=precision_level,
             customer_id=customer_id,
         )
     elif scope == "customer":
@@ -605,6 +618,7 @@ async def _invoke_scope_fetch(
             max_results=max_results,
             types=types,
             mode=mode,
+            precision_level=precision_level,
         )
     else:  # client
         response = await sdk.client.context.fetch(
@@ -613,6 +627,7 @@ async def _invoke_scope_fetch(
             max_results=max_results,
             types=types,
             mode=mode,
+            precision_level=precision_level,
         )
 
     return {
@@ -1153,6 +1168,7 @@ class MaximemSynapSDK:
         max_results: int = 20,
         types: Optional[List[str]] = None,
         mode: str = "fast",
+        precision_level: str = "high",
         include_conversation_context: bool = True,
         scopes: Optional[List[str]] = None,
         include_scope_labels: bool = False,
@@ -1175,6 +1191,8 @@ class MaximemSynapSDK:
             max_results: Max results per scope (total may be higher)
             types: Memory types to include (default: all)
             mode: Retrieval mode - "fast" (default) or "accurate"
+            precision_level: "high" (default) keeps the server-side relevance-refinement
+                pass; "medium" skips it for faster, less precisely filtered results.
             include_conversation_context: Include compacted history + recent messages
             scopes: Explicitly limit which scopes to query (e.g. ["user", "customer"]).
                     Default: all scopes for which an identifier is provided.
@@ -1220,6 +1238,7 @@ class MaximemSynapSDK:
                 max_results=max_results,
                 types=types,
                 mode=mode,
+                precision_level=precision_level,
                 user_id=user_id,
                 customer_id=customer_id,
             ))
@@ -1233,6 +1252,7 @@ class MaximemSynapSDK:
                 max_results=max_results,
                 types=types,
                 mode=mode,
+                precision_level=precision_level,
                 customer_id=customer_id,
             ))
             scope_labels.append("user")
@@ -1245,6 +1265,7 @@ class MaximemSynapSDK:
                 max_results=max_results,
                 types=types,
                 mode=mode,
+                precision_level=precision_level,
             ))
             scope_labels.append("customer")
 
@@ -1257,6 +1278,7 @@ class MaximemSynapSDK:
                     max_results=max_results,
                     types=types,
                     mode=mode,
+                    precision_level=precision_level,
                 ))
                 scope_labels.append("client")
 
@@ -1681,6 +1703,7 @@ class ConversationContextInterface:
         max_results: int = 10,
         types: Optional[List[str]] = None,
         mode: str = "fast",
+        precision_level: str = "high",
         user_id: Optional[str] = None,
         customer_id: Optional[str] = None,
     ) -> ContextResponse:
@@ -1692,6 +1715,8 @@ class ConversationContextInterface:
             max_results: Maximum results to return (default 10)
             types: Context types to include (default all)
             mode: Retrieval mode - "fast" (default) or "accurate"
+            precision_level: "high" (default) keeps the server-side relevance-refinement
+                pass; "medium" skips it for faster, less precisely filtered results.
                   - "fast": Direct query, low latency (~50-100ms)
                   - "accurate": LLM-enhanced queries, higher quality (~200-500ms)
             user_id: Optional external user id. Section 15 — passing this
@@ -1715,6 +1740,11 @@ class ConversationContextInterface:
         valid_modes = ("fast", "accurate")
         if mode not in valid_modes:
             raise InvalidInputError(f"Invalid mode '{mode}'. Must be one of: {valid_modes}")
+        valid_precision = ("high", "medium")
+        if precision_level not in valid_precision:
+            raise InvalidInputError(
+                f"Invalid precision_level '{precision_level}'. Must be one of: {valid_precision}"
+            )
 
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = datetime.now(timezone.utc)
@@ -1726,6 +1756,7 @@ class ConversationContextInterface:
             "max_results": max_results,
             "types": types,
             "mode": mode,
+            "precision_level": precision_level,
         }
 
         # Check anticipation cache first (bundles pre-fetched via gRPC stream).
@@ -1796,6 +1827,8 @@ class ConversationContextInterface:
                     **({"user_id": user_id} if user_id else {}),
                     **({"customer_id": customer_id} if customer_id else {}),
                 }
+                if precision_level != "high":
+                    body["precision_level"] = precision_level
                 if skip_server_st:
                     body["include_conversation_context"] = False
                 result = await self._sdk._http_transport.post(
@@ -2299,6 +2332,7 @@ class UserContextInterface:
         max_results: int = 10,
         types: Optional[List[str]] = None,
         mode: str = "fast",
+        precision_level: str = "high",
         customer_id: Optional[str] = None,
     ) -> ContextResponse:
         """Fetch context for a user.
@@ -2310,6 +2344,8 @@ class UserContextInterface:
             max_results: Maximum results to return
             types: Context types to include
             mode: Retrieval mode - "fast" (default) or "accurate"
+            precision_level: "high" (default) keeps the server-side relevance-refinement
+                pass; "medium" skips it for faster, less precisely filtered results.
             customer_id: Optional customer ID. Required for B2B instances.
                 For B2C instances, this is auto-resolved from user_id.
 
@@ -2322,6 +2358,11 @@ class UserContextInterface:
         valid_modes = ("fast", "accurate")
         if mode not in valid_modes:
             raise InvalidInputError(f"Invalid mode '{mode}'. Must be one of: {valid_modes}")
+        valid_precision = ("high", "medium")
+        if precision_level not in valid_precision:
+            raise InvalidInputError(
+                f"Invalid precision_level '{precision_level}'. Must be one of: {valid_precision}"
+            )
 
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = datetime.now(timezone.utc)
@@ -2333,6 +2374,7 @@ class UserContextInterface:
             "max_results": max_results,
             "types": types,
             "mode": mode,
+            "precision_level": precision_level,
         }
 
         # Check anticipation cache first (bundles pre-fetched via gRPC stream).
@@ -2392,6 +2434,8 @@ class UserContextInterface:
                     "types": types or ["all"],
                     "mode": mode,
                 }
+                if precision_level != "high":
+                    body["precision_level"] = precision_level
                 if skip_server_st:
                     body["include_conversation_context"] = False
                 result = await self._sdk._http_transport.post(
@@ -2503,6 +2547,7 @@ class CustomerContextInterface:
         max_results: int = 10,
         types: Optional[List[str]] = None,
         mode: str = "fast",
+        precision_level: str = "high",
     ) -> ContextResponse:
         """Fetch context for a customer (B2B)."""
         self._sdk._ensure_initialized()
@@ -2511,6 +2556,11 @@ class CustomerContextInterface:
         valid_modes = ("fast", "accurate")
         if mode not in valid_modes:
             raise InvalidInputError(f"Invalid mode '{mode}'. Must be one of: {valid_modes}")
+        valid_precision = ("high", "medium")
+        if precision_level not in valid_precision:
+            raise InvalidInputError(
+                f"Invalid precision_level '{precision_level}'. Must be one of: {valid_precision}"
+            )
 
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = datetime.now(timezone.utc)
@@ -2522,6 +2572,7 @@ class CustomerContextInterface:
             "max_results": max_results,
             "types": types,
             "mode": mode,
+            "precision_level": precision_level,
         }
 
         # Check anticipation cache first (bundles pre-fetched via gRPC stream).
@@ -2578,6 +2629,8 @@ class CustomerContextInterface:
                     "types": types or ["all"],
                     "mode": mode,
                 }
+                if precision_level != "high":
+                    body["precision_level"] = precision_level
                 if skip_server_st:
                     body["include_conversation_context"] = False
                 result = await self._sdk._http_transport.post(
@@ -2688,6 +2741,7 @@ class ClientContextInterface:
         max_results: int = 10,
         types: Optional[List[str]] = None,
         mode: str = "fast",
+        precision_level: str = "high",
     ) -> ContextResponse:
         """Fetch organizational context."""
         self._sdk._ensure_initialized()
@@ -2696,6 +2750,11 @@ class ClientContextInterface:
         valid_modes = ("fast", "accurate")
         if mode not in valid_modes:
             raise InvalidInputError(f"Invalid mode '{mode}'. Must be one of: {valid_modes}")
+        valid_precision = ("high", "medium")
+        if precision_level not in valid_precision:
+            raise InvalidInputError(
+                f"Invalid precision_level '{precision_level}'. Must be one of: {valid_precision}"
+            )
 
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = datetime.now(timezone.utc)
@@ -2707,6 +2766,7 @@ class ClientContextInterface:
             "max_results": max_results,
             "types": types,
             "mode": mode,
+            "precision_level": precision_level,
         }
 
         # Check anticipation cache first (bundles pre-fetched via gRPC stream).
@@ -2762,6 +2822,8 @@ class ClientContextInterface:
                     "types": types or ["all"],
                     "mode": mode,
                 }
+                if precision_level != "high":
+                    body["precision_level"] = precision_level
                 if skip_server_st:
                     body["include_conversation_context"] = False
                 result = await self._sdk._http_transport.post(
