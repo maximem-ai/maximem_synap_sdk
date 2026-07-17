@@ -11,6 +11,7 @@ from .models.context import (
     CompactionTriggerResponse,
     ContextBundle,
     ContextForPromptResponse,
+    ConversationSummaryModel,
     RecentMessage,
     ContextItem,
     ContextResponse,
@@ -18,15 +19,24 @@ from .models.context import (
     Episode,
     Fact,
     Preference,
+    ProfileAttributeModel,
     ResponseMetadata,
     TemporalEvent,
+    UnifiedContextResponse,
+    UserProfileModel,
+)
+from .models.conversations import (
+    TranscriptIngestResponse,
+    TranscriptTurn,
 )
 from .models.config import CacheConfig, RetryPolicy, SDKConfig, TimeoutConfig
 from .models.errors import (
     AgentUnavailableError,
     AuthenticationError,
+    ConflictError,
     ConnectionError,
     ContextNotFoundError,
+    InsufficientCreditsError,
     InvalidConversationIdError,
     InvalidInputError,
     InvalidInstanceIdError,
@@ -41,6 +51,7 @@ from .models.errors import (
     SynapError,
     SynapPermanentError,
     SynapTransientError,
+    TranscriptConflictError,
     TransientError,
 )
 from .memories.models import (
@@ -70,6 +81,7 @@ __all__ = [
     
     # Response models
     "ContextResponse",
+    "UnifiedContextResponse",
     "CompactionResponse",
     "CompactionTriggerResponse",
     "CompactionStatusResponse",
@@ -80,6 +92,13 @@ __all__ = [
     "Episode",
     "Emotion",
     "ResponseMetadata",
+    # User profile + conversation-summary models
+    "UserProfileModel",
+    "ProfileAttributeModel",
+    "ConversationSummaryModel",
+    # Conversation ingest
+    "TranscriptTurn",
+    "TranscriptIngestResponse",
     
     # Backward compatibility models (deprecated)
     "ContextBundle",
@@ -103,11 +122,14 @@ __all__ = [
     "RateLimitError",
     "ServiceUnavailableError",
     "AgentUnavailableError",
+    "InsufficientCreditsError",
     "InvalidInputError",
     "InvalidInstanceIdError",
     "InvalidConversationIdError",
     "AuthenticationError",
     "ContextNotFoundError",
+    "ConflictError",
+    "TranscriptConflictError",
     "SessionExpiredError",
     "ListeningAlreadyActiveError",
     "ListeningNotActiveError",

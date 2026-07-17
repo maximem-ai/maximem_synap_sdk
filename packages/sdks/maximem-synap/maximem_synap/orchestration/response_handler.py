@@ -123,6 +123,14 @@ class ResponseHandler:
         )
 
         context_data = raw_response.get("context", raw_response)
+        # Carry the C4 conversation-summary siblings (profile / conversations)
+        # through this second parse path too — they live beside "context" in
+        # the response envelope, not inside it. Facade parity with sdk.py's
+        # UserContextInterface.fetch.
+        if isinstance(context_data, dict) and context_data is not raw_response:
+            for _summary_key in ("profile", "conversations", "conversation_context"):
+                if _summary_key in raw_response and _summary_key not in context_data:
+                    context_data[_summary_key] = raw_response[_summary_key]
         return ContextResponse.from_cloud_response(context_data, metadata)
 
     def parse_compaction_response(

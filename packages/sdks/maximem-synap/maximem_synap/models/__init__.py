@@ -22,12 +22,21 @@ from .context import (
     ContextBundle,
     ContextItem,
     ContextResponse,
+    ConversationSummaryModel,
     Emotion,
     Episode,
     Fact,
     Preference,
+    ProfileAttributeModel,
     ResponseMetadata,
     UnifiedContextResponse,
+    UserProfileModel,
+)
+
+# Conversation-ingest models
+from .conversations import (
+    TranscriptIngestResponse,
+    TranscriptTurn,
 )
 
 # Request/Response envelopes
@@ -37,8 +46,10 @@ from .requests import RequestEnvelope, ResponseEnvelope
 from .errors import (
     AgentUnavailableError,
     AuthenticationError,
+    ConflictError,
     ConnectionError,
     ContextNotFoundError,
+    InsufficientCreditsError,
     InvalidConversationIdError,
     InvalidInputError,
     InvalidInstanceIdError,
@@ -52,6 +63,7 @@ from .errors import (
     SynapError,
     SynapPermanentError,
     SynapTransientError,
+    TranscriptConflictError,
     TransientError,
 )
 
@@ -82,6 +94,12 @@ __all__ = [
     "ContextBundle",
     "ContextItem",
     "UnifiedContextResponse",
+    "UserProfileModel",
+    "ProfileAttributeModel",
+    "ConversationSummaryModel",
+    # Conversation ingest
+    "TranscriptTurn",
+    "TranscriptIngestResponse",
     # Requests
     "RequestEnvelope",
     "ResponseEnvelope",
@@ -93,11 +111,14 @@ __all__ = [
     "NetworkTimeoutError",
     "RateLimitError",
     "ServiceUnavailableError",
+    "InsufficientCreditsError",
     "InvalidInputError",
     "InvalidInstanceIdError",
     "InvalidConversationIdError",
     "AuthenticationError",
     "ContextNotFoundError",
+    "ConflictError",
+    "TranscriptConflictError",
     "SessionExpiredError",
     "ListeningAlreadyActiveError",
     "AgentUnavailableError",

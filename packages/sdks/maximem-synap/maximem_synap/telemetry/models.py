@@ -40,6 +40,12 @@ class TelemetryEventType(str, Enum):
     MEMORY_DELETE = "memory_delete"
     MEMORY_STATUS = "memory_status"
 
+    # Conversation ingest (one-shot transcript push)
+    CONVERSATION_INGEST = "conversation_ingest"
+
+    # User profile
+    USER_PROFILE_GET = "user_profile_get"
+
     # Errors
     ERROR = "error"
 

@@ -6,7 +6,7 @@ import logging
 import os
 import threading
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from .config_utils import configure_logging, get_default_storage_path, merge_config
 from .registry import SDKRegistry
@@ -19,7 +19,9 @@ from .models.context import (
     ContextForPromptResponse,
     ResponseMetadata,
     UnifiedContextResponse,
+    UserProfileModel,
 )
+from .models.conversations import TranscriptIngestResponse, TranscriptTurn
 from .models.enums import CompactionLevel, ContextScope
 from .models.errors import (
     SynapError,
@@ -31,7 +33,8 @@ from .auth.manager import CredentialManager
 from .cache.manager import CacheManager, CacheScope
 from .transport.http_client import HTTPTransport
 from .transport.grpc_client import GRPCTransport
-from .telemetry.collector import TelemetryCollector, emit_fetch_event
+from .telemetry.collector import TelemetryCollector, emit_fetch_event, emit_memory_event
+from .telemetry.models import TelemetryEventType
 from .telemetry.transport import TelemetryTransport
 from .utils.correlation import generate_correlation_id
 from .utils.validators import validate_conversation_id, validate_instance_id
@@ -1172,6 +1175,9 @@ class MaximemSynapSDK:
         include_conversation_context: bool = True,
         scopes: Optional[List[str]] = None,
         include_scope_labels: bool = False,
+        context_mode: str = "in-conversation",
+        include_profile: bool = True,
+        last_n_conversations: int = 1,
     ) -> UnifiedContextResponse:
         """Fetch and merge context across all relevant scopes in a single call.
 
@@ -1198,6 +1204,16 @@ class MaximemSynapSDK:
                     Default: all scopes for which an identifier is provided.
             include_scope_labels: If True, annotate each item with its source scope
                                   in the formatted output.
+            context_mode: ``"in-conversation"`` (default) or
+                ``"conversation-summary"``. In summary mode the response carries
+                a caller ``profile`` + previous-conversation summaries, and
+                ``formatted_context`` gains "## Caller Profile" and
+                "## Previous Conversations" sections. Requires ``user_id``.
+                These three params are forwarded **only** to the user-scope
+                sub-fetch (the other scopes reject summary mode).
+            include_profile: Summary mode only — include the caller profile.
+            last_n_conversations: Summary mode only — previous conversations to
+                summarize (0–20).
 
         Returns:
             UnifiedContextResponse with merged items, scope attribution, and
@@ -1245,6 +1261,10 @@ class MaximemSynapSDK:
             scope_labels.append("conversation")
 
         if user_id and (not scopes or "user" in scopes):
+            # Fan-out rule (spec §6.4): the summary-mode params go ONLY to the
+            # user-scope sub-fetch. The customer/client/conversation routes 422
+            # on context_mode="conversation-summary", and that rejection would
+            # be silently swallowed by gather(return_exceptions=True).
             tasks.append(self.user.context.fetch(
                 user_id=user_id,
                 conversation_id=conversation_id,
@@ -1254,6 +1274,9 @@ class MaximemSynapSDK:
                 mode=mode,
                 precision_level=precision_level,
                 customer_id=customer_id,
+                context_mode=context_mode,
+                include_profile=include_profile,
+                last_n_conversations=last_n_conversations,
             ))
             scope_labels.append("user")
 
@@ -1292,9 +1315,14 @@ class MaximemSynapSDK:
         # Fetch all scopes in parallel
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Filter out failed scopes (log but don't raise)
+        # Filter out failed scopes (log but don't raise) — EXCEPT caller
+        # errors: an InvalidInputError means the request itself is wrong
+        # (e.g. last_n_conversations out of range) and must surface, not
+        # degrade to a silently-empty context.
         successful_results = []
         for label, result in zip(scope_labels, results):
+            if isinstance(result, InvalidInputError):
+                raise result
             if isinstance(result, Exception):
                 logger.warning(
                     "Scope '%s' fetch failed in unified fetch (non-fatal): %s",
@@ -1603,6 +1631,151 @@ class ConversationInterface:
                 except Exception as e:
                     logger.warning("Failed to append batch turn to ST store: %s", e)
         return result
+
+    async def ingest_transcript(
+        self,
+        conversation_id: str,
+        user_id: str,
+        transcript: Union[str, List[TranscriptTurn]],
+        customer_id: Optional[str] = None,
+        conversation_type: Optional[str] = None,
+        analysis: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        started_at: Optional[datetime] = None,
+        ended_at: Optional[datetime] = None,
+    ) -> TranscriptIngestResponse:
+        """One-shot push of a full conversation transcript for async ingestion.
+
+        Records the whole transcript, enqueues background extraction, and fires
+        a summary compaction — then returns immediately. Nothing here sits on a
+        hot path; poll completion with ``sdk.memories.status(ingestion_id)`` or
+        ``sdk.memories.wait_for_completion(ingestion_id)``. This is the
+        call-end half of the async integration (the call-start half is
+        ``sdk.fetch(context_mode="conversation-summary")``).
+
+        ``conversation_id`` is an **arbitrary client string** (e.g. a call id or
+        ``"{phone}:{call_start_iso}"``). Unlike ``record_message``, it is
+        **not** validated as a UUID client-side — the server coerces it and
+        echoes the original back as ``external_conversation_id``.
+
+        The push is idempotent on ``(conversation_id, transcript)``:
+        - re-pushing the identical transcript returns ``status="duplicate"``
+          with the original ``ingestion_id`` (retries are free);
+        - pushing a *different* transcript under the same ``conversation_id``
+          raises :class:`TranscriptConflictError` (409) — a call's transcript
+          is immutable; mint a new ``conversation_id`` for a new call.
+
+        Args:
+            conversation_id: Client's call/conversation id (any string).
+            user_id: Caller identity (e.g. an E.164 phone number).
+            transcript: Either a plain string (the server splits it on the
+                turn grammar) or a ``List[TranscriptTurn]`` (preferred — it
+                preserves per-turn timestamps and speaker labels).
+            customer_id: Required on B2B (strict-isolation) instances; omit on
+                B2C (``equals_customer``) where the server collapses it.
+            conversation_type: Free-form, ≤64 chars (e.g. "voice"|"text").
+            analysis: Client-supplied analysis JSON (≤64KB). Stored verbatim
+                and used as high-confidence extraction hints.
+            metadata: Open-ended metadata (≤64KB).
+            started_at: Conversation start time.
+            ended_at: Conversation end time.
+
+        Returns:
+            TranscriptIngestResponse with the coerced + external conversation
+            ids, the ``ingestion_id`` handle, ``status``, ``turns_recorded``,
+            ``summary_status`` and ``queued_at``.
+
+        Raises:
+            InvalidInputError: 400/422 (empty transcript; B2B missing
+                customer_id; oversized fields).
+            TranscriptConflictError: 409 — conflicting transcript for an
+                existing ``conversation_id``.
+            RateLimitError / InsufficientCreditsError: as applicable.
+        """
+        # NOTE: deliberately NO validate_conversation_id() here — the id is a
+        # free-form client string the server coerces (spec §4.1).
+        self._sdk._ensure_initialized()
+        correlation_id = generate_correlation_id(self._sdk.instance_id)
+        start_time = datetime.now(timezone.utc)
+
+        # Normalize the transcript into a JSON-serializable body value.
+        if isinstance(transcript, str):
+            transcript_payload: Any = transcript
+        else:
+            # Coerce plain dicts through the model too — otherwise raw
+            # datetime values inside dicts reach the JSON transport
+            # un-serialized and fail as a (retried) transient error.
+            transcript_payload = [
+                (t if isinstance(t, TranscriptTurn)
+                 else TranscriptTurn.model_validate(t)).model_dump(mode="json")
+                for t in transcript
+            ]
+
+        body: Dict[str, Any] = {
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+            "transcript": transcript_payload,
+        }
+        # Conditional body keys — omit unset optionals so the wire body stays
+        # minimal and the server applies its own defaults.
+        if customer_id is not None:
+            body["customer_id"] = customer_id
+        if conversation_type is not None:
+            body["conversation_type"] = conversation_type
+        if analysis is not None:
+            body["analysis"] = analysis
+        if metadata is not None:
+            body["metadata"] = metadata
+        if started_at is not None:
+            body["started_at"] = started_at.isoformat()
+        if ended_at is not None:
+            body["ended_at"] = ended_at.isoformat()
+
+        emit_memory_event(
+            self._sdk._telemetry_collector,
+            TelemetryEventType.CONVERSATION_INGEST,
+            correlation_id=correlation_id,
+            status="started",
+            scope="conversation",
+        )
+
+        try:
+            auth_context = await self._sdk._get_auth_context(correlation_id)
+            result = await self._sdk._http_transport.post(
+                "/v1/conversations/ingest",
+                auth_context=auth_context,
+                json=body,
+                correlation_id=correlation_id,
+            )
+            response = TranscriptIngestResponse.from_cloud_response(result)
+
+            latency_ms = int(
+                (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
+            )
+            emit_memory_event(
+                self._sdk._telemetry_collector,
+                TelemetryEventType.CONVERSATION_INGEST,
+                correlation_id=correlation_id,
+                latency_ms=latency_ms,
+                status="success",
+                scope="conversation",
+            )
+            return response
+
+        except Exception as e:
+            latency_ms = int(
+                (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
+            )
+            emit_memory_event(
+                self._sdk._telemetry_collector,
+                TelemetryEventType.CONVERSATION_INGEST,
+                correlation_id=correlation_id,
+                latency_ms=latency_ms,
+                status="error",
+                error_code=type(e).__name__,
+                scope="conversation",
+            )
+            raise
 
 
 class ConversationContextInterface:
@@ -1946,6 +2119,13 @@ class ConversationContextInterface:
 
         Returns:
             CompactionTriggerResponse with compaction_id and status
+
+        .. versionchanged:: 0.4.0
+            A "Compaction already in progress" 409 is now raised as a
+            **permanent** :class:`ConflictError` immediately, instead of being
+            retried as a transient error and eventually surfacing as one. This
+            is intentional — a 409 here means another compaction already holds
+            the lock, and retrying cannot change that.
         """
         self._sdk._ensure_initialized()
         validate_conversation_id(conversation_id)
@@ -2317,6 +2497,78 @@ class UserInterface:
         self._sdk = sdk
         self.context = UserContextInterface(sdk)
 
+    async def get_profile(
+        self,
+        user_id: str,
+        customer_id: Optional[str] = None,
+    ) -> UserProfileModel:
+        """Fetch a caller's profile document (client-defined critical
+        attributes + free-text overview).
+
+        Convenience getter over ``GET /v1/users/{user_id}/profile``. The same
+        document is also returned inline by
+        ``sdk.fetch(context_mode="conversation-summary", include_profile=True)``;
+        use this getter for dashboardless debugging or standalone profile reads.
+
+        Args:
+            user_id: Caller identity (e.g. an E.164 phone number).
+            customer_id: Required on B2B (strict-isolation) instances so the
+                profile row resolves to the right tenant; omit on B2C.
+
+        Returns:
+            UserProfileModel (``.attributes``, ``.overview``, ``.extras``,
+            ``.meta``, plus ``.raw`` for the full document).
+
+        Raises:
+            ContextNotFoundError: 404 — no profile exists for this user yet.
+        """
+        self._sdk._ensure_initialized()
+        correlation_id = generate_correlation_id(self._sdk.instance_id)
+        start_time = datetime.now(timezone.utc)
+
+        params: Dict[str, Any] = {}
+        if customer_id is not None:
+            params["customer_id"] = customer_id
+
+        try:
+            auth_context = await self._sdk._get_auth_context(correlation_id)
+            result = await self._sdk._http_transport.get(
+                f"/v1/users/{user_id}/profile",
+                auth_context=auth_context,
+                params=params or None,
+                correlation_id=correlation_id,
+            )
+            profile_doc = result.get("profile") if isinstance(result, dict) else None
+            response = UserProfileModel.from_cloud_response(profile_doc or {})
+
+            latency_ms = int(
+                (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
+            )
+            emit_memory_event(
+                self._sdk._telemetry_collector,
+                TelemetryEventType.USER_PROFILE_GET,
+                correlation_id=correlation_id,
+                latency_ms=latency_ms,
+                status="success",
+                scope="user",
+            )
+            return response
+
+        except Exception as e:
+            latency_ms = int(
+                (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
+            )
+            emit_memory_event(
+                self._sdk._telemetry_collector,
+                TelemetryEventType.USER_PROFILE_GET,
+                correlation_id=correlation_id,
+                latency_ms=latency_ms,
+                status="error",
+                error_code=type(e).__name__,
+                scope="user",
+            )
+            raise
+
 
 class UserContextInterface:
     """User context operations."""
@@ -2334,6 +2586,9 @@ class UserContextInterface:
         mode: str = "fast",
         precision_level: str = "high",
         customer_id: Optional[str] = None,
+        context_mode: str = "in-conversation",
+        include_profile: bool = True,
+        last_n_conversations: int = 1,
     ) -> ContextResponse:
         """Fetch context for a user.
 
@@ -2348,9 +2603,20 @@ class UserContextInterface:
                 pass; "medium" skips it for faster, less precisely filtered results.
             customer_id: Optional customer ID. Required for B2B instances.
                 For B2C instances, this is auto-resolved from user_id.
+            context_mode: ``"in-conversation"`` (default) returns the usual
+                item lists (facts/preferences/…). ``"conversation-summary"``
+                instead returns a caller ``profile`` and summaries of the last
+                ``last_n_conversations`` calls — the call-start read for async
+                integrations. In summary mode ``search_query``, ``mode`` and
+                ``precision_level`` are ignored (it is an assembly, not a
+                retrieval), and ``customer_id`` is required on B2B instances.
+            include_profile: Summary mode only — include the caller profile.
+            last_n_conversations: Summary mode only — how many previous
+                conversations to summarize (0–20).
 
         Returns:
-            ContextResponse with user facts, preferences, etc.
+            ContextResponse. In summary mode the item lists are empty and
+            ``.profile`` / ``.conversations`` are populated.
         """
         self._sdk._ensure_initialized()
 
@@ -2363,6 +2629,18 @@ class UserContextInterface:
             raise InvalidInputError(
                 f"Invalid precision_level '{precision_level}'. Must be one of: {valid_precision}"
             )
+        valid_context_modes = ("in-conversation", "conversation-summary")
+        if context_mode not in valid_context_modes:
+            raise InvalidInputError(
+                f"Invalid context_mode '{context_mode}'. "
+                f"Must be one of: {valid_context_modes}"
+            )
+        if not isinstance(last_n_conversations, int) or isinstance(last_n_conversations, bool):
+            raise InvalidInputError("last_n_conversations must be an integer")
+        if last_n_conversations < 0 or last_n_conversations > 20:
+            raise InvalidInputError("last_n_conversations must be between 0 and 20")
+
+        summary_mode = context_mode == "conversation-summary"
 
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = datetime.now(timezone.utc)
@@ -2375,6 +2653,11 @@ class UserContextInterface:
             "types": types,
             "mode": mode,
             "precision_level": precision_level,
+            # Summary mode is a distinct cache key so it can never be served a
+            # cached in-conversation items bundle (and vice-versa).
+            "context_mode": context_mode,
+            "include_profile": include_profile if summary_mode else None,
+            "last_n_conversations": last_n_conversations if summary_mode else None,
         }
 
         # Check anticipation cache first (bundles pre-fetched via gRPC stream).
@@ -2438,6 +2721,13 @@ class UserContextInterface:
                     body["precision_level"] = precision_level
                 if skip_server_st:
                     body["include_conversation_context"] = False
+                # Conditional body keys — only send the summary-mode params in
+                # summary mode, so an in-conversation fetch is byte-identical to
+                # today (zero regression).
+                if summary_mode:
+                    body["context_mode"] = context_mode
+                    body["include_profile"] = include_profile
+                    body["last_n_conversations"] = last_n_conversations
                 result = await self._sdk._http_transport.post(
                     "/v1/context/user/fetch",
                     auth_context=auth_context,
@@ -2454,6 +2744,11 @@ class UserContextInterface:
                 context_data = result.get("context", {})
                 if "conversation_context" in result:
                     context_data["conversation_context"] = result["conversation_context"]
+                # Splice the C4 summary siblings (profile / conversations) into
+                # context_data so ContextResponse.from_cloud_response types them.
+                for _summary_key in ("profile", "conversations"):
+                    if _summary_key in result:
+                        context_data[_summary_key] = result[_summary_key]
                 response = ContextResponse.from_cloud_response(context_data, metadata)
                 # skip_server_st → server omits conversation_context; the local
                 # ST block is spliced back on by _overlay_local_recent_turns in
