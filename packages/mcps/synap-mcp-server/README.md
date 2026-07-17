@@ -19,7 +19,7 @@ verbatim to `synap-cloud`, which owns auth.
 | `recall_context` | `POST /v1/context/{client\|user\|customer}/fetch` (`mode=fast`) | Hot path; no IDs ⇒ client scope. Optional `user_id`/`customer_id`. |
 | `list_recent_memories` | broad `/v1/context/.../fetch` (no query) | Debug / "test my memory". Optional `user_id`/`customer_id`. |
 
-**Scoping (PRD §6).** Pass no IDs ⇒ **client scope** (shared per credential). Pass `user_id` (and/or `customer_id`) on **both** `log_exchange` and `recall_context` to keep each end-user's memory separate — fill these from an n8n expression / Gumloop input. Note: client-scope writes are not surfaced on the dashboard Memories page (relational), so per-user scoping is recommended when dashboard visibility matters.
+**Scoping.** Pass no IDs ⇒ **client scope** (shared per credential). Pass `user_id` (and/or `customer_id`) on **both** `log_exchange` and `recall_context` to keep each end-user's memory separate — fill these from an n8n expression / Gumloop input. Note: client-scope writes are not surfaced on the dashboard Memories page (relational), so per-user scoping is recommended when dashboard visibility matters.
 
 **Host header.** The server disables the MCP transport's DNS-rebinding check (it sits behind a proxy + Bearer auth), so any reverse proxy can forward the real `Host` — no Host-rewrite hack needed.
 
@@ -53,5 +53,5 @@ pytest -q
 No Synap API key is configured on the server — the end user's key arrives per-request as a
 Bearer token.
 
-See [`../../synap/docs/mcp-server/`](../../synap/docs/mcp-server/) for the deployment plan,
-implementation plan, test cases, and the Gumloop/n8n testing runbook.
+See the [Synap documentation](https://www.maximem.ai/docs) for platform setup guides
+(Gumloop, n8n) and deployment details.

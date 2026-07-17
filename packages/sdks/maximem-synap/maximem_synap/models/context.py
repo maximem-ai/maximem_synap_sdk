@@ -154,6 +154,164 @@ class ConversationContextModel(BaseModel):
     conversation_id: Optional[str] = None
 
 
+# User Profile (C3) + Conversation Summary (C4) typed models
+class ProfileAttributeModel(BaseModel):
+    """A single critical-attribute value on a caller profile (spec §5.2).
+
+    Typed + raw escape hatch; unknown fields tolerated.
+    """
+
+    value: Any = None
+    confidence: Optional[float] = None
+    updated_at: Optional[str] = None
+    source_conversation_id: Optional[str] = None
+
+    model_config = {"extra": "allow"}
+
+    def __init__(self, **data):
+        raw_data = data.pop("raw_data", data.copy())
+        super().__init__(**data)
+        object.__setattr__(self, "_raw_data", raw_data)
+
+    @property
+    def raw(self) -> Dict[str, Any]:
+        return getattr(self, "_raw_data", {})
+
+    @classmethod
+    def from_cloud_response(cls, data: Any) -> "ProfileAttributeModel":
+        if not isinstance(data, dict):
+            return cls(value=data, raw_data={"value": data})
+        return cls(
+            value=data.get("value"),
+            confidence=data.get("confidence"),
+            updated_at=data.get("updated_at"),
+            source_conversation_id=data.get("source_conversation_id"),
+            raw_data=data,
+        )
+
+
+class UserProfileModel(BaseModel):
+    """A caller profile document (spec §5.2): client-defined critical
+    attributes + a free-text overview + stable extras.
+
+    Typed access to ``attributes``/``overview``, plus a ``.raw`` escape hatch
+    for the full document (including ``_meta``).
+    """
+
+    attributes: Dict[str, ProfileAttributeModel] = Field(default_factory=dict)
+    overview: Optional[str] = None
+    extras: Dict[str, Any] = Field(default_factory=dict)
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+    model_config = {"extra": "allow"}
+
+    def __init__(self, **data):
+        raw_data = data.pop("raw_data", data.copy())
+        super().__init__(**data)
+        object.__setattr__(self, "_raw_data", raw_data)
+
+    @property
+    def raw(self) -> Dict[str, Any]:
+        return getattr(self, "_raw_data", {})
+
+    @classmethod
+    def from_cloud_response(cls, data: Any) -> "UserProfileModel":
+        """Build from the ``profile`` document.
+
+        Tolerates both the flat document (``{attributes, overview, ...}``) and
+        the storage-wrapped shape (``{"profile": {attributes, ...}}``).
+        """
+        if not isinstance(data, dict):
+            return cls(raw_data={} if data is None else {"value": data})
+        doc = data
+        if "attributes" not in doc and isinstance(doc.get("profile"), dict):
+            doc = doc["profile"]
+        attributes: Dict[str, ProfileAttributeModel] = {}
+        for name, attr in (doc.get("attributes") or {}).items():
+            attributes[name] = ProfileAttributeModel.from_cloud_response(attr)
+        return cls(
+            attributes=attributes,
+            overview=doc.get("overview"),
+            extras=doc.get("extras") or {},
+            meta=doc.get("_meta") or doc.get("meta") or {},
+            raw_data=data,
+        )
+
+
+class ConversationSummaryModel(BaseModel):
+    """A previous-conversation summary (spec §6.3 ConversationSummaryPayload).
+
+    Returned by ``context_mode="conversation-summary"`` fetches: what a prior
+    call was about and how it progressed.
+    """
+
+    conversation_id: str
+    external_conversation_id: Optional[str] = None
+    conversation_type: Optional[str] = None
+    started_at: Optional[datetime] = None
+    ended_at: Optional[datetime] = None
+    last_message_at: Optional[datetime] = None
+    message_count: int = 0
+    summary_status: str = "pending"  # available | pending | failed
+    summary: Optional[Dict[str, Any]] = None
+    classification: Optional[Dict[str, Any]] = None
+    analysis: Optional[Dict[str, Any]] = None
+    compaction_version: Optional[int] = None
+    compacted_at: Optional[datetime] = None
+
+    model_config = {"extra": "allow"}
+
+    def __init__(self, **data):
+        raw_data = data.pop("raw_data", data.copy())
+        super().__init__(**data)
+        object.__setattr__(self, "_raw_data", raw_data)
+
+    @property
+    def raw(self) -> Dict[str, Any]:
+        return getattr(self, "_raw_data", {})
+
+    @classmethod
+    def from_cloud_response(cls, data: Dict[str, Any]) -> "ConversationSummaryModel":
+        return cls(
+            conversation_id=str(data.get("conversation_id", "")),
+            external_conversation_id=data.get("external_conversation_id"),
+            conversation_type=data.get("conversation_type"),
+            started_at=_parse_iso_datetime(data.get("started_at")),
+            ended_at=_parse_iso_datetime(data.get("ended_at")),
+            last_message_at=_parse_iso_datetime(data.get("last_message_at")),
+            message_count=int(data.get("message_count", 0) or 0),
+            summary_status=data.get("summary_status", "pending"),
+            summary=data.get("summary"),
+            classification=data.get("classification"),
+            analysis=data.get("analysis"),
+            compaction_version=data.get("compaction_version"),
+            compacted_at=_parse_iso_datetime(data.get("compacted_at")),
+            raw_data=data,
+        )
+
+    def overview_text(self) -> Optional[str]:
+        """Best-effort narrative overview from the ``summary`` payload."""
+        if not isinstance(self.summary, dict):
+            return None
+        for key in ("narrative_summary", "overview", "narrative", "summary"):
+            val = self.summary.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        return None
+
+    def outcome_text(self) -> Optional[str]:
+        """Best-effort outcome/classification label for prompt rendering."""
+        if not isinstance(self.classification, dict):
+            return None
+        parts = [
+            self.classification.get("primary_category"),
+            self.classification.get("subcategory"),
+            self.classification.get("objective"),
+        ]
+        joined = " / ".join(p for p in parts if isinstance(p, str) and p.strip())
+        return joined or None
+
+
 # Response Wrappers (Hybrid: typed + raw)
 class ContextResponse(BaseModel):
     """Response from context fetch operations.
@@ -167,6 +325,9 @@ class ContextResponse(BaseModel):
     emotions: List[Emotion] = Field(default_factory=list)
     temporal_events: List[TemporalEvent] = Field(default_factory=list)
     conversation_context: Optional[ConversationContextModel] = None
+    # C4 conversation-summary sections (populated only in summary mode).
+    profile: Optional["UserProfileModel"] = None
+    conversations: Optional[List["ConversationSummaryModel"]] = None
     metadata: ResponseMetadata
 
     # Raw response for forward compatibility
@@ -281,6 +442,24 @@ class ContextResponse(BaseModel):
         if conv_ctx_data and isinstance(conv_ctx_data, dict):
             conv_ctx = ConversationContextModel(**conv_ctx_data)
 
+        # C4 conversation-summary siblings (spec §6.3). Built via explicit
+        # factories — never model_validate on the wire dict — so an older SDK
+        # tolerates a newer server. Absent keys leave these None (regression:
+        # a normal fetch is unchanged).
+        profile = None
+        prof_data = data.get("profile")
+        if isinstance(prof_data, dict):
+            profile = UserProfileModel.from_cloud_response(prof_data)
+
+        conversations = None
+        conv_list = data.get("conversations")
+        if isinstance(conv_list, list):
+            conversations = [
+                ConversationSummaryModel.from_cloud_response(c)
+                for c in conv_list
+                if isinstance(c, dict)
+            ]
+
         return cls(
             facts=facts,
             preferences=preferences,
@@ -288,6 +467,8 @@ class ContextResponse(BaseModel):
             emotions=emotions,
             temporal_events=temporal_events,
             conversation_context=conv_ctx,
+            profile=profile,
+            conversations=conversations,
             metadata=metadata,
             raw_data=data,
         )
@@ -400,6 +581,10 @@ class UnifiedContextResponse(BaseModel):
 
     conversation_context: Optional[ContextForPromptResponse] = None
 
+    # C4 conversation-summary sections, carried from the user-scope sub-fetch.
+    profile: Optional["UserProfileModel"] = None
+    conversations: Optional[List["ConversationSummaryModel"]] = None
+
     formatted_context: Optional[str] = None
 
     # Metadata
@@ -433,11 +618,20 @@ class UnifiedContextResponse(BaseModel):
         scope_map: Dict[str, str] = {}
         scopes_queried: List[str] = []
         first_metadata: Optional[ResponseMetadata] = None
+        profile: Optional["UserProfileModel"] = None
+        conversations: Optional[List["ConversationSummaryModel"]] = None
 
         for scope_name, response in scope_results:
             scopes_queried.append(scope_name)
             if first_metadata is None:
                 first_metadata = response.metadata
+
+            # Carry C4 summary sections up from whichever scope produced them
+            # (the user-scope sub-fetch — see the sdk.fetch fan-out rule).
+            if profile is None and getattr(response, "profile", None) is not None:
+                profile = response.profile
+            if conversations is None and getattr(response, "conversations", None) is not None:
+                conversations = response.conversations
 
             for fact in response.facts:
                 if fact.id not in seen_ids:
@@ -481,6 +675,8 @@ class UnifiedContextResponse(BaseModel):
             scopes_queried=scopes_queried,
             total_items=total,
             metadata=first_metadata,
+            profile=profile,
+            conversations=conversations,
         )
 
     def format_for_prompt(
@@ -566,10 +762,76 @@ class UnifiedContextResponse(BaseModel):
                     "### Conversation History\n" + self.conversation_context.formatted_context
                 )
 
-        if not sections:
+        # Assemble top-level blocks. The "## User Context" block is emitted
+        # byte-for-byte as before; the C4 sections append after it only when
+        # present, so output is unchanged whenever profile/conversations are
+        # absent (regression-tested).
+        blocks: List[str] = []
+        if sections:
+            blocks.append("## User Context\n" + "\n\n".join(sections))
+
+        profile_block = self._format_profile_block()
+        if profile_block:
+            blocks.append(profile_block)
+
+        conversations_block = self._format_conversations_block()
+        if conversations_block:
+            blocks.append(conversations_block)
+
+        if not blocks:
             return ""
 
-        return "## User Context\n" + "\n\n".join(sections)
+        return "\n\n".join(blocks)
+
+    def _format_profile_block(self) -> Optional[str]:
+        """Render the ``## Caller Profile`` section, or None when empty."""
+        profile = self.profile
+        if profile is None:
+            return None
+        lines: List[str] = []
+        for name, attr in (profile.attributes or {}).items():
+            value = attr.value if attr is not None else None
+            if isinstance(value, (list, tuple)):
+                value_str = ", ".join(str(v) for v in value)
+            elif value is None:
+                value_str = ""
+            else:
+                value_str = str(value)
+            lines.append(f"- {name}: {value_str}".rstrip())
+        body_parts: List[str] = []
+        if lines:
+            body_parts.append("\n".join(lines))
+        if profile.overview:
+            body_parts.append(profile.overview)
+        if not body_parts:
+            return None
+        return "## Caller Profile\n" + "\n\n".join(body_parts)
+
+    def _format_conversations_block(self) -> Optional[str]:
+        """Render the ``## Previous Conversations`` section, or None."""
+        conversations = self.conversations
+        if not conversations:
+            return None
+        call_blocks: List[str] = []
+        for conv in conversations:
+            when = conv.started_at or conv.last_message_at or conv.ended_at
+            when_str = when.strftime("%Y-%m-%d") if when else "unknown date"
+            header = f"### Call on {when_str}"
+            if conv.conversation_type:
+                header += f" ({conv.conversation_type})"
+            call_lines = [header]
+            overview = conv.overview_text()
+            if overview:
+                call_lines.append(f"Overview: {overview}")
+            outcome = conv.outcome_text()
+            if outcome:
+                call_lines.append(f"Outcome: {outcome}")
+            if overview is None and outcome is None:
+                # No compaction yet / failed — still tell the model the call
+                # happened so it can acknowledge the prior contact.
+                call_lines.append(f"Status: {conv.summary_status}")
+            call_blocks.append("\n".join(call_lines))
+        return "## Previous Conversations\n" + "\n\n".join(call_blocks)
 
 
 # Backward compatibility - deprecated dataclass-style models

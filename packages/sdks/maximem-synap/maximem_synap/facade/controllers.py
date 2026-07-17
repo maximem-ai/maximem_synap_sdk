@@ -54,7 +54,6 @@ class ConversationContextController:
         max_results: int = 10,
         types: Optional[List["ContextType"]] = None,
         mode: str = "fast",
-        precision_level: str = "high",
     ):
         """Fetch context for a conversation.
 
@@ -78,7 +77,6 @@ class ConversationContextController:
             "max_results": max_results,
             "types": [t.value for t in types] if types else ["all"],
             "mode": mode,
-            **({"precision_level": precision_level} if precision_level != "high" else {}),
         }
 
         result = await self._transport.post(
@@ -220,8 +218,19 @@ class UserContextController:
         types: Optional[List["ContextType"]] = None,
         mode: str = "fast",
         precision_level: str = "high",
+        customer_id: Optional[str] = None,
+        include_conversation_context: bool = True,
+        context_mode: str = "in-conversation",
+        include_profile: bool = True,
+        last_n_conversations: int = 1,
     ):
         """Fetch context for a user.
+
+        Full param parity with ``sdk.user.context.fetch`` (the facade layer
+        previously lagged behind — no ``precision_level``,
+        ``include_conversation_context`` or the summary-mode params). In
+        ``context_mode="conversation-summary"`` the parsed response carries
+        ``.profile`` and ``.conversations``.
 
         Args:
             user_id: User identifier
@@ -230,6 +239,12 @@ class UserContextController:
             max_results: Maximum number of results
             types: Optional list of context types to retrieve
             mode: "fast" or "accurate" retrieval mode
+            precision_level: "high" (default) or "medium"
+            customer_id: Optional customer id (required on B2B)
+            include_conversation_context: Include compacted history + recent turns
+            context_mode: "in-conversation" (default) or "conversation-summary"
+            include_profile: Summary mode only — include the caller profile
+            last_n_conversations: Summary mode only — previous conversations (0–20)
 
         Returns:
             Parsed context response
@@ -245,8 +260,18 @@ class UserContextController:
             "max_results": max_results,
             "types": [t.value for t in types] if types else ["all"],
             "mode": mode,
-            **({"precision_level": precision_level} if precision_level != "high" else {}),
         }
+        if customer_id is not None:
+            payload["customer_id"] = customer_id
+        if precision_level != "high":
+            payload["precision_level"] = precision_level
+        if not include_conversation_context:
+            payload["include_conversation_context"] = False
+        # Conditional summary-mode keys — omitted entirely in the default mode.
+        if context_mode == "conversation-summary":
+            payload["context_mode"] = context_mode
+            payload["include_profile"] = include_profile
+            payload["last_n_conversations"] = last_n_conversations
 
         result = await self._transport.post(
             "/v1/context/user/fetch",
@@ -284,7 +309,6 @@ class CustomerContextController:
         max_results: int = 10,
         types: Optional[List["ContextType"]] = None,
         mode: str = "fast",
-        precision_level: str = "high",
     ):
         """Fetch context for a customer.
 
@@ -310,7 +334,6 @@ class CustomerContextController:
             "max_results": max_results,
             "types": [t.value for t in types] if types else ["all"],
             "mode": mode,
-            **({"precision_level": precision_level} if precision_level != "high" else {}),
         }
 
         result = await self._transport.post(
@@ -348,7 +371,6 @@ class ClientContextController:
         max_results: int = 10,
         types: Optional[List["ContextType"]] = None,
         mode: str = "fast",
-        precision_level: str = "high",
     ):
         """Fetch context for a client (org-level).
 
@@ -372,7 +394,6 @@ class ClientContextController:
             "max_results": max_results,
             "types": [t.value for t in types] if types else ["all"],
             "mode": mode,
-            **({"precision_level": precision_level} if precision_level != "high" else {}),
         }
 
         result = await self._transport.post(

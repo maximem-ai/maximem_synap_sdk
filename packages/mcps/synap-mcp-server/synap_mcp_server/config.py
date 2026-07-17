@@ -16,12 +16,14 @@ class Settings:
     environment: str = os.getenv("ENVIRONMENT", "production")
     # Browser origins allowed to call the MCP endpoint directly (the dashboard's
     # in-app "Test my memory"). Server-to-server callers (Gumloop/n8n) are unaffected.
+    # Default is dev-only; production/staging MUST inject the real dashboard origins via
+    # MCP_CORS_ALLOW_ORIGINS (see docker-compose*.yml), mirroring the backend CORS_ORIGINS
+    # pattern — no deployment hostnames are baked into this open-source source.
     cors_allow_origins: tuple = tuple(
         o.strip()
         for o in os.getenv(
             "MCP_CORS_ALLOW_ORIGINS",
-            "https://synap.maximem.ai,https://synap-admin.maximem.ai,"
-            "http://localhost:3000,http://localhost:5173",
+            "http://localhost:3000,http://localhost:3001,http://localhost:5173",
         ).split(",")
         if o.strip()
     )

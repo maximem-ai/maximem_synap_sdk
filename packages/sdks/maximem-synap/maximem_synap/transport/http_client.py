@@ -21,6 +21,8 @@ from ..models.errors import (
     InvalidInputError,
     ContextNotFoundError,
     InsufficientCreditsError,
+    ConflictError,
+    TranscriptConflictError,
 )
 from ..auth.models import AuthContext
 from ..utils.correlation import generate_correlation_id
@@ -255,6 +257,32 @@ class HTTPTransport:
 
         if response.status_code == 404:
             raise ContextNotFoundError(error_message, correlation_id=correlation_id)
+
+        if response.status_code == 409:
+            # Conflict is PERMANENT — never retried (unlike the catch-all
+            # transient below). Discriminate on the structured error body
+            # {"detail": {"code": "transcript_conflict", ...}} so a transcript
+            # immutability conflict maps to TranscriptConflictError; any other
+            # 409 (e.g. compact()'s "already in progress") maps to the generic
+            # permanent ConflictError.
+            detail = error_body.get("detail") if isinstance(error_body, dict) else None
+            if isinstance(detail, dict):
+                conflict_message = detail.get("message") or str(detail)
+                if detail.get("code") == "transcript_conflict":
+                    raise TranscriptConflictError(
+                        conflict_message, correlation_id=correlation_id
+                    )
+                raise ConflictError(conflict_message, correlation_id=correlation_id)
+            raise ConflictError(
+                error_message if isinstance(error_message, str) else "Conflict",
+                correlation_id=correlation_id,
+            )
+
+        if response.status_code == 422:
+            # Validation failure (e.g. an out-of-range precision_level or
+            # last_n_conversations). Permanent — surface as InvalidInputError
+            # rather than falling through to the retryable catch-all.
+            raise InvalidInputError(error_message, correlation_id=correlation_id)
 
         if response.status_code == 429:
             retry_after = response.headers.get("Retry-After")

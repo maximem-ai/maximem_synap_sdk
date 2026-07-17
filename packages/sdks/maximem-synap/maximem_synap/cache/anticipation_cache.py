@@ -1,6 +1,8 @@
 """In-memory TTL cache for context bundles pushed over gRPC."""
 
 import logging
+import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -11,6 +13,63 @@ logger = logging.getLogger("synap.sdk.cache.anticipation")
 
 _DEFAULT_BM25_THRESHOLD = 1.5
 _DEFAULT_NOVEL_TERM_THRESHOLD = 0.45
+
+
+def _honor_ttl_hint_enabled() -> bool:
+    """WS3 of the echo-poisoning plan: when on, a bundle's server-sent
+    ttl_hint_seconds bounds its lifetime (it can only SHORTEN the global
+    TTL, never extend it) and cache hits stop renewing hinted bundles'
+    leases. Default OFF — eviction behavior is byte-identical to today
+    (global TTL only, LRU refresh on hit)."""
+    return os.environ.get("SYNAP_SDK_CACHE_HONOR_TTL_HINT", "false").lower() in ("true", "1", "yes")
+
+def recall_bypass_enabled() -> bool:
+    """WS4 of the playground query-hygiene plan: when on, queries that are
+    explicitly asking the agent to RECALL something from memory ("remind me…",
+    "what do you have on file…", "where am I located again?") never serve from
+    the anticipation cache — they always fall through to a fresh fetch.
+
+    Rationale: for a recall-shaped question, a stale bundle false-hit is
+    catastrophic (the agent answers "I don't see that" while the store holds
+    the fact — the BZQR6J eval's cross-session failure mode), while the cost
+    of bypassing is only cold-fetch latency on a turn the user expects the
+    agent to go look something up. Stem coverage can't gate this (measured
+    false hits at coverage=1.00). Default OFF — lookup behavior is
+    byte-identical to today."""
+    return os.environ.get("SYNAP_SDK_CACHE_RECALL_BYPASS", "false").lower() in ("true", "1", "yes")
+
+
+# Conservative markers of a recall-shaped question. Matched case-insensitively
+# against each raw query string. Deliberately phrase-level (not single words)
+# so ordinary task queries ("book me a ride again") don't over-bypass; "again"
+# alone is NOT a marker. Over-matching costs one cloud fetch of latency;
+# under-matching risks a wrong "I don't have that" answer — so ties break
+# toward including a pattern.
+_RECALL_QUERY_PATTERNS = (
+    re.compile(r"\bremind me\b", re.I),
+    re.compile(r"\bon file\b", re.I),
+    re.compile(r"\b(your|my|the) records\b", re.I),
+    re.compile(r"\bdo you (have|know|remember|recall|see)\b", re.I),
+    re.compile(r"\bwhat (do|did) (i|you) (say|tell|mention|have)\b", re.I),
+    re.compile(r"\bwhat('s| is) my\b", re.I),
+    re.compile(r"\bwhere (am i|do i live)\b", re.I),
+    re.compile(r"\bhow long have i\b", re.I),
+    re.compile(r"\bwhich of my\b", re.I),
+    re.compile(r"\bwhat .{0,40}\b(again|earlier|last time|previously|yesterday)\b", re.I),
+    re.compile(r"\bwill you use to (contact|reach|notify)\b", re.I),
+)
+
+
+def is_recall_query(search_query: Optional[List[str]]) -> bool:
+    """True when any query string looks like an explicit memory-recall ask."""
+    for q in search_query or []:
+        if not q:
+            continue
+        for pat in _RECALL_QUERY_PATTERNS:
+            if pat.search(q):
+                return True
+    return False
+
 
 # The novel-term gate only fires once the corpus has enough vocabulary
 # for the ratio to be statistically meaningful. Below this size, BM25's
@@ -364,6 +423,42 @@ class AnticipationCache:
         if not has_query:
             return self._freshness_lookup(entity_id)
 
+        # WS4 recall bypass: an explicit memory-recall question must never be
+        # answered from a pre-fetched bundle — a stale false-hit here makes the
+        # agent deny a fact the store holds. Fires BEFORE BM25 scoring: the
+        # measured failure mode hit at score 2.86 / coverage 1.00, so no
+        # score-side gate can catch it.
+        if recall_bypass_enabled() and is_recall_query(search_query):
+            logger.info(
+                "Cache BYPASS (recall-shaped query): query=%s",
+                [q[:80] for q in search_query if q][:3],
+            )
+            self._fire_lookup_hook({
+                "search_query": list(search_query or []),
+                "entity_id": entity_id,
+                "customer_id": customer_id,
+                "client_id": client_id,
+                "conversation_id": conversation_id,
+                "cache_state": self._snapshot_state(),
+                "scope_filter_request": {
+                    "entity_id": entity_id,
+                    "customer_id": customer_id,
+                    "client_id": client_id,
+                    "conversation_id": conversation_id,
+                },
+                "scope_filter_accepted": sorted(
+                    self._build_accepted_scope(entity_id, customer_id, client_id)
+                ),
+                "novel_term_ratio": None,
+                "bm25_threshold": None,
+                "bm25_query_tokens": [],
+                "items_picked": [],
+                "items_rejected": [],
+                "hit": False,
+                "exit_reason": "recall_bypass",
+            })
+            return None
+
         return self._item_lookup(
             search_query, entity_id, conversation_id, max_items,
             customer_id=customer_id, client_id=client_id,
@@ -517,6 +612,41 @@ class AnticipationCache:
         scored_items.sort(key=lambda x: -x[0])
         top_items = scored_items[:max_items]
 
+        # Coverage: fraction of the query's stems present in the picked
+        # items. A bundle can clear the BM25 threshold on one shared token
+        # ("account") while lacking the asked-for fact entirely — the false
+        # HIT behind the eval's "forgot the name" failure. Always computed
+        # and logged (telemetry-first); ENFORCED only when
+        # SYNAP_SDK_CACHE_COVERAGE_MIN is explicitly set, so default
+        # behavior is byte-identical.
+        picked_stems: Set[str] = set()
+        for _, item in top_items:
+            picked_stems.update(item.tokens)
+        coverage = (
+            len(unique_stems & picked_stems) / len(unique_stems)
+            if unique_stems else 1.0
+        )
+        hook_payload["coverage"] = round(float(coverage), 4)
+
+        coverage_min_raw = os.environ.get("SYNAP_SDK_CACHE_COVERAGE_MIN", "").strip()
+        if coverage_min_raw:
+            try:
+                coverage_min = float(coverage_min_raw)
+            except ValueError:
+                coverage_min = None  # malformed setting: observe-only
+            if coverage_min is not None and coverage < coverage_min:
+                # Gate BEFORE any side effects (no stored_at refresh) so a
+                # rejected lookup leaves the cache state untouched.
+                logger.info(
+                    "Cache MISS (coverage): coverage=%.2f min=%.2f best=%.2f query=%s",
+                    coverage, coverage_min,
+                    float(top_items[0][0]) if top_items else 0.0,
+                    search_query[:80] if search_query else None,
+                )
+                hook_payload["exit_reason"] = "coverage_gate"
+                self._fire_lookup_hook(hook_payload)
+                return None
+
         items_by_type: Dict[str, list] = {}
         for score, item in top_items:
             items_by_type.setdefault(item.item_type, []).append(item.item_dict)
@@ -524,9 +654,17 @@ class AnticipationCache:
         bundle_ids_used = {item.bundle_id for _, item in top_items}
 
         now = time.monotonic()
+        refresh_on_hit = not _honor_ttl_hint_enabled()
         for bid in bundle_ids_used:
             if bid in self._entries:
-                self._entries[bid].stored_at = now
+                entry = self._entries[bid]
+                # With TTL-hint honoring on, hinted bundles must age out on
+                # their clock — a hit must not renew a stale snapshot's lease
+                # (that lease-renewal is how a pre-knowledge-update bundle
+                # kept serving a retired value indefinitely under steady
+                # traffic). Un-hinted bundles keep today's LRU refresh.
+                if refresh_on_hit or entry.ttl_hint_seconds <= 0:
+                    entry.stored_at = now
 
         base_entry = max(
             (self._entries[bid] for bid in bundle_ids_used if bid in self._entries),
@@ -537,10 +675,11 @@ class AnticipationCache:
         best_score = top_items[0][0]
 
         logger.info(
-            "Cache HIT: score=%.2f threshold=%.2f items=%d query=%s",
+            "Cache HIT: score=%.2f threshold=%.2f items=%d coverage=%.2f query=%s",
             best_score,
             effective_threshold,
             len(top_items),
+            coverage,
             search_query[:80] if search_query else None,
         )
 
@@ -717,12 +856,21 @@ class AnticipationCache:
             self._corpus_vocab.update(item.tokens)
             self._item_dedup.add(item.content.lower().strip()[:120])
 
+    def _effective_ttl(self, entry: "_CacheEntry", honor_hint: bool) -> float:
+        """Global TTL, optionally bounded by the bundle's server-sent hint.
+        The hint can only SHORTEN (a hint longer than the global TTL is
+        capped); missing/zero hint means the global TTL applies."""
+        if honor_hint and entry.ttl_hint_seconds > 0:
+            return min(self._ttl, entry.ttl_hint_seconds)
+        return self._ttl
+
     def _evict_expired(self) -> None:
         now = time.monotonic()
+        honor_hint = _honor_ttl_hint_enabled()
         expired = [
             bid
             for bid, entry in self._entries.items()
-            if now - entry.stored_at > self._ttl
+            if now - entry.stored_at > self._effective_ttl(entry, honor_hint)
         ]
         if expired:
             for bid in expired:

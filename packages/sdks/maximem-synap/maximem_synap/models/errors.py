@@ -122,6 +122,38 @@ class ContextNotFoundError(SynapPermanentError):
     pass
 
 
+class ConflictError(SynapPermanentError):
+    """The request conflicts with the current state of the resource (HTTP 409).
+
+    A 409 is **permanent** — retrying the identical request will keep
+    conflicting. This is why the transport does not retry it (unlike a
+    transient error). See :class:`TranscriptConflictError` for the specific,
+    discriminated transcript-immutability conflict.
+
+    Note: :meth:`sdk.conversation.compact`'s "Compaction already in progress"
+    409 now surfaces here as an immediate permanent error rather than being
+    retried as a transient one — an intentional semantic change (SDK 0.4.0).
+    """
+
+    pass
+
+
+class TranscriptConflictError(ConflictError):
+    """A transcript push conflicts with an already-ingested call (HTTP 409).
+
+    Raised when ``ingest_transcript`` is called with a ``conversation_id`` that
+    was previously ingested with a *different* transcript. A call's transcript
+    is immutable — mint a new ``conversation_id`` for a new call. The server
+    discriminates this from a generic conflict with a structured body
+    ``{"detail": {"code": "transcript_conflict", ...}}``.
+
+    Subclasses :class:`ConflictError`, so ``except ConflictError`` catches both
+    the generic and the transcript-specific conflict.
+    """
+
+    pass
+
+
 class SessionExpiredError(SynapPermanentError):
     """Session has expired and cannot be resumed."""
 

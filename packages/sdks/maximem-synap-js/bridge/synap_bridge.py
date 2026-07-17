@@ -445,6 +445,7 @@ async def handle_fetch_user_context(params: dict) -> dict:
         max_results=params.get("max_results", 10),
         types=params.get("types"),
         mode=params.get("mode", "fast"),
+        precision_level=params.get("precision_level", "high"),
     )
     append_step(timings, "context_fetch", step)
 
@@ -472,6 +473,7 @@ async def handle_fetch_customer_context(params: dict) -> dict:
         max_results=params.get("max_results", 10),
         types=params.get("types"),
         mode=params.get("mode", "fast"),
+        precision_level=params.get("precision_level", "high"),
     )
     append_step(timings, "context_fetch", step)
 
@@ -498,6 +500,7 @@ async def handle_fetch_client_context(params: dict) -> dict:
         max_results=params.get("max_results", 10),
         types=params.get("types"),
         mode=params.get("mode", "fast"),
+        precision_level=params.get("precision_level", "high"),
     )
     append_step(timings, "context_fetch", step)
 
