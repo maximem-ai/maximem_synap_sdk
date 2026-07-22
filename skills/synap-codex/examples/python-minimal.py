@@ -3,8 +3,10 @@ Minimal Synap example — Python, no framework.
 
 Run after:
     pip install maximem-synap
-    export SYNAP_INSTANCE_ID=inst_...
     export SYNAP_API_KEY=synap_...
+
+The instance is resolved from the API key on initialize(); SYNAP_INSTANCE_ID is
+only needed to pin a specific instance.
 """
 
 import asyncio
@@ -12,7 +14,7 @@ from maximem_synap import MaximemSynapSDK
 
 
 async def main():
-    sdk = MaximemSynapSDK()         # reads env vars
+    sdk = MaximemSynapSDK()         # reads SYNAP_API_KEY from the environment
     await sdk.initialize()
 
     try:

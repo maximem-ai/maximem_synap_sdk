@@ -45,7 +45,7 @@ Edge/Workers/Bun/Deno/Node-only-Lambda. Env vars: `SYNAP_API_KEY` (required),
 import os
 from maximem_synap import MaximemSynapSDK
 
-sdk = MaximemSynapSDK()        # reads env vars
+sdk = MaximemSynapSDK()        # reads SYNAP_API_KEY; instance resolved from the key
 await sdk.initialize()
 try:
     # ... use sdk ...
@@ -224,7 +224,7 @@ const model = synap.wrap(anthropic("claude-sonnet-4-6"), { userId: "alice" });
 
 ## Defaults to use unless told otherwise
 
-- Read env vars `SYNAP_INSTANCE_ID` and `SYNAP_API_KEY`. Never hardcode.
+- Read env var `SYNAP_API_KEY`. Never hardcode. `SYNAP_INSTANCE_ID` is optional — the instance is resolved from the key.
 - Ingestion: `mode="long-range"`, `document_type="ai-chat-conversation"`.
 - Retrieval: `mode="fast"`, `max_results=10`.
 - Always pass `user_id`. Add `customer_id` only when multi-tenant.

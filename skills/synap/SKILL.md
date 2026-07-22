@@ -112,10 +112,9 @@ import os
 from maximem_synap import MaximemSynapSDK
 
 sdk = MaximemSynapSDK(
-    instance_id=os.environ["SYNAP_INSTANCE_ID"],
     api_key=os.environ["SYNAP_API_KEY"],
 )
-await sdk.initialize()      # validates key, opens connection
+await sdk.initialize()      # validates key, resolves the instance, opens connection
 # ... use sdk ...
 await sdk.shutdown()        # flush telemetry, close connections
 ```
@@ -175,7 +174,7 @@ If the user's framework isn't in the list (rare), they wire `sdk.memories.create
 
 When generating code, default to:
 
-- Read environment variables `SYNAP_INSTANCE_ID` and `SYNAP_API_KEY`. Never hardcode.
+- Read the environment variable `SYNAP_API_KEY`. Never hardcode. `SYNAP_INSTANCE_ID` is optional — the instance is resolved from the key.
 - Ingestion `mode="long-range"`, `document_type="ai-chat-conversation"`.
 - Retrieval `mode="fast"`, `max_results=10`.
 - Always pass `user_id`. Add `customer_id` only if the user mentions multi-tenant / B2B / orgs.
