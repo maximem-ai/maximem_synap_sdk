@@ -114,6 +114,14 @@ class TestRecallHeuristic:
         "do you remember my seating preference?",
         "what did I say about my budget earlier?",
         "is my address still in your records?",
+        # 2026-07-16 eval register #11 — measured slipping past the gate:
+        "can you confirm my email address?",
+        "what's the best way to contact me with updates about my rides?",
+        "what name is linked to my Uber account?",
+        "can you verify my phone number?",
+        "which email are you going to use?",
+        "how will you reach me?",
+        "is there a phone number on my account?",
     ]
     NOT_RECALL = [
         "book a ride to the airport",

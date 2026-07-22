@@ -257,6 +257,9 @@ agent = ReActAgent.from_tools(tools, memory=memory)
 | Vercel AI SDK | [`@maximem/synap-vercel-adk`](packages/integrations/synap-vercel-adk/) | `npm i @maximem/synap-vercel-adk` |
 | NVIDIA NeMo Agent Toolkit | [`maximem-synap-nemo-agent-toolkit`](packages/integrations/synap-nemo-agent-toolkit/) | `pip install maximem-synap-nemo-agent-toolkit` |
 | Microsoft Agent Framework | [`maximem-synap-microsoft-agent`](packages/integrations/synap-microsoft-agent/) | `pip install maximem-synap-microsoft-agent` |
+| Strands Agents | [`maximem-synap-strands-agents`](packages/integrations/synap-strands-agents/) | `pip install maximem-synap-strands-agents` |
+| CAMEL-AI | [`maximem-synap-camel-ai`](packages/integrations/synap-camel-ai/) | `pip install maximem-synap-camel-ai` |
+| Smolagents | [`maximem-synap-smolagents`](packages/integrations/synap-smolagents/) | `pip install maximem-synap-smolagents` |
 
 <!-- END integrations -->
 

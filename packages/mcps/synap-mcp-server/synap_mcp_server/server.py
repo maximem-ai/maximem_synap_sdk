@@ -14,7 +14,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from . import tools
+from . import __version__, tools
 from .config import settings
 from .context import set_token
 
@@ -41,6 +41,11 @@ mcp = FastMCP(
         allowed_origins=list(settings.cors_allow_origins),
     ),
 )
+# FastMCP builds the low-level server without a version, and that server falls back to
+# reporting the installed `mcp` library's version in the initialize handshake — which
+# contradicts the version published for this server to the MCP registry. FastMCP takes no
+# `version` argument, so set it on the wrapped server directly.
+mcp._mcp_server.version = __version__
 tools.register(mcp)
 
 # Streamable HTTP Starlette app; the MCP endpoint is mounted at /mcp.

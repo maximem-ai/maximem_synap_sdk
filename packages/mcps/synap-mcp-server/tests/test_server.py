@@ -45,6 +45,36 @@ def test_health_environment_reflects_setting(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Initialize handshake — advertised version
+# ---------------------------------------------------------------------------
+
+
+def test_handshake_reports_package_version():
+    """serverInfo.version must be our version, not the installed `mcp` library's.
+
+    FastMCP takes no `version` argument and the low-level server it wraps falls back to
+    pkg_version("mcp"), which would contradict the version published to the MCP registry.
+    """
+    from synap_mcp_server import __version__
+
+    opts = mcp._mcp_server.create_initialization_options()
+    assert opts.server_version == __version__
+
+
+def test_handshake_version_is_not_mcp_library_version():
+    """Guard the specific regression: reporting the mcp dependency's version."""
+    from importlib.metadata import version
+
+    opts = mcp._mcp_server.create_initialization_options()
+    assert opts.server_version != version("mcp")
+
+
+def test_handshake_reports_server_name():
+    opts = mcp._mcp_server.create_initialization_options()
+    assert opts.server_name == "synap"
+
+
+# ---------------------------------------------------------------------------
 # BearerCaptureMiddleware — token extraction
 # ---------------------------------------------------------------------------
 

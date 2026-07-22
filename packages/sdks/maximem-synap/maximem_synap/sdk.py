@@ -1379,6 +1379,27 @@ class MaximemSynapSDK:
                 "SDK not initialized. Call await sdk.initialize() first."
             )
 
+    def _invalidate_anticipation_on_write(
+        self,
+        user_id: Optional[str] = None,
+        customer_id: Optional[str] = None,
+    ) -> None:
+        """Drop the writing user's cached anticipation bundles.
+
+        Called from write paths (record_message / record_messages_batch /
+        ingest_transcript) so a pre-write bundle can't keep serving the old
+        view for its whole TTL. Gated by SYNAP_SDK_CACHE_INVALIDATE_ON_WRITE
+        (default off). Over-invalidation on a failed write is safe — it only
+        costs the next lookup a cold fetch.
+        """
+        from .cache.anticipation_cache import invalidate_on_write_enabled
+
+        if self._anticipation_cache is None or not invalidate_on_write_enabled():
+            return
+        for eid in {user_id, customer_id}:
+            if eid:
+                self._anticipation_cache.invalidate_entity(str(eid))
+
     async def _get_auth_context(self, correlation_id: Optional[str] = None):
         """Get auth context for requests."""
         self._ensure_initialized()
@@ -1590,6 +1611,9 @@ class ConversationInterface:
                 )
             except Exception as e:
                 logger.warning("Failed to append turn to ST store: %s", e)
+        self._sdk._invalidate_anticipation_on_write(
+            user_id=user_id, customer_id=customer_id
+        )
         return result
 
     async def record_messages_batch(
@@ -1630,6 +1654,10 @@ class ConversationInterface:
                     )
                 except Exception as e:
                     logger.warning("Failed to append batch turn to ST store: %s", e)
+        for msg in messages:
+            self._sdk._invalidate_anticipation_on_write(
+                user_id=msg.get("user_id"), customer_id=msg.get("customer_id")
+            )
         return result
 
     async def ingest_transcript(
@@ -1759,6 +1787,9 @@ class ConversationInterface:
                 latency_ms=latency_ms,
                 status="success",
                 scope="conversation",
+            )
+            self._sdk._invalidate_anticipation_on_write(
+                user_id=user_id, customer_id=customer_id
             )
             return response
 
