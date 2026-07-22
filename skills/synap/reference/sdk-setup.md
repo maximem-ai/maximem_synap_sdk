@@ -43,11 +43,19 @@ Cloudflare Workers, Bun, Deno Deploy, or Node-only Lambda runtimes.
 ## Environment variables (the canonical pattern)
 
 ```bash
-export SYNAP_INSTANCE_ID="inst_a1b2c3d4e5f67890"
 export SYNAP_API_KEY="synap_..."
 ```
 
-With these set, the SDK auto-loads them — no constructor args needed.
+With this set, the SDK auto-loads it — no constructor args needed. The instance is
+resolved from the API key during `initialize()`, so `SYNAP_INSTANCE_ID` is **not**
+required.
+
+Set it only when a key has access to more than one instance and you want to pin a
+specific one:
+
+```bash
+export SYNAP_INSTANCE_ID="inst_a1b2c3d4e5f67890"   # optional
+```
 
 ## Basic init
 
@@ -136,7 +144,6 @@ config = SDKConfig(
 )
 
 sdk = MaximemSynapSDK(
-    instance_id=os.environ["SYNAP_INSTANCE_ID"],
     api_key=os.environ["SYNAP_API_KEY"],
     config=config,
 )
