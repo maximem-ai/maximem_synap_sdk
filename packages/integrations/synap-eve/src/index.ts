@@ -9,7 +9,7 @@
  *     `agent/instructions/*.ts`, injecting Synap's compacted summary into the
  *     system prompt.
  *
- * Identity auto-scopes from the eve session (`ctx.session.auth.principalId`,
+ * Identity auto-scopes from the eve session (`ctx.session.auth.current.principalId`,
  * `ctx.session.id`), with explicit overrides for unauthenticated channels.
  */
 

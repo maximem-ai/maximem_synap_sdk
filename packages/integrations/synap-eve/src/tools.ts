@@ -9,7 +9,7 @@
 //   import { sdk } from "../lib/synap.js";
 //   export default createSynapSearchTool({ sdk });
 //
-// Identity is auto-scoped from the eve session (`ctx.session.auth.principalId`),
+// Identity is auto-scoped from the eve session (`ctx.session.auth.current.principalId`),
 // with an explicit `userId` override for unauthenticated channels.
 //
 // Error policy: reads (search) degrade to an empty result; writes (store) raise
@@ -29,7 +29,15 @@ import {
 export interface SynapToolOptions {
   /** Configured Synap SDK. */
   sdk: SynapSdkLike;
-  /** Explicit Synap user scope. Overrides the eve principal; required on unauthenticated channels. */
+  /**
+   * Explicit Synap user scope. Required on unauthenticated channels, where
+   * `ctx.session.auth.current` is `null`.
+   *
+   * This *overrides* the eve principal — it is not a fallback. Because the
+   * factories are called once per `agent/tools/*.ts` module, setting it on an
+   * authenticated multi-user agent pins every session to the same scope. Leave
+   * it unset wherever the session carries a real principal.
+   */
   userId?: string;
   /** Optional customer/org scope. */
   customerId?: string;
