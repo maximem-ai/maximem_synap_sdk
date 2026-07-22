@@ -57,6 +57,20 @@ _RECALL_QUERY_PATTERNS = (
     re.compile(r"\bwhich of my\b", re.I),
     re.compile(r"\bwhat .{0,40}\b(again|earlier|last time|previously|yesterday)\b", re.I),
     re.compile(r"\bwill you use to (contact|reach|notify)\b", re.I),
+    # 2026-07-16 eval-register additions — every phrasing below was measured
+    # slipping past the gate and serving a stale bundle (issue #11):
+    #   "can you confirm my email address?"          → confirm/verify my
+    #   "what name is linked to my Uber account?"    → linked to my
+    #   "best way to contact me with updates…"       → best way to reach me
+    #   "which email are you going to use?"          → which … will you use
+    # "confirm my booking" now also bypasses — intentional over-match, costs
+    # one cloud fetch (the tie-break rule above).
+    re.compile(r"\b(confirm|verify|double.?check)\b.{0,40}\bmy\b", re.I),
+    re.compile(r"\b(linked to|associated with|registered (to|on|with)) my\b", re.I),
+    re.compile(r"\b(best|preferred) way to (reach|contact|update|notify) me\b", re.I),
+    re.compile(r"\bhow (do|will|can|should) you (reach|contact|notify) me\b", re.I),
+    re.compile(r"\bwhich .{0,40}\b(are|will) you (going to )?(use|using)\b", re.I),
+    re.compile(r"\bon (my|the) account\b", re.I),
 )
 
 
@@ -102,12 +116,40 @@ BundleStoreHook = Callable[..., None]
 LookupHook = Callable[..., None]
 
 
+def invalidate_on_write_enabled() -> bool:
+    """When true, SDK write paths drop the writing user's cached bundles.
+
+    The cloud invalidates its own Redis caches on ingest but that stops at
+    the process boundary — the in-SDK cache otherwise keeps serving the
+    pre-write view until TTL (2026-07-16 eval register issue #8). Default
+    OFF — write-path behavior is byte-identical to today."""
+    return os.environ.get("SYNAP_SDK_CACHE_INVALIDATE_ON_WRITE", "false").lower() in ("true", "1", "yes")
+
+
+def _max_entry_age_seconds(default: float) -> float:
+    """Absolute lifetime cap for a cache entry, hit-renewals included.
+
+    ``stored_at`` is a sliding lease (hits renew it), so before this cap a
+    bundle under steady traffic never expired — a pre-knowledge-update
+    snapshot could serve a retired value indefinitely (2026-07-16 eval
+    register issue #6). ``SYNAP_SDK_CACHE_MAX_ENTRY_AGE`` overrides the
+    default (2x the sliding TTL); ``0`` disables the cap."""
+    raw = os.environ.get("SYNAP_SDK_CACHE_MAX_ENTRY_AGE", "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 @dataclass
 class _CacheEntry:
     bundle: Dict
     entity_id: str
     conversation_id: Optional[str]
     stored_at: float
+    created_at: float = 0.0
     bundle_type: str = "anticipation"
     search_queries: List[str] = field(default_factory=list)
     # Section 16 — bundle composition extensions, captured at store time so
@@ -264,11 +306,13 @@ class AnticipationCache:
         bundle_id = bundle.get("bundle_id", str(time.monotonic()))
         search_queries = bundle.get("search_queries", [])
 
+        store_time = time.monotonic()
         self._entries[bundle_id] = _CacheEntry(
             bundle=bundle,
             entity_id=entity_id,
             conversation_id=conversation_id,
-            stored_at=time.monotonic(),
+            stored_at=store_time,
+            created_at=store_time,
             bundle_type=bundle_type,
             search_queries=search_queries,
             confidence=float(bundle.get("_bundle_confidence", 0.0) or 0.0),
@@ -286,7 +330,7 @@ class AnticipationCache:
                 content = item_dict.get("content", "")
                 if not content:
                     continue
-                dedup_key = content.lower().strip()[:120]
+                dedup_key = self._dedup_key(entity_id, content)
                 if dedup_key in self._item_dedup:
                     items_deduped += 1
                     continue
@@ -315,7 +359,7 @@ class AnticipationCache:
                 content = ext_item.get("content", "")
                 if not content:
                     continue
-                dedup_key = content.lower().strip()[:120]
+                dedup_key = self._dedup_key(entity_id, content)
                 if dedup_key in self._item_dedup:
                     items_deduped += 1
                     continue
@@ -808,7 +852,10 @@ class AnticipationCache:
             return None
 
         freshest_bid = max(summary_candidates, key=lambda k: summary_candidates[k].stored_at)
-        summary_candidates[freshest_bid].stored_at = time.monotonic()
+        # Lease renewal on read follows the same rule as item hits: with
+        # TTL-hint honoring on, a read must not extend a snapshot's life.
+        if not _honor_ttl_hint_enabled():
+            summary_candidates[freshest_bid].stored_at = time.monotonic()
         return summary_candidates[freshest_bid].bundle
 
     def lookup_user_summary(
@@ -839,7 +886,8 @@ class AnticipationCache:
         if not candidates:
             return None
         freshest_bid = max(candidates, key=lambda k: candidates[k].stored_at)
-        candidates[freshest_bid].stored_at = time.monotonic()
+        if not _honor_ttl_hint_enabled():
+            candidates[freshest_bid].stored_at = time.monotonic()
         return candidates[freshest_bid].bundle
 
     def _remove_bundle(self, bundle_id: str) -> None:
@@ -849,12 +897,25 @@ class AnticipationCache:
         self._bm25_dirty = True
         self._rebuild_vocab()
 
+    def _dedup_key(self, entity_id: str, content: str) -> str:
+        """Scope-qualified item-dedup key.
+
+        Keying on content alone made the dedup set cache-GLOBAL: with the
+        one-SDK-per-instance sharing model, visitor B's byte-identical seed
+        facts were swallowed against visitor A's copy, never indexed under
+        B's bundle — so B was permanently scope_filter_excluded for that
+        content and always cold-fetched (2026-07-16 eval register issue #9).
+        Scoping the key keeps within-visitor dedup intact."""
+        return f"{entity_id}|{content.lower().strip()[:120]}"
+
     def _rebuild_vocab(self) -> None:
         self._corpus_vocab = set()
         self._item_dedup = set()
         for item in self._items:
             self._corpus_vocab.update(item.tokens)
-            self._item_dedup.add(item.content.lower().strip()[:120])
+            entry = self._entries.get(item.bundle_id)
+            entity_id = entry.entity_id if entry else "_any"
+            self._item_dedup.add(self._dedup_key(entity_id, item.content))
 
     def _effective_ttl(self, entry: "_CacheEntry", honor_hint: bool) -> float:
         """Global TTL, optionally bounded by the bundle's server-sent hint.
@@ -867,10 +928,16 @@ class AnticipationCache:
     def _evict_expired(self) -> None:
         now = time.monotonic()
         honor_hint = _honor_ttl_hint_enabled()
+        # Absolute cap on top of the sliding lease: hit-renewals move
+        # stored_at but never created_at, so no bundle outlives the cap no
+        # matter how much traffic it serves. Entries from before this field
+        # existed fall back to stored_at.
+        max_age = _max_entry_age_seconds(2.0 * self._ttl)
         expired = [
             bid
             for bid, entry in self._entries.items()
             if now - entry.stored_at > self._effective_ttl(entry, honor_hint)
+            or (max_age > 0 and now - (entry.created_at or entry.stored_at) > max_age)
         ]
         if expired:
             for bid in expired:
@@ -881,6 +948,40 @@ class AnticipationCache:
             ]
             self._bm25_dirty = True
             self._rebuild_vocab()
+
+    def invalidate_entity(self, entity_id: str) -> int:
+        """Drop every bundle whose funnel scope is ``entity_id``.
+
+        Write-path hook (2026-07-16 eval register issue #8): the cloud
+        invalidates its Redis L1/L2/L3 on ingest, but that stops at the
+        process boundary — nothing ever told this in-process cache a write
+        happened, so a pre-write bundle kept serving the old view for its
+        whole TTL. Callers with a write path (SDK ingest, the playground's
+        turn ingestion) invalidate the writing user's scope; the next
+        lookup cold-fetches and the follow-up push repopulates.
+
+        Returns the number of bundles dropped. ``"_any"``-scoped bundles
+        are left alone — they carry client-shared content, not the written
+        user's state.
+        """
+        if not entity_id:
+            return 0
+        doomed = [
+            bid for bid, entry in self._entries.items()
+            if entry.entity_id == entity_id
+        ]
+        for bid in doomed:
+            del self._entries[bid]
+        if doomed:
+            doomed_set = set(doomed)
+            self._items = [i for i in self._items if i.bundle_id not in doomed_set]
+            self._bm25_dirty = True
+            self._rebuild_vocab()
+            logger.info(
+                "Cache invalidated on write: entity=%s bundles_dropped=%d",
+                entity_id, len(doomed),
+            )
+        return len(doomed)
 
     def clear(self) -> None:
         self._entries.clear()

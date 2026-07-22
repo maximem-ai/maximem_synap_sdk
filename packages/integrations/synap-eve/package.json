@@ -1,0 +1,52 @@
+{
+  "name": "@maximem/synap-eve",
+  "version": "0.1.0",
+  "description": "Synap memory integration for Vercel eve agents",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "synap",
+    "memory",
+    "eve",
+    "vercel",
+    "agent",
+    "ai",
+    "context"
+  ],
+  "license": "Apache-2.0",
+  "peerDependencies": {
+    "eve": ">=0.25.0",
+    "zod": ">=4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "eve": "^0.25.1",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.9",
+    "zod": "^4.4.3"
+  }
+}
