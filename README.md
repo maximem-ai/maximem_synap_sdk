@@ -255,6 +255,7 @@ agent = ReActAgent.from_tools(tools, memory=memory)
 | Claude Agent (TypeScript) | [`@maximem/synap-claude-agent`](packages/integrations/synap-claude-agent-ts/) | `npm i @maximem/synap-claude-agent` |
 | Mastra | [`@maximem/synap-mastra`](packages/integrations/synap-mastra/) | `npm i @maximem/synap-mastra` |
 | Vercel AI SDK | [`@maximem/synap-vercel-adk`](packages/integrations/synap-vercel-adk/) | `npm i @maximem/synap-vercel-adk` |
+| Vercel eve | [`@maximem/synap-eve`](packages/integrations/synap-eve/) | `npm i @maximem/synap-eve` |
 | NVIDIA NeMo Agent Toolkit | [`maximem-synap-nemo-agent-toolkit`](packages/integrations/synap-nemo-agent-toolkit/) | `pip install maximem-synap-nemo-agent-toolkit` |
 | Microsoft Agent Framework | [`maximem-synap-microsoft-agent`](packages/integrations/synap-microsoft-agent/) | `pip install maximem-synap-microsoft-agent` |
 | Strands Agents | [`maximem-synap-strands-agents`](packages/integrations/synap-strands-agents/) | `pip install maximem-synap-strands-agents` |
