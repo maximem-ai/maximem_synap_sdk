@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from .config_utils import configure_logging, get_default_storage_path, merge_config
-from .registry import SDKRegistry
+from .registry import SDKRegistry, build_registry_key
 from .models.config import SDKConfig, TimeoutConfig, RetryPolicy
 from .models.context import (
     ContextResponse,
@@ -745,19 +745,27 @@ class MaximemSynapSDK:
 
         Args:
             instance_id: Optional instance ID. If omitted, resolved from the
-                API key on initialize() via GET /api/v1/auth/whoami.
+                API key on initialize() via GET /api/v1/auth/whoami, and the
+                singleton is keyed on the API key instead.
             api_key: Synap API key. If omitted, read from SYNAP_API_KEY env var.
             config: Optional configuration overrides.
             _force_new: Force create new instance (for testing).
         """
-        # Check singleton registry
+        # Check singleton registry. Keyed on the explicit instance_id when
+        # there is one, on the credential otherwise — see build_registry_key.
+        registry_key = build_registry_key(instance_id, api_key)
         if not _force_new:
-            existing = SDKRegistry.get(instance_id)
+            existing = SDKRegistry.get(registry_key)
             if existing is not None:
                 # Return existing instance - copy its state
                 self.__dict__ = existing.__dict__
                 return
 
+        # The slot this SDK actually occupies, so shutdown() removes the entry
+        # it created rather than one derived from a since-resolved instance_id.
+        # None for _force_new instances: they are never registered, so they
+        # have nothing to remove.
+        self._registry_key: Optional[str] = None if _force_new else registry_key
         self.instance_id = instance_id or os.environ.get("SYNAP_INSTANCE_ID", "")
         validate_instance_id(self.instance_id)
         self._api_key = api_key
@@ -844,7 +852,7 @@ class MaximemSynapSDK:
 
         # Register in singleton registry
         if not _force_new:
-            SDKRegistry.register(instance_id, self)
+            SDKRegistry.register(registry_key, self)
 
     def configure(self, **kwargs) -> None:
         """Update SDK configuration.
@@ -1156,8 +1164,11 @@ class MaximemSynapSDK:
         if self._cache_manager:
             self._cache_manager.close()
 
-        # Unregister from singleton
-        SDKRegistry.unregister(self.instance_id)
+        # Unregister from singleton. Keyed on the slot this SDK was actually
+        # registered under — self.instance_id may have been resolved by
+        # initialize() since, and a _force_new SDK holds no slot at all.
+        if self._registry_key is not None:
+            SDKRegistry.unregister_if_owner(self._registry_key, self)
 
         self._initialized = False
         logger.info("SDK shutdown complete")
