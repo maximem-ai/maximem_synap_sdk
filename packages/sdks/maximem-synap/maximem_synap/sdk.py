@@ -1047,16 +1047,21 @@ class MaximemSynapSDK:
             if SDKRegistry.alias_if_absent(self.instance_id, self):
                 self._registry_alias_keys.append(self.instance_id)
 
-        # Initialize cache (now that client_id is known)
+        # Initialize cache (now that client_id and instance_id are known).
+        # Both are needed: client_id is the account, instance_id is the memory
+        # store. One account can own several instances, so the cache has to be
+        # scoped by instance or two of them share files on disk.
         if self._config.cache_backend:
             self._cache_manager = CacheManager(
                 client_id=self._client_id,
+                instance_id=self.instance_id,
                 storage_path=self._config.storage_path,
                 enabled=True,
             )
         else:
             self._cache_manager = CacheManager(
                 client_id=self._client_id,
+                instance_id=self.instance_id,
                 enabled=False,
             )
 

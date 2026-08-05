@@ -21,12 +21,25 @@ class CacheManager:
     """Manages scoped caching with separate files per user/customer.
 
     File structure:
-    ~/.synap/{client_id}/
+    ~/.synap/{client_id}/{instance_id}/
     ├── client_cache.db              # Org-level context
     ├── customers/
     │   └── {customer_id}.db         # Customer-level context
     └── users/
         └── {user_id}.db             # User-level context (incl. conversations)
+
+    The instance segment matters because ``client_id`` identifies the Synap
+    *account*, not the memory store. One account can own several instances,
+    and they are separate memory stores with no data shared between them. Keyed
+    on ``client_id`` alone, two instances landed in the same directory and
+    their cache files were addressed by scope and entity id only — so the same
+    ``user_id`` or ``customer_id`` under two instances read and wrote the same
+    rows, and one instance could be served the other's cached context.
+
+    Empty ``instance_id`` keeps the legacy ``{client_id}`` path. The id is
+    resolved from the API key during ``initialize()``; when that lookup fails
+    there is nothing to scope by, and a process in that state can only have
+    one identity anyway.
     """
 
     # Default TTLs by scope (seconds)
@@ -42,14 +55,26 @@ class CacheManager:
         client_id: str,
         storage_path: Optional[str] = None,
         enabled: bool = True,
+        instance_id: str = "",
     ):
         self.client_id = client_id
+        self.instance_id = instance_id
         self.enabled = enabled
 
-        if storage_path:
-            self.base_path = Path(storage_path) / client_id
-        else:
-            self.base_path = Path.home() / ".synap" / client_id
+        root = Path(storage_path) if storage_path else Path.home() / ".synap"
+        self.base_path = root / client_id
+        if instance_id:
+            self.base_path = self.base_path / instance_id
+        elif enabled:
+            # Legacy, unscoped path. Reachable when whoami could not resolve
+            # the instance, and for anyone constructing CacheManager directly.
+            # Harmless for a single instance; two instances of one account
+            # would share these files, so say so rather than fail silently.
+            logger.warning(
+                "Cache is not instance-scoped (instance_id unknown); using %s. "
+                "Two instances of one account would share these files.",
+                self.base_path,
+            )
 
         # Cache of open backends by scope key
         self._backends: Dict[str, CacheBackend] = {}
@@ -91,9 +116,18 @@ class CacheManager:
     ) -> str:
         """Build cache key.
 
-        Format: {client_id}:{scope}:{entity_id}:{context_type}:{query_hash}
+        Format: {client_id}:{instance_id}:{scope}:{entity_id}:{context_type}:{query_hash}
+
+        The instance segment is belt-and-braces — per-instance directories
+        already keep the rows apart — but it makes a key self-describing in a
+        dump, and it means a file that somehow ends up shared cannot serve one
+        instance's row to another. Omitted when the instance is unknown, so
+        keys stay byte-identical to the legacy format on that path.
         """
-        parts = [self.client_id, scope.value, entity_id, context_type]
+        parts = [self.client_id]
+        if self.instance_id:
+            parts.append(self.instance_id)
+        parts.extend([scope.value, entity_id, context_type])
         if query_hash:
             parts.append(query_hash)
         return ":".join(parts)
