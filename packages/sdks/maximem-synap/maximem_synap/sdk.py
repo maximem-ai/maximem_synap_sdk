@@ -766,6 +766,10 @@ class MaximemSynapSDK:
         # None for _force_new instances: they are never registered, so they
         # have nothing to remove.
         self._registry_key: Optional[str] = None if _force_new else registry_key
+        # Extra slots this SDK answers to. initialize() adds the resolved
+        # instance_id here once whoami returns it, so constructing by that id
+        # finds this SDK instead of building a second one.
+        self._registry_alias_keys: List[str] = []
         self.instance_id = instance_id or os.environ.get("SYNAP_INSTANCE_ID", "")
         validate_instance_id(self.instance_id)
         self._api_key = api_key
@@ -850,9 +854,17 @@ class MaximemSynapSDK:
         # Configure logging
         configure_logging(self._config.log_level)
 
-        # Register in singleton registry
+        # Register in singleton registry. The lookup at the top of __init__ is
+        # only a fast path — everything above ran outside the registry lock, so
+        # a concurrent first construction for this identity may have claimed
+        # the slot in the meantime. Claiming it atomically here is what decides
+        # the winner; the loser adopts the winner's state and throws away the
+        # objects it just built (none of them hold a socket or a file yet —
+        # transports and the cache manager are created in initialize()).
         if not _force_new:
-            SDKRegistry.register(registry_key, self)
+            incumbent = SDKRegistry.register_if_absent(registry_key, self)
+            if incumbent is not None:
+                self.__dict__ = incumbent.__dict__
 
     def configure(self, **kwargs) -> None:
         """Update SDK configuration.
@@ -1022,6 +1034,19 @@ class MaximemSynapSDK:
                     "SDK whoami bootstrap failed (non-fatal, will fall back to env): %s", e,
                 )
 
+        # The identity is now known. If this SDK was keyed on its credential —
+        # because the instance_id did not exist yet at construction time — it
+        # also answers to the resolved id from here on, so a later
+        # MaximemSynapSDK(instance_id=...) for this same instance reuses it
+        # instead of standing up a second set of caches and streams.
+        if (
+            self._registry_key is not None
+            and self.instance_id
+            and self.instance_id != self._registry_key
+        ):
+            if SDKRegistry.alias_if_absent(self.instance_id, self):
+                self._registry_alias_keys.append(self.instance_id)
+
         # Initialize cache (now that client_id is known)
         if self._config.cache_backend:
             self._cache_manager = CacheManager(
@@ -1164,11 +1189,15 @@ class MaximemSynapSDK:
         if self._cache_manager:
             self._cache_manager.close()
 
-        # Unregister from singleton. Keyed on the slot this SDK was actually
+        # Unregister from singleton. Keyed on the slots this SDK was actually
         # registered under — self.instance_id may have been resolved by
         # initialize() since, and a _force_new SDK holds no slot at all.
+        # Every slot goes, alias included: they all point at the transports
+        # that were just closed above.
         if self._registry_key is not None:
-            SDKRegistry.unregister_if_owner(self._registry_key, self)
+            for key in [self._registry_key, *self._registry_alias_keys]:
+                SDKRegistry.unregister_if_owner(key, self)
+            self._registry_alias_keys.clear()
 
         self._initialized = False
         logger.info("SDK shutdown complete")

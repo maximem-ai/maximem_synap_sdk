@@ -215,3 +215,80 @@ class TestErrorHandling:
         fn = SynapShortTermFunction(sdk, on_error="raise")
         with pytest.raises(SynapIntegrationError):
             await fn(conversation_id="conv_abc")
+
+
+def _fake_config(**overrides):
+    """Stand-in for SynapShortTermConfig.
+
+    The real config is a pydantic FunctionBaseConfig, and this module's NAT
+    stubs replace that base with a plain class — so the declared Fields never
+    become constructor arguments. Supply the attributes the factory reads.
+    """
+    from types import SimpleNamespace
+
+    defaults = dict(
+        api_key="sk-test",
+        instance_id="",
+        style="structured",
+        preamble_open="",
+        preamble_close="",
+        on_error="fallback",
+        conversation_id="",
+    )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
+class TestTeardown:
+    """The factory's ``finally`` block probed ``getattr(sdk, "close", None)``,
+    but the SDK's teardown is ``shutdown()`` — there is no ``close()``. The
+    guard therefore resolved to ``None`` on every run and teardown never
+    happened, leaking the HTTP transport, the gRPC stream and the telemetry
+    collector once per workflow.
+    """
+
+    def test_the_sdk_really_has_no_close(self):
+        """Pins the premise. If the SDK ever grows close(), this test says so
+        rather than letting the old probe look correct by accident."""
+        from maximem_synap import MaximemSynapSDK
+
+        assert hasattr(MaximemSynapSDK, "shutdown")
+        assert not hasattr(MaximemSynapSDK, "close")
+
+    @pytest.mark.asyncio
+    async def test_factory_shuts_the_sdk_down_on_exit(self, monkeypatch):
+        sdk = _fake_sdk()
+        sdk.initialize = AsyncMock()
+        sdk.shutdown = AsyncMock()
+        del sdk.close  # MagicMock would otherwise auto-create close()
+
+        monkeypatch.setattr(
+            _short_term_module, "MaximemSynapSDK", MagicMock(return_value=sdk)
+        )
+        config = _fake_config()
+
+        agen = _short_term_module.synap_short_term_function(config, builder=None)
+        await agen.__anext__()
+        with pytest.raises(StopAsyncIteration):
+            await agen.__anext__()
+
+        sdk.shutdown.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_teardown_failure_is_suppressed(self, monkeypatch):
+        sdk = _fake_sdk()
+        sdk.initialize = AsyncMock()
+        sdk.shutdown = AsyncMock(side_effect=RuntimeError("transport already gone"))
+        del sdk.close
+
+        monkeypatch.setattr(
+            _short_term_module, "MaximemSynapSDK", MagicMock(return_value=sdk)
+        )
+        config = _fake_config()
+
+        agen = _short_term_module.synap_short_term_function(config, builder=None)
+        await agen.__anext__()
+        with pytest.raises(StopAsyncIteration):
+            await agen.__anext__()  # teardown raised, but must not surface
+
+        sdk.shutdown.assert_awaited_once()
