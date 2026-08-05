@@ -296,8 +296,8 @@ Drop-in instructions for coding agents (Claude Code, Cursor, etc.) that teach th
 
 ## Requirements
 
-- **Python SDK**: Python 3.9+
-- **JavaScript SDK**: Node 18+ (Python 3.9+ for the bridge layer)
+- **Python SDK**: Python 3.11+
+- **JavaScript SDK**: Node 18+ (Python 3.11+ for the bridge layer)
 - A Synap API key — [get one at maximem.ai](https://www.maximem.ai/synap)
 
 ---

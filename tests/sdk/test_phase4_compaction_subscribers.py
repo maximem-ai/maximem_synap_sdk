@@ -174,7 +174,7 @@ class TestEndToEndViaInstanceHandler:
         # Use the SDK directly so the wiring under test is real, not mocked.
         from maximem_synap import MaximemSynapSDK
 
-        sdk = MaximemSynapSDK(instance_id="inst-x", api_key="dummy", _force_new=True)
+        sdk = MaximemSynapSDK(instance_id="inst_00112233445566aa", api_key="dummy", _force_new=True)
         cci = ConversationContextInterface(sdk)
         instance = InstanceInterface(sdk)
         instance._on_context_callback = None
@@ -189,7 +189,7 @@ class TestEndToEndViaInstanceHandler:
     def test_handler_skips_non_compaction_bundles(self):
         from maximem_synap import MaximemSynapSDK
 
-        sdk = MaximemSynapSDK(instance_id="inst-y", api_key="dummy", _force_new=True)
+        sdk = MaximemSynapSDK(instance_id="inst_00112233445566bb", api_key="dummy", _force_new=True)
         cci = ConversationContextInterface(sdk)
         instance = InstanceInterface(sdk)
         instance._on_context_callback = None
