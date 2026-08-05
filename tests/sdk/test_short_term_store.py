@@ -10,6 +10,19 @@ from maximem_synap.cache.short_term_store import (
     ShortTermContextStore,
 )
 
+# The store evicts an entry on read once its last_activity_at is older than
+# max_age (12h by default). These tests used to stamp turns with a literal
+# 2026-05-22: they passed the week they were written and then began failing on
+# their own, with no code change, as that date aged out of the window. Anchor
+# every timestamp to the current run and express the relationships that are
+# actually under test as offsets from it.
+_NOW = datetime.now(timezone.utc)
+
+
+def _ago(**offset) -> datetime:
+    """A timestamp ``offset`` before this run — always inside the max-age window."""
+    return _NOW - timedelta(**offset)
+
 
 def _bundle(
     conversation_id: str,
@@ -59,7 +72,7 @@ class TestAppendTurn:
 
     def test_explicit_timestamp_is_used(self):
         store = ShortTermContextStore()
-        ts = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+        ts = _ago(hours=1)
         store.append_turn("c1", "user", "hi", timestamp=ts)
         assert store.get("c1").recent_turns[0]["timestamp"] == ts.isoformat()
 
@@ -81,12 +94,12 @@ class TestApplyCompaction:
 
     def test_replaces_summary_keeps_unmatched_turns(self):
         store = ShortTermContextStore()
-        ts_old = datetime(2026, 5, 22, 10, 0, 0, tzinfo=timezone.utc)
-        ts_new = datetime(2026, 5, 22, 11, 0, 0, tzinfo=timezone.utc)
+        ts_old = _ago(hours=3)
+        ts_new = _ago(hours=2)
         store.append_turn("c1", "user", "old turn", timestamp=ts_old)
         store.append_turn("c1", "user", "new turn", timestamp=ts_new)
 
-        cutoff = datetime(2026, 5, 22, 10, 30, 0, tzinfo=timezone.utc)
+        cutoff = _ago(hours=2, minutes=30)
         store.apply_compaction(_bundle("c1", end_timestamp=cutoff.isoformat()))
 
         e = store.get("c1")
@@ -97,28 +110,28 @@ class TestApplyCompaction:
 
     def test_cutoff_before_all_turns_keeps_all(self):
         store = ShortTermContextStore()
-        ts = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+        ts = _ago(hours=1)
         store.append_turn("c1", "user", "a", timestamp=ts)
         store.append_turn("c1", "user", "b", timestamp=ts + timedelta(seconds=1))
 
-        cutoff = datetime(2026, 5, 22, 11, 0, 0, tzinfo=timezone.utc)
+        cutoff = _ago(hours=2)
         store.apply_compaction(_bundle("c1", end_timestamp=cutoff.isoformat()))
         assert len(store.get("c1").recent_turns) == 2
 
     def test_cutoff_after_all_turns_drops_all(self):
         store = ShortTermContextStore()
-        ts = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+        ts = _ago(hours=2)
         store.append_turn("c1", "user", "a", timestamp=ts)
         store.append_turn("c1", "user", "b", timestamp=ts + timedelta(seconds=1))
 
-        cutoff = datetime(2026, 5, 22, 13, 0, 0, tzinfo=timezone.utc)
+        cutoff = _ago(hours=1)
         store.apply_compaction(_bundle("c1", end_timestamp=cutoff.isoformat()))
         assert store.get("c1").recent_turns == []
 
     def test_cutoff_exactly_equal_is_dropped(self):
         # The reconciliation rule is "drop ≤ end_timestamp", not "<".
         store = ShortTermContextStore()
-        ts = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+        ts = _ago(hours=1)
         store.append_turn("c1", "user", "boundary", timestamp=ts)
         store.apply_compaction(_bundle("c1", end_timestamp=ts.isoformat()))
         assert store.get("c1").recent_turns == []
@@ -148,9 +161,10 @@ class TestApplyCompaction:
             "c1",
             "user",
             "z-form",
-            timestamp=datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc),
+            timestamp=_ago(hours=2),
         )
-        store.apply_compaction(_bundle("c1", end_timestamp="2026-05-22T13:00:00Z"))
+        z_cutoff = _ago(hours=1).isoformat().replace("+00:00", "Z")
+        store.apply_compaction(_bundle("c1", end_timestamp=z_cutoff))
         assert store.get("c1").recent_turns == []
 
 

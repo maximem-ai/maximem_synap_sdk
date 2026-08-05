@@ -1,8 +1,15 @@
 """Unit tests for the Phase 2 SDK helpers — _should_skip_server_st and
-_merge_local_st_into_response."""
+_overlay_local_recent_turns.
+
+``_merge_local_st_into_response`` was renamed to ``_overlay_local_recent_turns``
+when the verbatim-overlay design landed, and this module was not updated. The
+stale import made it uncollectable, so pytest aborted the entire run on a
+collection error instead of reporting a failure. The rename also narrowed the
+contract: the local store supplies the verbatim tail, and the server stays
+authoritative for whichever compacted fields it did send."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -12,7 +19,7 @@ from maximem_synap.cache.short_term_store import (
     CachedShortTermContext,
     ShortTermContextStore,
 )
-from maximem_synap.sdk import _merge_local_st_into_response, _should_skip_server_st
+from maximem_synap.sdk import _overlay_local_recent_turns, _should_skip_server_st
 from maximem_synap.models.context import (
     ContextResponse,
     ConversationContextModel,
@@ -20,9 +27,29 @@ from maximem_synap.models.context import (
 )
 
 
-def _make_sdk(*, authoritative: bool, store: ShortTermContextStore) -> SimpleNamespace:
+# The short-term store evicts an entry on read once its last_activity_at is
+# older than max_age (12h). append_turn() sets last_activity_at from the
+# timestamp it is given, so a literal past date silently emptied the store and
+# the overlay assertions below became unreachable. Anchor to the current run.
+_NOW = datetime.now(timezone.utc)
+
+
+def _ago(**offset) -> datetime:
+    return _NOW - timedelta(**offset)
+
+
+def _make_sdk(
+    *,
+    authoritative: bool,
+    store: ShortTermContextStore,
+    verbatim_overlay: bool = True,
+) -> SimpleNamespace:
     sdk = SimpleNamespace(_st_store=store)
     sdk._is_st_authoritative = lambda: authoritative
+    # Kill-switch consulted by _overlay_local_recent_turns. Absent from the
+    # stub, every overlay attempt died in the helper's defensive except and
+    # logged instead of asserting.
+    sdk._is_st_verbatim_overlay = lambda: verbatim_overlay
     return sdk
 
 
@@ -36,7 +63,7 @@ def _warm_store(conversation_id: str) -> ShortTermContextStore:
             "compaction_id": "comp-cache-1",
             "current_state": {"status": "active"},
             "key_extractions": {"facts": [{"content": "x"}]},
-            "end_timestamp": "2026-05-22T10:00:00+00:00",
+            "end_timestamp": _ago(hours=2).isoformat(),
         },
     })
     return store
@@ -87,20 +114,20 @@ class TestShouldSkipServerST:
 class TestMergeLocalSTIntoResponse:
     def test_no_op_without_conversation_id(self):
         resp = _empty_response()
-        _merge_local_st_into_response(_make_sdk(authoritative=True, store=_warm_store("c1")), resp, None)
+        _overlay_local_recent_turns(_make_sdk(authoritative=True, store=_warm_store("c1")), resp, None)
         assert resp.conversation_context is None
 
     def test_no_op_when_entry_missing(self):
         resp = _empty_response()
         sdk = _make_sdk(authoritative=True, store=ShortTermContextStore())
-        _merge_local_st_into_response(sdk, resp, "c1")
+        _overlay_local_recent_turns(sdk, resp, "c1")
         assert resp.conversation_context is None
 
     def test_merges_summary_and_extractions(self):
         resp = _empty_response()
         store = _warm_store("c1")
         sdk = _make_sdk(authoritative=True, store=store)
-        _merge_local_st_into_response(sdk, resp, "c1")
+        _overlay_local_recent_turns(sdk, resp, "c1")
         assert isinstance(resp.conversation_context, ConversationContextModel)
         assert resp.conversation_context.summary == "cached summary"
         assert resp.conversation_context.compaction_id == "comp-cache-1"
@@ -113,24 +140,54 @@ class TestMergeLocalSTIntoResponse:
             "c1",
             "user",
             "post-compaction turn",
-            timestamp=datetime(2026, 5, 22, 11, 0, 0, tzinfo=timezone.utc),
+            timestamp=_ago(hours=1),
         )
         resp = _empty_response()
         sdk = _make_sdk(authoritative=True, store=store)
-        _merge_local_st_into_response(sdk, resp, "c1")
+        _overlay_local_recent_turns(sdk, resp, "c1")
         turns = resp.conversation_context.recent_turns
         assert len(turns) == 1
         assert turns[0]["content"] == "post-compaction turn"
         assert turns[0]["role"] == "user"
 
-    def test_overwrites_existing_conversation_context(self):
-        # If the response already had a (stale) conversation_context (e.g.
-        # when an older server returned one despite the skip flag), the
-        # local merge should replace it.
+    def test_server_compacted_fields_survive_the_overlay(self):
+        # The server's conversation_context is authoritative for compacted
+        # fields; only the verbatim tail is replaced from the local store.
+        store = _warm_store("c1")
+        store.append_turn(
+            "c1",
+            "user",
+            "post-compaction turn",
+            timestamp=_ago(hours=1),
+        )
         resp = _empty_response()
         resp.conversation_context = ConversationContextModel(
-            summary="STALE", conversation_id="c1"
+            summary="from server", conversation_id="c1"
         )
+        sdk = _make_sdk(authoritative=True, store=store)
+        _overlay_local_recent_turns(sdk, resp, "c1")
+        assert resp.conversation_context.summary == "from server"
+        assert [t["content"] for t in resp.conversation_context.recent_turns] == [
+            "post-compaction turn"
+        ]
+
+    def test_kill_switch_leaves_a_server_context_untouched(self):
+        resp = _empty_response()
+        resp.conversation_context = ConversationContextModel(
+            summary="from server", conversation_id="c1"
+        )
+        sdk = _make_sdk(
+            authoritative=True, store=_warm_store("c1"), verbatim_overlay=False
+        )
+        _overlay_local_recent_turns(sdk, resp, "c1")
+        assert resp.conversation_context.summary == "from server"
+        assert resp.conversation_context.recent_turns == []
+
+    def test_local_fills_the_fields_the_server_omitted(self):
+        # Skip-server-ST path: no conversation_context at all, so the local
+        # entry supplies the compacted fields as well as the tail.
+        resp = _empty_response()
         sdk = _make_sdk(authoritative=True, store=_warm_store("c1"))
-        _merge_local_st_into_response(sdk, resp, "c1")
+        _overlay_local_recent_turns(sdk, resp, "c1")
         assert resp.conversation_context.summary == "cached summary"
+        assert resp.conversation_context.compaction_id == "comp-cache-1"

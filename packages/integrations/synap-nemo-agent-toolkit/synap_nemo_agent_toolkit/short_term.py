@@ -267,10 +267,15 @@ async def synap_short_term_function(config: SynapShortTermConfig, builder: Build
     try:
         yield info
     finally:
-        close = getattr(sdk, "close", None)
-        if close is not None:
+        # The SDK's teardown is shutdown(); there is no close(). Probing for
+        # the wrong name resolved to None on every run, so this block was a
+        # silent no-op and each workflow leaked the SDK's HTTP transport,
+        # gRPC stream and telemetry collector. close() is still accepted
+        # second so a duck-typed test double keeps working.
+        teardown = getattr(sdk, "shutdown", None) or getattr(sdk, "close", None)
+        if teardown is not None:
             try:
-                await close()
+                await teardown()
             except Exception:  # noqa: BLE001 — teardown must not mask workflow errors
                 logger.exception(
                     "synap_short_term_function: SDK teardown raised (suppressing)"

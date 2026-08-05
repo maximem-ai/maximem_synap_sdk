@@ -56,6 +56,51 @@ class SDKRegistry:
             cls._instances[instance_id] = sdk
 
     @classmethod
+    def register_if_absent(
+        cls, key: str, sdk: "MaximemSynapSDK"
+    ) -> Optional["MaximemSynapSDK"]:
+        """Claim ``key`` for ``sdk``, or return whoever already holds it.
+
+        ``get()`` then ``register()`` each take the lock independently, so two
+        threads constructing the first SDK for one identity can both miss the
+        lookup and the second then overwrites the first — leaving the loser's
+        caller holding an SDK the registry no longer knows about, with its own
+        caches and its own gRPC stream. The whole of ``__init__`` sits inside
+        that window, so it is wide enough to lose at stock switch intervals.
+
+        Returns ``None`` when ``sdk`` won the slot, or the incumbent when it
+        did not — the loser is expected to adopt the winner's state.
+        """
+        with cls._lock:
+            existing = cls._instances.get(key)
+            if existing is not None:
+                return existing
+            cls._instances[key] = sdk
+            return None
+
+    @classmethod
+    def alias_if_absent(cls, key: str, sdk: "MaximemSynapSDK") -> bool:
+        """Point ``key`` at ``sdk`` as well, unless the slot is already taken.
+
+        Used once ``initialize()`` resolves the real ``instance_id``: the SDK
+        was keyed on its credential because the id did not exist yet, so a
+        later ``MaximemSynapSDK(instance_id=...)`` for that same instance
+        missed and built a second SDK — two anticipation caches, two
+        short-term stores and two Listen streams for one instance.
+
+        The credential slot is kept rather than moved, so constructing by API
+        key keeps returning the same SDK too. An occupied target is never
+        clobbered: evicting a live SDK is worse than the duplication.
+
+        Returns ``True`` if the alias was installed.
+        """
+        with cls._lock:
+            if not key or key in cls._instances:
+                return False
+            cls._instances[key] = sdk
+            return True
+
+    @classmethod
     def unregister(cls, instance_id: str) -> None:
         """Unregister an SDK instance."""
         with cls._lock:
