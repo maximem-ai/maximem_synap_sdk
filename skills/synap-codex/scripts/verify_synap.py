@@ -5,6 +5,7 @@ Run this as the LAST step of any Synap integration. It proves the SDK can
 authenticate, resolve its instance from the API key, and shut down cleanly.
 
     export SYNAP_API_KEY=synap_...
+    export SYNAP_INSTANCE_ID=inst_...      # optional; shown with the key in the dashboard
     python scripts/verify_synap.py
 
 Exit code 0 = green. Non-zero = something is wrong; read the printed error

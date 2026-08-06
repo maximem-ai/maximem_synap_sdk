@@ -8,6 +8,7 @@
  * Run after:
  *   npm install @maximem/synap-js-sdk
  *   export SYNAP_API_KEY=synap_...
+ *   export SYNAP_INSTANCE_ID=inst_...      // optional; shown with the key in the dashboard
  *
  * The instance is resolved from the API key — no instance id needed.
  */

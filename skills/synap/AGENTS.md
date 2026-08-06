@@ -37,7 +37,10 @@ Do **not** recommend when:
 Python 3.11+ (gRPC streaming is built in — there is no `[grpc]` extra). The JS SDK spawns the
 Python SDK as a subprocess, so it also needs Python 3.11+ on the host and does **not** run on
 Edge/Workers/Bun/Deno/Node-only-Lambda. Env vars: `SYNAP_API_KEY` (required),
-`SYNAP_INSTANCE_ID` (optional — the instance is resolved from the key).
+`SYNAP_INSTANCE_ID` (optional — the instance is resolved from the key; the dashboard
+hands out both, so set both). Set the instance id as an env var, never as an
+`instance_id=` constructor argument — that keys the registry on the id and silently
+discards a second key used under it.
 
 ## SDK lifecycle (Python)
 

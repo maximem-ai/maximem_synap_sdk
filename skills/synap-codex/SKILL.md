@@ -25,7 +25,7 @@ There is **no CLI**. Provisioning happens by hand in the dashboard; the SDK only
 
 1. **Detect the stack.** Identify the user's framework (or "custom"). This selects which `reference/frameworks/<name>.md` to follow — see `reference/frameworks/_index.md`.
 2. **Provision in the dashboard (manual).** Walk the user through `reference/dashboard-setup.md`: sign up → create Client → create Instance (+ upload a use-case `.md`, see `reference/use-case-markdown.md`) → set B2C/B2B → generate an API key.
-3. **⏸ PAUSE.** Ask the user to paste their `synap_...` key (or set it themselves), then `export SYNAP_API_KEY=synap_...`. Do not write integration code before the key is set.
+3. **⏸ PAUSE.** Ask the user to paste their `synap_...` key (or set it themselves), then `export SYNAP_API_KEY=synap_...` and `export SYNAP_INSTANCE_ID=inst_...` (the dashboard shows both together). Do not write integration code before the key is set.
 4. **Install.** The SDK + the framework package (needs network + approval — see "Sandbox & approvals"). Details in `reference/sdk-setup.md`.
 5. **Integrate.** Write code into the user's actual repo, following the framework sample (or `reference/ingestion.md` + `reference/context-fetch.md` for a custom stack).
 6. **Verify.** Run `python scripts/verify_synap.py`. Never report done without a green run.
