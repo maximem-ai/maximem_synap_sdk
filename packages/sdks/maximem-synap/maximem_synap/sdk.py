@@ -1046,17 +1046,40 @@ class MaximemSynapSDK:
         ):
             if SDKRegistry.alias_if_absent(self.instance_id, self):
                 self._registry_alias_keys.append(self.instance_id)
+            else:
+                # The id is already taken by a different live SDK, which only
+                # happens when one process builds two SDKs that turn out to
+                # share an instance — most often two API keys issued against
+                # it. They are deliberately kept apart (merging them would
+                # mean one caller silently transacting on the other's
+                # credential, which is the bug this keying exists to prevent),
+                # but the duplication is invisible without saying so.
+                incumbent = SDKRegistry.get(self.instance_id)
+                if incumbent is not None and incumbent.__dict__ is not self.__dict__:
+                    logger.warning(
+                        "Instance %s already has a live SDK in this process. Both keep "
+                        "their own Listen stream and in-memory caches, and short-term "
+                        "context recorded through one is not visible to the other until "
+                        "the server round-trips it. Use one API key per instance per "
+                        "process if that was not intended.",
+                        self.instance_id,
+                    )
 
-        # Initialize cache (now that client_id is known)
+        # Initialize cache (now that client_id and instance_id are known).
+        # Both are needed: client_id is the account, instance_id is the memory
+        # store. One account can own several instances, so the cache has to be
+        # scoped by instance or two of them share files on disk.
         if self._config.cache_backend:
             self._cache_manager = CacheManager(
                 client_id=self._client_id,
+                instance_id=self.instance_id,
                 storage_path=self._config.storage_path,
                 enabled=True,
             )
         else:
             self._cache_manager = CacheManager(
                 client_id=self._client_id,
+                instance_id=self.instance_id,
                 enabled=False,
             )
 

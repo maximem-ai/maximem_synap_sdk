@@ -4,7 +4,11 @@ version = "0.1.0"
 description = "Hosted remote MCP server (Streamable HTTP) adapter over the Synap public REST API."
 requires-python = ">=3.11"
 dependencies = [
-    "mcp[cli]>=1.26.0",
+    # Keep in sync with the Dockerfile, which duplicates this list and is the
+    # one pip actually reads. The <2 bound is load-bearing: mcp 2.0 removed
+    # `mcp.server.fastmcp`, so server.py fails to import and the container
+    # crash-loops while the rest of the stack reports healthy.
+    "mcp[cli]>=1.26.0,<2",
     "httpx>=0.27",
     "uvicorn>=0.30",
     "starlette>=0.37",
