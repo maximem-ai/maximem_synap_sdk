@@ -6,7 +6,7 @@ There is a Synap memory-integration skill in this directory (`SKILL.md` + `refer
 
 1. Detect the framework → pick `reference/frameworks/<name>.md`.
 2. Walk the user through manual dashboard provisioning (`reference/dashboard-setup.md`) — **there is no CLI.**
-3. **PAUSE** for the `synap_...` API key; `export SYNAP_API_KEY=...`. Don't write code before it's set.
+3. **PAUSE** for the `synap_...` API key; `export SYNAP_API_KEY=...` and `export SYNAP_INSTANCE_ID=inst_...` (the dashboard shows both). Don't write code before they're set. Set the instance id as an env var, never as an `instance_id=` constructor argument.
 4. Install the SDK + framework package (`reference/sdk-setup.md`).
 5. Integrate using the framework sample.
 6. Verify with `python scripts/verify_synap.py` — never report done without a green run.

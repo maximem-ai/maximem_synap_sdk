@@ -4,7 +4,7 @@ Work through this before the user's first production deployment, and again befor
 
 ## Credentials
 
-- [ ] `SYNAP_API_KEY` is in a secret manager (AWS Secrets Manager, GCP Secret Manager, Vault, Doppler, etc.) — never in code, never in `.env` files committed to git.
+- [ ] `SYNAP_API_KEY` (and `SYNAP_INSTANCE_ID`, if set) is in a secret manager (AWS Secrets Manager, GCP Secret Manager, Vault, Doppler, etc.) — never in code, never in `.env` files committed to git.
 - [ ] Separate API keys per environment (dev / staging / prod). Revoke and rotate quarterly or on staff changes.
 - [ ] The production API key resolves to a **separate instance** from staging/dev (the instance is resolved from the key, so this follows from using separate keys — verify it rather than assuming). Do not share an instance across environments — memories will mix.
 

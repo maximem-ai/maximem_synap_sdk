@@ -4,6 +4,7 @@ Minimal Synap example — Python, no framework.
 Run after:
     pip install maximem-synap
     export SYNAP_API_KEY=synap_...
+    export SYNAP_INSTANCE_ID=inst_...      # optional; shown with the key in the dashboard
 
 The instance is resolved from the API key on initialize(); SYNAP_INSTANCE_ID is
 only needed to pin a specific instance.

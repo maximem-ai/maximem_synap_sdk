@@ -40,6 +40,7 @@ Then set it in their environment — **never commit it**:
 
 ```bash
 export SYNAP_API_KEY=synap_...
+export SYNAP_INSTANCE_ID=inst_...
 ```
 
 For apps, put it in `.env` (git-ignored) and load it (e.g. `python-dotenv`, or your
