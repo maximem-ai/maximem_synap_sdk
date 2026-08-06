@@ -42,8 +42,16 @@ class CacheManager:
         client_id: str,
         storage_path: Optional[str] = None,
         enabled: bool = True,
+        instance_id: str = "",
     ):
         self.client_id = client_id
+        # The producing/reading Instance. Customer- and client-scoped cache files
+        # are shared by every Instance under the same client+customer, so the
+        # cache KEY must include instance_id — otherwise two Instances serving the
+        # same customer read each other's entries, silently bypassing server-side
+        # cross-instance visibility (an Instance would see another Instance's
+        # filtered memories straight from the local cache).
+        self.instance_id = instance_id or ""
         self.enabled = enabled
 
         if storage_path:
@@ -91,9 +99,14 @@ class CacheManager:
     ) -> str:
         """Build cache key.
 
-        Format: {client_id}:{scope}:{entity_id}:{context_type}:{query_hash}
+        Format: {client_id}:{instance_id}:{scope}:{entity_id}:{context_type}:{query_hash}
+
+        ``instance_id`` is part of the key so two Instances under the same
+        client+customer (which share the same on-disk cache file) never read
+        each other's entries — preserving cross-instance visibility at the
+        client cache layer.
         """
-        parts = [self.client_id, scope.value, entity_id, context_type]
+        parts = [self.client_id, self.instance_id or "_", scope.value, entity_id, context_type]
         if query_hash:
             parts.append(query_hash)
         return ":".join(parts)
@@ -186,8 +199,9 @@ class CacheManager:
             key = self._build_key(scope, entity_id, context_type, query_hash)
             backend.delete(key)
         else:
-            # Delete all entries for this entity
-            prefix = f"{self.client_id}:{scope.value}:{entity_id}:"
+            # Delete all entries for this entity (scoped to THIS instance, to
+            # match the instance-namespaced key built above).
+            prefix = f"{self.client_id}:{self.instance_id or '_'}:{scope.value}:{entity_id}:"
             backend.clear_scope(prefix)
 
     def clear_user(self, user_id: str) -> None:
