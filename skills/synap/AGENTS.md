@@ -56,7 +56,7 @@ finally:
 
 TypeScript is **not** identical — the JS API is flat and camelCase: `const sdk = createClient({ apiKey })` from `@maximem/synap-js-sdk`, then `await sdk.init()` … `await sdk.shutdown()`. Write with `sdk.addMemory({ userId, customerId, messages, mode })`; read with `sdk.fetchUserContext({ userId, searchQuery, mode })` or `sdk.getContextForPrompt({ conversationId })`. There is no `MaximemSynapSDK` class and no `sdk.memories` / `sdk.conversation` namespaces.
 
-The SDK is a **singleton per `instance_id`**. Don't fight it.
+The SDK is a **singleton per API key**. Don't fight it.
 
 ## Two operations to know
 
