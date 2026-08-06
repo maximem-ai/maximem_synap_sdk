@@ -19,7 +19,7 @@ Work through this before the user's first production deployment, and again befor
 
 - [ ] `await sdk.initialize()` runs once at process start, not per-request.
 - [ ] `await sdk.shutdown()` runs on graceful shutdown (SIGTERM handler, FastAPI lifespan, Lambda extension, etc.).
-- [ ] Single SDK instance per `instance_id` per process — singleton behavior is intentional, don't fight it.
+- [ ] Single SDK instance per API key per process — singleton behavior is intentional, don't fight it. One key per instance: two keys on one instance give two SDKs and two streams.
 - [ ] In serverless, the SDK is module-level and initialized lazily on first invocation; cold-start latency is documented.
 
 ## Read path

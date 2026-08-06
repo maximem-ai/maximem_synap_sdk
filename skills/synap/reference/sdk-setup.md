@@ -104,15 +104,21 @@ The JS API is flat and camelCase, and is **not** identical to Python: there is n
 
 ## Singleton behavior
 
-By design, constructing `MaximemSynapSDK` twice with the same `instance_id` returns the same instance:
+By design, constructing `MaximemSynapSDK` twice with the same **API key** returns the same live SDK:
 
 ```python
-a = MaximemSynapSDK(instance_id="inst_...", api_key="...")
-b = MaximemSynapSDK(instance_id="inst_...", api_key="...")
-assert a is b   # True
+a = MaximemSynapSDK(api_key="sk-...")
+b = MaximemSynapSDK(api_key="sk-...")
+# One live SDK: b shares a's connections, caches and credentials.
+# Note: `a is b` is False. They share internal state, they are not the same
+# object, so use the SDK rather than identity-checking it.
 ```
 
 This prevents duplicate connections from multi-module imports. Don't fight it. For tests, pass `_force_new=True`.
+
+Different API keys give you different SDKs, so serving several tenants from one process is supported. Two keys issued against the *same* instance are the exception: each key is its own identity, so you get two SDKs, two Listen streams and two caches for one instance. `initialize()` warns when it sees that. Use one key per instance per process.
+
+Passing `instance_id` explicitly still keys on the id, so two keys under one id share a single SDK on the first key. You do not need it: your API key already identifies your instance.
 
 ## Production-grade init with config
 

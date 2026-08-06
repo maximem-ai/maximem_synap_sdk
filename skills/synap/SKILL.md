@@ -133,7 +133,7 @@ await sdk.shutdown();
 
 The JS SDK spawns the Python SDK as a subprocess — it needs **Python 3.11+ on the host** and does not run on Edge/Workers/Bun/Deno/Node-only-Lambda. There is no `MaximemSynapSDK` class and no `sdk.memories` / `sdk.conversation` namespaces in JS.
 
-The Python SDK is a **singleton per `instance_id`** — constructing twice with the same id returns the same instance. This is intentional; do not work around it. For tests use `_force_new=True`.
+The Python SDK is a **singleton per API key** — constructing twice with the same key returns the same live SDK. This is intentional; do not work around it. Different keys give different SDKs, so one process can serve several tenants. For tests use `_force_new=True`.
 
 **Critical:** every SDK call is async. Forgetting `await` is the #1 mistake.
 
