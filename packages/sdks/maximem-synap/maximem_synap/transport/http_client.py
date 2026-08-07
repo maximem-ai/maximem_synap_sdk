@@ -45,6 +45,18 @@ class HTTPTransport:
     # Base URL for Synap API
     DEFAULT_BASE_URL = "https://synap-cloud-prod.maximem.ai"
 
+    # Connection lifecycle. httpx's default keepalive_expiry is 5s, which
+    # means real-world call patterns (one fetch per conversation, minutes
+    # apart) pay a full fresh-connection setup on every call — measured at
+    # ~600-950ms through the CDN to the origin. Instead, idle connections
+    # are kept for KEEPALIVE_EXPIRY_SECONDS (closed only after that much
+    # inactivity), and an optional background heartbeat pings /health every
+    # HEARTBEAT_INTERVAL_SECONDS so the connection stays warm indefinitely
+    # while the SDK object lives. The heartbeat request carries no auth and
+    # is not metered.
+    KEEPALIVE_EXPIRY_SECONDS = 300.0
+    HEARTBEAT_INTERVAL_SECONDS = 240.0
+
     def __init__(
         self,
         instance_id: str,
@@ -52,6 +64,8 @@ class HTTPTransport:
         timeouts: Optional[TimeoutConfig] = None,
         retry_policy: Optional[RetryPolicy] = None,
         telemetry_callback: Optional[Callable[[Dict], None]] = None,
+        keepalive_expiry: Optional[float] = None,
+        heartbeat_interval: Optional[float] = None,
     ):
         self.instance_id = instance_id
         self.base_url = base_url or self.DEFAULT_BASE_URL
@@ -59,7 +73,24 @@ class HTTPTransport:
         self.retry_policy = retry_policy
         self.telemetry_callback = telemetry_callback
 
-        # Create httpx client with timeout config
+        self._limits = httpx.Limits(
+            max_connections=20,
+            max_keepalive_connections=10,
+            keepalive_expiry=(
+                keepalive_expiry
+                if keepalive_expiry is not None
+                else self.KEEPALIVE_EXPIRY_SECONDS
+            ),
+        )
+        # 0 disables the heartbeat; None means default.
+        self._heartbeat_interval = (
+            heartbeat_interval
+            if heartbeat_interval is not None
+            else self.HEARTBEAT_INTERVAL_SECONDS
+        )
+        self._heartbeat_task: Optional["asyncio.Task"] = None
+
+        # Create httpx client with timeout + keepalive config
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
             timeout=httpx.Timeout(
@@ -68,10 +99,41 @@ class HTTPTransport:
                 write=self.timeouts.write,
                 pool=self.timeouts.connect,
             ),
+            limits=self._limits,
         )
 
+    def _ensure_heartbeat(self) -> None:
+        """Start the keepalive heartbeat once a running loop exists.
+
+        Called from request() (not __init__) because the SDK may be
+        constructed outside an event loop. Idempotent; a finished/cancelled
+        task is restarted.
+        """
+        if not self._heartbeat_interval:
+            return
+        if self._heartbeat_task is not None and not self._heartbeat_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._heartbeat_task = loop.create_task(self._heartbeat_loop())
+
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._heartbeat_interval)
+            try:
+                # Unauthenticated, unmetered; sole purpose is to keep the
+                # pooled connection (and the CDN's origin connection) warm.
+                await self._client.get("/health", timeout=10.0)
+            except Exception:  # noqa: BLE001 — best-effort; next call reconnects
+                pass
+
     async def close(self) -> None:
-        """Close the HTTP client."""
+        """Close the HTTP client and stop the heartbeat."""
+        if self._heartbeat_task is not None:
+            self._heartbeat_task.cancel()
+            self._heartbeat_task = None
         await self._client.aclose()
 
     async def request(
@@ -113,6 +175,8 @@ class HTTPTransport:
         last_error: Optional[Exception] = None
         attempts = 0
         max_attempts = self.retry_policy.max_attempts if self.retry_policy else 1
+
+        self._ensure_heartbeat()
 
         while attempts < max_attempts:
             attempts += 1
@@ -160,6 +224,15 @@ class HTTPTransport:
             except httpx.ConnectError as e:
                 last_error = NetworkTimeoutError(
                     f"Connection failed: {e}",
+                    correlation_id=correlation_id,
+                )
+
+            except httpx.RemoteProtocolError as e:
+                # Typical cause: the server/CDN closed a kept-alive
+                # connection right as we reused it. Retryable — the pool
+                # opens a fresh connection on the next attempt.
+                last_error = NetworkTimeoutError(
+                    f"Connection closed by peer: {e}",
                     correlation_id=correlation_id,
                 )
 
@@ -474,6 +547,8 @@ class HTTPTransport:
         last_error: Optional[Exception] = None
         attempts = 0
         max_attempts = self.retry_policy.max_attempts if self.retry_policy else 1
+
+        self._ensure_heartbeat()
 
         while attempts < max_attempts:
             attempts += 1
