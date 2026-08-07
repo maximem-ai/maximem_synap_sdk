@@ -757,6 +757,23 @@ class MaximemSynapSDK:
         if not _force_new:
             existing = SDKRegistry.get(registry_key)
             if existing is not None:
+                # Handing back an SDK built on a *different* credential than
+                # the caller just supplied. Only reachable on the explicit
+                # instance_id path, where the id is the identity and the key
+                # is not part of it, so the key passed here is discarded. The
+                # caller has no other way to find that out: the returned
+                # object looks exactly like the one they asked for.
+                requested = api_key or os.environ.get("SYNAP_API_KEY", "")
+                incumbent = existing._api_key or os.environ.get("SYNAP_API_KEY", "")
+                if requested and incumbent and requested != incumbent:
+                    logger.warning(
+                        "Instance %s is already running in this process on a different "
+                        "API key. The key passed here is ignored; this SDK will "
+                        "authenticate as the existing one. Rotating a key this way has "
+                        "no effect. Construct with api_key= and no instance_id to get "
+                        "an SDK on your own credential.",
+                        registry_key,
+                    )
                 # Return existing instance - copy its state
                 self.__dict__ = existing.__dict__
                 return
