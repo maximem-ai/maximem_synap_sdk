@@ -18,6 +18,13 @@ dependencies = [
     "maximem-synap>=0.2.0",
     "maximem-synap-integrations-common>=0.1.0",
     "camel-ai>=0.2.90",
+    # Same load-bearing <2 bound as synap-mcp-server (#954): mcp 2.0 removed
+    # `mcp.server.fastmcp`, and camel-ai's own `camel/toolkits/base.py` does
+    # `from mcp.server import FastMCP` at class-body time — so importing
+    # anything under `camel.toolkits` explodes against mcp 2.x. camel-ai
+    # leaves mcp unpinned, so without this bound pip resolves 2.x and every
+    # import of this package fails.
+    "mcp<2",
 ]
 
 [project.optional-dependencies]
