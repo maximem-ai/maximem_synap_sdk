@@ -464,17 +464,28 @@ class HTTPTransport:
         into telemetry events.
         """
         if response.status_code == 204:
-            return {"status_code": 204, "body_size": 0}
+            payload: Dict[str, Any] = {"status_code": 204, "body_size": 0}
+        else:
+            try:
+                body_size = len(response.content)
+            except Exception:
+                body_size = -1
+            payload = {
+                "status_code": response.status_code,
+                "body_size": body_size,
+            }
 
-        try:
-            body_size = len(response.content)
-        except Exception:
-            body_size = -1
+        # Server-side processing time stamped by the API (middleware header,
+        # server >= 2026-08-08). Reported so the dashboard can show server
+        # latency next to the SDK's wall-clock; absent on older servers.
+        server_ms = response.headers.get("x-synap-server-ms")
+        if server_ms is not None:
+            try:
+                payload["server_latency_ms"] = int(float(server_ms))
+            except (TypeError, ValueError):
+                pass
 
-        return {
-            "status_code": response.status_code,
-            "body_size": body_size,
-        }
+        return payload
 
     def _emit_telemetry(self, **kwargs) -> None:
         """Emit telemetry event if callback configured."""

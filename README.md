@@ -261,6 +261,7 @@ agent = ReActAgent.from_tools(tools, memory=memory)
 | Strands Agents | [`maximem-synap-strands-agents`](packages/integrations/synap-strands-agents/) | `pip install maximem-synap-strands-agents` |
 | CAMEL-AI | [`maximem-synap-camel-ai`](packages/integrations/synap-camel-ai/) | `pip install maximem-synap-camel-ai` |
 | Smolagents | [`maximem-synap-smolagents`](packages/integrations/synap-smolagents/) | `pip install maximem-synap-smolagents` |
+| deepagents | [`maximem-synap-deepagents`](packages/integrations/synap-deepagents/) | `pip install maximem-synap-deepagents` |
 
 <!-- END integrations -->
 

@@ -4,6 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maximem-synap-microsoft-agent"
+# The publish workflow reads the current version from PyPI and bumps from
+# there, overwriting this line. Kept one below intent: the harness surfaces are
+# a feature addition, so publish with BUMP=minor to land 0.3.0.
 version = "0.2.0"
 description = "Synap memory integration for Microsoft Agent Framework"
 readme = "README.md"
@@ -17,6 +20,10 @@ keywords = ["synap", "memory", "microsoft", "agent-framework", "ai", "agents"]
 dependencies = [
     "maximem-synap>=0.2.0",
     "maximem-synap-integrations-common>=0.1.0",
+    # Deliberately NOT raised to >=1.13 for the harness surfaces. The SDK
+    # surfaces work on 1.0, and raising the floor would break existing users
+    # for a feature they are not using. The harness modules import lazily and
+    # raise a version-naming ImportError on an older install.
     "agent-framework>=1.0",
 ]
 
@@ -24,6 +31,11 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
+    # The harness tests skip without this. Pinned in the test extra rather
+    # than in `dependencies` so CI exercises them while the runtime floor
+    # stays at 1.0. Re-run the suite on every MAF minor — every harness API is
+    # marked experimental upstream.
+    "agent-framework>=1.13",
 ]
 
 [tool.setuptools.packages.find]
