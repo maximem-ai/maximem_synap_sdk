@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maximem-synap-deepagents"
+version = "0.1.1"
+description = "Synap memory integration for deepagents — a memory backend, retrieval middleware, and tools"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [
+    {name = "Synap Team"}
+]
+keywords = ["synap", "memory", "deepagents", "langchain", "langgraph", "ai", "agents"]
+
+dependencies = [
+    "maximem-synap>=0.2.0",
+    "maximem-synap-integrations-common>=0.1.0",
+    "deepagents>=0.7.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["synap_deepagents*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
