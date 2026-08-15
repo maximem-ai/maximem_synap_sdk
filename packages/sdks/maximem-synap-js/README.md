@@ -5,7 +5,8 @@ Node.js wrapper for the Synap Python SDK.
 ## Prerequisites
 
 - Node.js 18+
-- Python 3.8+
+- Python 3.11+ (the wrapper runs the Python SDK in a subprocess, and
+  `maximem-synap` requires 3.11 or later)
 
 ## Install
 
@@ -18,10 +19,22 @@ npm install @maximem/synap-js-sdk
 Install the Python runtime used by the wrapper:
 
 ```bash
-npx synap-js-sdk setup --sdk-version 0.2.0
+npx synap-js-sdk setup --upgrade
 ```
 
-If you want the latest Python SDK version, omit `--sdk-version` and pass `--upgrade`.
+This installs the latest `maximem-synap` into a virtualenv at `~/.synap-js-sdk/.venv`.
+
+Pin a specific version with `--sdk-version <ver>` only if you have a reason to.
+Do not pin below `0.2.3`: the bridge authenticates with `MaximemSynapSDK(api_key=...)`,
+and older releases predate API-key auth, so `init()` fails with
+`__init__() got an unexpected keyword argument 'api_key'`.
+
+If `python3` on your PATH is older than 3.11, point the bootstrap at a newer one
+and recreate the virtualenv:
+
+```bash
+npx synap-js-sdk setup --python python3.11 --force-recreate-venv --upgrade
+```
 
 ## Verify Runtime
 
@@ -102,7 +115,7 @@ This command can:
 ## Single-Flow Setup (JS + TS)
 
 ```bash
-npm install @maximem/synap-js-sdk && npx synap-js-sdk setup --sdk-version 0.2.0 && npx synap-js-sdk setup-ts
+npm install @maximem/synap-js-sdk && npx synap-js-sdk setup --upgrade && npx synap-js-sdk setup-ts
 ```
 
 ## API Notes
