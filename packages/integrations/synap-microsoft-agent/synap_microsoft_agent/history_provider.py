@@ -18,8 +18,7 @@ from __future__ import annotations
 import logging
 from typing import Any, ClassVar, Optional, Sequence
 
-from agent_framework import Message
-from agent_framework._sessions import HistoryProvider
+from agent_framework import HistoryProvider, Message
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import wrap_sdk_errors_async
 
