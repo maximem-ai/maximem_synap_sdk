@@ -313,7 +313,7 @@ Drop-in instructions for coding agents (Claude Code, Cursor, etc.) that teach th
 
 ## Contributing
 
-Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the fork-first workflow, branch conventions, and how to add a new framework integration.
+This repo is a published mirror of Maximem's monorepo, so everything under `packages/` is overwritten on each sync and pull requests against it are closed. Bug reports, gaps, and new-framework requests are very welcome as [issues](https://github.com/maximem-ai/maximem_synap_sdk/issues). See [CONTRIBUTING.md](CONTRIBUTING.md) for how to run the code locally and what a new integration needs.
 
 ---
 
