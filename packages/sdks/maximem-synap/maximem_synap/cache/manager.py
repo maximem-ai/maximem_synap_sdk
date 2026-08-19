@@ -56,10 +56,22 @@ class CacheManager:
         storage_path: Optional[str] = None,
         enabled: bool = True,
         instance_id: str = "",
+        reveal_grant: str = "",
     ):
         self.client_id = client_id
         self.instance_id = instance_id
         self.enabled = enabled
+        # Which sensitive field types this key is allowed to see in the clear.
+        # A short opaque string from the server, not a list, because the SDK
+        # has no business knowing what the field types are.
+        #
+        # Two keys of one client can have different entitlements. Without this
+        # in the key, a privileged key's fetch answers a restricted key's
+        # request out of the same file, and the restricted key receives values
+        # it was never allowed to see. That is a silent, on-disk, cross-key
+        # disclosure, so it goes in the key rather than being handled by
+        # remembering to use separate directories.
+        self.reveal_grant = reveal_grant
 
         root = Path(storage_path) if storage_path else Path.home() / ".synap"
         self.base_path = root / client_id
@@ -134,10 +146,18 @@ class CacheManager:
 
         Single source of truth for key layout, shared by ``_build_key`` and by
         the bulk-delete path so the two cannot drift apart.
+
+        The reveal grant sits here, next to the identity segments, because it
+        is part of *whose* row this is rather than part of what was asked for.
+        It is omitted when empty so keys stay byte-identical to the previous
+        format for every caller who has no PII policy, which is all of them
+        until a client approves one.
         """
         parts = [self.client_id]
         if self.instance_id:
             parts.append(self.instance_id)
+        if self.reveal_grant:
+            parts.append(self.reveal_grant)
         parts.extend([scope.value, entity_id])
         return ":".join(parts) + ":"
 
