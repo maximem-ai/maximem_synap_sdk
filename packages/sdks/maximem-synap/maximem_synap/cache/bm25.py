@@ -39,12 +39,34 @@ _STOP_WORDS = frozenset({
 })
 
 
+# An alias label, as it appears in text: `[[PERSON_PHONE_h2n7v5cx8m0d]]`.
+# Kept whole rather than split into `person`, `phone` and the suffix, because
+# the first two are boilerplate shared by every label of that field type and
+# would make two different people's memories score alike.
+#
+# Mirrors `synap/cloud/shared/tokenizer.py`. Keep the two in step.
+_ALIAS_TOKEN = re.compile(r"\[\[([A-Za-z][A-Za-z0-9_]*_[a-z0-9]{12})\]\]")
+
+
 def tokenize(text: str) -> List[str]:
-    """Tokenize, lowercase, remove stop words, and stem."""
+    """Tokenize, lowercase, remove stop words, and stem.
+
+    Alias labels survive as single tokens. See `_ALIAS_TOKEN`.
+    """
     if not text:
         return []
-    tokens = re.findall(r"[a-z0-9]+", text.lower())
-    return [_stem(t) for t in tokens if len(t) >= 2 and t not in _STOP_WORDS]
+
+    labels: List[str] = []
+
+    def _take(match) -> str:
+        labels.append(match.group(1).lower())
+        return " "
+
+    remainder = _ALIAS_TOKEN.sub(_take, text)
+    tokens = re.findall(r"[a-z0-9]+", remainder.lower())
+    return labels + [
+        _stem(t) for t in tokens if len(t) >= 2 and t not in _STOP_WORDS
+    ]
 
 
 class BM25:
