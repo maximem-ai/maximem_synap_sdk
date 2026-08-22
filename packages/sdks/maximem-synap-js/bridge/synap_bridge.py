@@ -37,6 +37,14 @@ except Exception as import_error:  # pragma: no cover
     raise
 
 sdk = None
+# Process-local record of memory IDs this bridge process has ingested, used only by
+# the bulk form of delete_memory (no memory_id supplied).
+#
+# WARNING: this dies with the process. In serverless or any multi-process
+# deployment, the process that ingested a memory is usually not the process that
+# later tries to delete it, so this map will be empty and a bulk delete cannot
+# find anything to remove. Callers must pass an explicit memory_id in those
+# environments. See handle_delete_memory for how the empty case is reported.
 user_memory_ids: Dict[str, List[str]] = {}
 
 
@@ -568,12 +576,24 @@ async def handle_delete_memory(params: dict) -> dict:
 
     tracked_ids = user_memory_ids.get(tracking_key(user_id, customer_id), [])
     if not tracked_ids:
+        # Do NOT report success here. Bulk delete can only remove memories this
+        # bridge process ingested, because the tracking map is process-local. An
+        # empty map means "this process cannot tell what to delete", which is not
+        # the same as "there was nothing to delete" and must not be reported as a
+        # completed deletion. Returning success previously made a silent no-op look
+        # like a successful erasure, which is a data-deletion correctness problem.
         return {
-            "success": True,
+            "success": False,
             "latencyMs": 0,
             "deletedCount": 0,
             "rawResponse": None,
-            "note": "No tracked memory IDs for this user",
+            "error": (
+                "Bulk delete found no memory IDs tracked by this process. Bulk delete "
+                "only covers memories ingested by the same, still-running bridge "
+                "process, so it does not work across restarts, workers, or serverless "
+                "invocations. Pass an explicit memory_id to delete a specific memory."
+            ),
+            "error_type": "InvalidInputError",
             "bridgeTiming": {
                 "python_total_ms": ms_since(handler_start),
                 "steps": timings,
