@@ -25,7 +25,7 @@ const synap = await createSynap({
 
 const model = synap.wrap(anthropic("claude-sonnet-4-6"), {
   userId: "alice",
-  customerId: "acme",   // optional
+  customerId: "acme",   // B2B only; omit on B2C
 });
 
 const { text } = await generateText({
@@ -35,6 +35,8 @@ const { text } = await generateText({
 ```
 
 `synap.wrap()` returns a standard Vercel AI SDK `LanguageModel` — pass it anywhere you'd use a plain model. Nothing else changes.
+
+**Scoping:** `customerId` is B2B only, and required there. On a B2C instance (`user_context_isolation = "equals_customer"`) pass `userId` alone: a `customerId` comes back as HTTP 400. `GET /api/v1/auth/whoami` tells you which mode the instance is in.
 
 ## What happens under the hood
 
@@ -73,7 +75,7 @@ No special handling needed — context is injected before the stream starts; ing
 
 ## Per-request scoping
 
-Wrap fresh per request to scope per-user without any global state:
+Wrap fresh per request to scope per-user without any global state. This is the B2C shape; on a B2B instance pass the tenant's `customerId` alongside `userId`:
 
 ```typescript
 async function handleChat(userId: string, message: string) {

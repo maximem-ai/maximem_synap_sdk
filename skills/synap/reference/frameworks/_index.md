@@ -33,7 +33,7 @@ One file per supported framework. Read only the one matching the user's stack. E
 Every integration:
 
 1. **Takes a constructed, initialized `MaximemSynapSDK`** — never creates one for you. The user wires `sdk` once at app startup.
-2. **Accepts `user_id`, optional `customer_id`, optional `conversation_id`** as scoping parameters.
+2. **Accepts `user_id`, `customer_id`, optional `conversation_id`** as scoping parameters. `customer_id` is B2B only: required on a `strict` instance, rejected with HTTP 400 on a B2C (`equals_customer`) one, where `user_id` is the whole scope. `GET /api/v1/auth/whoami` says which you have.
 3. **Degrades reads gracefully, surfaces writes explicitly.** Read failures return empty results + log; write failures raise `SynapIntegrationError` (or framework-equivalent).
 4. **Defaults `mode="fast"` for retrieval, `mode="long-range"` for ingestion** — change only if the situation demands it.
 

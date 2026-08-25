@@ -12,24 +12,51 @@ Client (your org)              cli_<hex16>   one per Synap account
 
 The SDK talks to one **instance** at a time. Multiple agents = multiple instances = multiple SDK constructions (each with its own `instance_id`).
 
+## B2C or B2B: check this before you write a call
+
+Every instance is one or the other, fixed when it was created (the "User Relationship"
+setting in the dashboard). It decides which ids the API accepts, so establish it first:
+
+```bash
+curl -H "Authorization: Bearer $SYNAP_API_KEY" \
+  https://synap-cloud-prod.maximem.ai/api/v1/auth/whoami
+```
+
+The response carries `user_context_isolation`:
+
+| `user_context_isolation` | Mode | What the caller sends |
+| --- | --- | --- |
+| `equals_customer` | B2C | `user_id` only. A `customer_id` is rejected with HTTP 400. |
+| `strict` | B2B | `user_id` **and** `customer_id`. A `user_id` on its own is an error. |
+
+On B2C that holds for every call: ingestion, retrieval, and `record_message` alike. Do not
+pass the user id as a customer id to fill the field. `sdk.customer.context.fetch`
+(`POST /v1/context/customer/fetch`) is B2B only and is rejected on a B2C instance. The
+Python SDK from 0.4.7 raises client-side if you pass a `customer_id` on a B2C instance.
+
+When you don't know the mode, call whoami. Never send both ids to see which one sticks.
+
 ## The four scope levels
 
 Memories live at one scope. Retrieval searches narrower-to-broader and merges with narrower-takes-priority on conflicts.
 
 | Scope | Identified by | Visible to | Use for |
 | --- | --- | --- | --- |
-| **User** | `user_id` + `customer_id` | only that user | personal prefs, individual history |
-| **Customer** | `customer_id` only | all users in that org | company policies, shared org context |
+| **User** | `user_id` alone on B2C; `user_id` + `customer_id` on B2B | only that user | personal prefs, individual history |
+| **Customer** | `customer_id` only, B2B instances only | all users in that org | company policies, shared org context |
 | **Client** | implicit (no ids) | all users across all customers in your app | product docs, feature announcements |
 | **World** | global | every Synap instance | rarely used by app developers; managed by Synap |
 
-**The single most common mistake:** ingesting at the wrong scope. If you pass only `user_id`, the memory is user-scoped and invisible to other users in the same org. If you pass only `customer_id`, it's org-shared and visible to everyone in that org. If you pass both, it's user-scoped (the narrower wins) but the customer association is recorded for filtering.
+**The single most common mistake:** ingesting at the wrong scope. On B2B, passing only `user_id` is an error, passing only `customer_id` makes the memory org-shared and visible to everyone in that org, and passing both makes it user-scoped (the narrower wins) with the customer association recorded for filtering. On B2C there is no such choice to make: `user_id` alone is the only user-scoped write, and adding a `customer_id` fails with HTTP 400 instead of widening anything.
 
 ```python
-# personal preference — only Alice sees this
+# B2C: personal preference, only Alice sees this. user_id, and nothing else.
+await sdk.memories.create(document="...", user_id="alice")
+
+# B2B: personal preference: only Alice sees this
 await sdk.memories.create(document="...", user_id="alice", customer_id="acme")
 
-# org-wide policy — everyone in Acme sees this
+# B2B only: org-wide policy: everyone in Acme sees this
 await sdk.memories.create(document="Acme uses PTO policy v3...", customer_id="acme")
 
 # product knowledge — every user across every customer sees this
@@ -110,7 +137,7 @@ await sdk.memories.create(
     document=transcript,
     document_id=f"call-{call_id}",   # idempotency key
     user_id="alice",
-    customer_id="acme",
+    # On B2B, add the tenant's customer id here. On B2C one is rejected (HTTP 400).
 )
 ```
 

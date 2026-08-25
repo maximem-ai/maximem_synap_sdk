@@ -32,7 +32,7 @@ from synap_claude_agent import create_synap_hooks
 hooks = create_synap_hooks(
     sdk=sdk,
     user_id="alice",
-    customer_id="acme",          # optional
+    customer_id="acme",          # B2B only; omit on B2C
     conversation_id="conv-001",  # optional; auto-generated if omitted
 )
 
@@ -55,7 +55,7 @@ import { createSynapHooks } from "@maximem/synap-claude-agent";
 const hooks = createSynapHooks({
   sdk,
   userId: "alice",
-  customerId: "acme",         // optional
+  customerId: "acme",         // B2B only; omit on B2C
   conversationId: "conv-001",  // optional
 });
 
@@ -68,6 +68,8 @@ for await (const message of query({
 ```
 
 How hooks work: `before_query` fetches context and prepends it as a system message; `after_turn` ingests the completed user + assistant turn. Step 1 failures degrade gracefully; step 2 surfaces.
+
+**Scoping:** `customer_id` is B2B only, and required there. On a B2C instance (`user_context_isolation = "equals_customer"`) pass `user_id` alone: a `customer_id` comes back as HTTP 400. `GET /api/v1/auth/whoami` tells you which mode the instance is in.
 
 ## MCP server — explicit memory tools
 
@@ -130,7 +132,7 @@ For manual composition without the full MCP server:
 ```typescript
 import { buildSynapTools } from "@maximem/synap-claude-agent";
 
-const tools = buildSynapTools({ sdk, userId: "alice", customerId: "acme" });
+const tools = buildSynapTools({ sdk, userId: "alice", customerId: "acme" });  // customerId: B2B only
 // [synapSearchTool, synapRememberTool] — raw Anthropic tool definitions
 ```
 

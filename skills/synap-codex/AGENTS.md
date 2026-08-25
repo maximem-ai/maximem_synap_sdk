@@ -19,7 +19,8 @@ State it up front, don't assume silent execution: **network** (pip/npm install +
 
 - Every SDK call is `async` — always `await`.
 - `conversation_id` must be a valid UUID.
-- `user_id` on every call; on B2B pass `customer_id` too. `record_message` / `addMemory` require `customer_id` even on B2C (use the same value as `user_id`).
+- `user_id` on every call; on B2B pass `customer_id` too, where it is required. On B2C, `user_id` is the whole scope: a `customer_id` is rejected with HTTP 400 on every call, `record_message` / `addMemory` included, and passing the user id as one is the same bug. Read the mode from `GET /api/v1/auth/whoami` (`user_context_isolation`: `equals_customer` = B2C, `strict` = B2B); the Python SDK raises client-side from 0.4.7.
+- `customer.context.fetch` / `POST /v1/context/customer/fetch` is B2B only and is rejected on B2C.
 - Match the retrieval interface to the scope you ingested at.
 - Reads degrade gracefully; writes surface failures.
 - Never provision instances/keys from code — the user does that at `https://synap.maximem.ai`.

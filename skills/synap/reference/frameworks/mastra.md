@@ -33,7 +33,7 @@ const agent = new Agent({
   memory: new SynapMemory({
     sdk,
     userId: "alice",
-    customerId: "acme",   // optional
+    customerId: "acme",   // B2B only; omit on B2C
   }),
 
   tools: {
@@ -46,13 +46,15 @@ const result = await agent.generate("What do you remember about my project deadl
 console.log(result.text);
 ```
 
+**Scoping:** `customerId` is B2B only, and required there. On a B2C instance (`user_context_isolation = "equals_customer"`) pass `userId` alone: a `customerId` comes back as HTTP 400. `GET /api/v1/auth/whoami` tells you which mode the instance is in.
+
 ## SynapMemory — automatic memory
 
 ```typescript
 const memory = new SynapMemory({
   sdk,
   userId: "alice",
-  customerId: "acme",          // optional — scopes to org
+  customerId: "acme",          // B2B only; omit on B2C
   mode: "accurate",            // "accurate" (default) | "fast"
   injectSystemContext: true,   // default; set false for recall-only (no context preamble)
 });

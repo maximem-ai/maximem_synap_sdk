@@ -2,9 +2,11 @@
 
 The hardest thing to get right with any memory system is scoping for B2B SaaS. This file walks through the four common patterns. Use these as templates.
 
-## 1. Single-user personal assistant
+Patterns 2, 3 and 4 are **B2B only**: they need an instance whose `user_context_isolation` is `strict`. On a B2C instance (`equals_customer`) pattern 1 is the only shape that exists, and any `customer_id` you send is rejected with HTTP 400. Call `GET /api/v1/auth/whoami` and read `user_context_isolation` before you pick a pattern.
 
-One user, no orgs, full personalization.
+## 1. Single-user personal assistant (and every B2C instance)
+
+One user, no orgs, full personalization. This is also exactly what a B2C instance takes on every call: `user_id`, and nothing else.
 
 ```python
 await sdk.memories.create(
@@ -145,8 +147,9 @@ If this assertion ever fails, you have a scope-leakage bug. Fix it before shippi
 
 - **Reusing the same `user_id` across customers.** Synap will treat them as the same user — preferences will leak across orgs. Use `f"{customer_id}:{user_id}"` if your user IDs aren't globally unique, or fix at the source.
 - **Display names as `user_id`.** Names change. IDs shouldn't. Use immutable identifiers.
-- **Ingesting at client scope by accident.** Forgetting to pass `customer_id` makes every memory visible to every customer. Audit your ingestion call sites in code review.
-- **Skipping `customer_id` on retrieval but providing it on ingest.** The retrieval doesn't know what org context to honor. Pass it consistently on both sides.
+- **Ingesting at client scope by accident (B2B).** On a B2B instance, forgetting to pass `customer_id` makes every memory visible to every customer. Audit your ingestion call sites in code review.
+- **Skipping `customer_id` on retrieval but providing it on ingest (B2B).** The retrieval doesn't know what org context to honor. Pass it consistently on both sides.
+- **Sending a `customer_id` to a B2C instance.** It is rejected with HTTP 400, so the call never happens. Passing the user id as the customer id to fill the field is the same mistake: read `user_context_isolation` from whoami instead.
 
 ## Live doc
 

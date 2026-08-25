@@ -19,7 +19,7 @@ kernel = Kernel()
 kernel.add_service(OpenAIChatCompletion(service_id="default"))
 
 kernel.add_plugin(
-    SynapPlugin(sdk=sdk, user_id="alice", customer_id="acme"),
+    SynapPlugin(sdk=sdk, user_id="alice", customer_id="acme"),   # customer_id: B2B only
     plugin_name="synap",
 )
 
@@ -27,6 +27,8 @@ result = await kernel.invoke_prompt(
     "{{synap.search_memory query='project priorities'}} What are my top priorities?"
 )
 ```
+
+**Scoping:** `customer_id` is B2B only, and required there. On a B2C instance (`user_context_isolation = "equals_customer"`) pass `user_id` alone: a `customer_id` comes back as HTTP 400. `GET /api/v1/auth/whoami` tells you which mode the instance is in.
 
 ## Plugin functions
 

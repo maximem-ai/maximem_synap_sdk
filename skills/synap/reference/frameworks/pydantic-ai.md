@@ -21,7 +21,7 @@ agent: Agent[SynapDeps, str] = Agent(
 
 register_synap_tools(agent)
 
-deps = SynapDeps(sdk=sdk, user_id="alice", customer_id="acme")
+deps = SynapDeps(sdk=sdk, user_id="alice", customer_id="acme")   # customer_id: B2B only
 result = await agent.run("What do you remember about my project?", deps=deps)
 print(result.data)
 ```
@@ -31,6 +31,8 @@ print(result.data)
 1. Adds `synap_search` (model recalls memories)
 2. Adds `synap_store` (model persists new memories)
 3. Appends a system-prompt fragment instructing the agent to use both
+
+**Scoping:** `customer_id` is B2B only, and required there. On a B2C instance (`user_context_isolation = "equals_customer"`) pass `user_id` alone: a `customer_id` comes back as HTTP 400. `GET /api/v1/auth/whoami` tells you which mode the instance is in.
 
 ## SynapDeps shape
 
@@ -43,7 +45,7 @@ class SynapDeps:
     conversation_id: str | None = None
 ```
 
-This is how you serve multiple users from a single agent instance — different `SynapDeps` per request:
+This is how you serve multiple users from a single agent instance: different `SynapDeps` per request. The example below is the B2C shape; on B2B carry the tenant's `customer_id` in the deps too:
 
 ```python
 async def handle_request(user_id: str, message: str) -> str:

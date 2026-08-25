@@ -21,10 +21,15 @@ in for the developer based on what their agent does, so they can upload it in st
 
 - **B2C vs B2B is chosen once, here, by "User Relationship"** — and it changes how you
   call the SDK later:
-  - **B2C** — memory is per end-user. You only reason about `user_id`. (Note: the
-    turn-by-turn `record_message` call still requires a `customer_id` argument — on B2C,
-    pass the same value as `user_id`. See `reference/core-concepts.md`.)
-  - **B2B** — memory is per tenant. Each `user_id` lives under a `customer_id`.
+  - **B2C** (`user_context_isolation = "equals_customer"`): memory is per end-user. You
+    send `user_id` and nothing else, on every call, including the turn-by-turn
+    `record_message`. A `customer_id` is not accepted: the API rejects it with HTTP 400,
+    and the Python SDK from 0.4.7 raises before the request leaves the process. Never pass
+    the user id as a customer id to fill the field. See `reference/core-concepts.md`.
+  - **B2B** (`strict`): memory is per tenant. Each `user_id` lives under a `customer_id`,
+    and `customer_id` is required: a `user_id` on its own is an error.
+  - **Which one am I on?** `GET /api/v1/auth/whoami` returns `user_context_isolation`.
+    Read it, don't guess.
 - **Roles:** Owner/Admin can create instances and keys; Member is read-only.
 - **The instance is resolved from the API key** — you do *not* pass an instance ID on each
   call. (You may optionally set `SYNAP_INSTANCE_ID` to pin one, but it's not required.)
