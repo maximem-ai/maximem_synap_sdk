@@ -48,11 +48,17 @@ generic "remote MCP over HTTP" proxy — but prefer a client with native HTTP MC
 
 ## Scoping (same model as the SDK)
 
-You control scope by which IDs you pass to the tools:
+You control scope by which IDs you pass to the tools, within what the instance allows:
 
 - **No `user_id` / `customer_id`** → **client scope** — shared across everyone on this key.
-- **`user_id`** → **user scope** — private to that end-user.
-- **`customer_id`** → **customer scope** — shared within that tenant (B2B).
+- **`user_id`** → **user scope**: private to that end-user. This is the whole story on a B2C instance.
+- **`customer_id`** → **customer scope**: shared within that tenant. **B2B instances only.**
+
+`customer_id` is B2B only, and required there. On a B2C instance
+(`user_context_isolation = "equals_customer"`) send `user_id` alone: a `customer_id` is
+rejected with HTTP 400, and passing the user id as the customer id to fill the field is the
+same mistake. `GET /api/v1/auth/whoami` on the same bearer token tells you which mode the
+instance is in.
 
 Pass stable, immutable IDs — never display names.
 

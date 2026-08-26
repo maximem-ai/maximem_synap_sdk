@@ -96,7 +96,10 @@ The JS API is flat and camelCase, and is **not** identical to Python: there is n
 `sdk.addMemory({ userId, customerId, messages, mode })`; read with
 `sdk.fetchUserContext({ userId, searchQuery, mode })`,
 `sdk.fetchCustomerContext({ customerId, ... })`, `sdk.fetchClientContext({ ... })`, or
-`sdk.getContextForPrompt({ conversationId })`. Full example: `examples/typescript-minimal.ts`.
+`sdk.getContextForPrompt({ conversationId })`. `customerId` and `fetchCustomerContext` are
+B2B only: on a B2C instance (`user_context_isolation = "equals_customer"`) send `userId`
+alone, since a `customerId` comes back as HTTP 400. Full example:
+`examples/typescript-minimal.ts`.
 
 `init()` validates the API key, starts the Python bridge, opens the connection, and sets up the local cache.
 

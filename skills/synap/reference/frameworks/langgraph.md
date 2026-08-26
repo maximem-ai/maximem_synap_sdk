@@ -40,6 +40,8 @@ saver = SynapCheckpointSaver(sdk=sdk, user_id="alice")
 app = graph.compile(checkpointer=saver, store=store)
 ```
 
+**Scoping:** `customer_id` is B2B only, and required there. On a B2C instance (`user_context_isolation = "equals_customer"`) pass `user_id` alone: a `customer_id` comes back as HTTP 400. `GET /api/v1/auth/whoami` tells you which mode the instance is in.
+
 Inside graph nodes, use the store via the `store` kwarg LangGraph injects:
 
 ```python

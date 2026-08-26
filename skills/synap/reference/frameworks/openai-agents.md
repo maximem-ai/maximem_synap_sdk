@@ -34,6 +34,8 @@ result = await Runner.run(agent, "What do you know about my project deadlines?")
 print(result.final_output)
 ```
 
+**Scoping:** `customer_id` is B2B only, and required there. On a B2C instance (`user_context_isolation = "equals_customer"`) pass `user_id` alone: a `customer_id` comes back as HTTP 400. `GET /api/v1/auth/whoami` tells you which mode the instance is in.
+
 ## Tool signatures
 
 ```
@@ -46,7 +48,7 @@ synap_store(content: str, memory_type: str = "fact") -> dict
 
 ## Per-user agents
 
-The tools close over `user_id` / `customer_id` at construction. For multi-tenant apps, build a fresh tool set per request:
+The tools close over `user_id` / `customer_id` at construction. For multi-tenant (B2B) apps, build a fresh tool set per request and pass both ids. On B2C, leave `customer_id` at `None`:
 
 ```python
 def build_agent_for(user_id: str, customer_id: str | None = None) -> Agent:

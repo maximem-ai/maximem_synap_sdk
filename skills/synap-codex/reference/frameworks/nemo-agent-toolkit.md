@@ -15,7 +15,7 @@ from synap_nemo_agent_toolkit import SynapMemoryEditor
 
 editor = SynapMemoryEditor(
     sdk=sdk,
-    customer_id="acme",   # optional
+    customer_id="acme",   # B2B only; omit on B2C
     mode="accurate",       # "fast" or "accurate"
 )
 
@@ -30,6 +30,8 @@ results = await editor.search("communication preferences", top_k=5, user_id="ali
 for item in results:
     print(item.memory, item.score)
 ```
+
+**Scoping:** `customer_id` is B2B only, and required there. On a B2C instance (`user_context_isolation = "equals_customer"`) pass `user_id` alone: a `customer_id` comes back as HTTP 400. `GET /api/v1/auth/whoami` tells you which mode the instance is in.
 
 ## MemoryEditor protocol
 
@@ -61,7 +63,7 @@ memory:
     api_key: ${SYNAP_API_KEY}
     # instance_id: ${SYNAP_INSTANCE_ID}   # optional — resolved from the key if omitted
     mode: accurate
-    customer_id: acme
+    customer_id: acme   # B2B only; drop this line on B2C
 ```
 
 ## Factory shortcut
@@ -73,7 +75,7 @@ from synap_nemo_agent_toolkit import synap_memory_client
 
 editor = synap_memory_client(
     api_key=os.environ["SYNAP_API_KEY"],
-    customer_id="acme",
+    customer_id="acme",   # B2B only; omit on B2C
     mode="accurate",
 )
 ```

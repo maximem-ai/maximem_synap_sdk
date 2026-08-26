@@ -32,9 +32,10 @@ There is **no CLI**. Provisioning happens by hand in the dashboard; the SDK only
 
 ## Load-bearing mental model
 
-- **Scope chain (narrowest → broadest):** `USER → CUSTOMER → CLIENT → WORLD`. `user_id` on every call; `customer_id` on B2B (on B2C, `record_message`/`addMemory` still require it — pass the same value as `user_id`); `conversation_id` must be a valid UUID.
+- **Scope chain (narrowest → broadest):** `USER → CUSTOMER → CLIENT → WORLD`. `user_id` on every call; `customer_id` on B2B only, where it is required (on B2C every call takes `user_id` alone, `record_message`/`addMemory` included, and a `customer_id` is rejected with HTTP 400; never pass the user id as one); `conversation_id` must be a valid UUID.
+- **Read the mode, don't guess it:** `GET /api/v1/auth/whoami` returns `user_context_isolation`. `equals_customer` = B2C, `strict` = B2B. The Python SDK raises client-side from 0.4.7 if you pass a `customer_id` on a B2C instance.
 - **Two write paths:** `sdk.conversation.record_message(...)` (turn-by-turn; the only call that *registers* a `conversation_id`) vs `sdk.memories.create(...)` (durable knowledge; heavier; `mode="long-range"` default). A production chat agent uses both.
-- **Four fetch interfaces — match retrieval to the scope you ingested at:** `sdk.user.context.fetch(user_id=...)`, `sdk.customer.context.fetch(customer_id=...)`, `sdk.client.context.fetch()`, `sdk.conversation.context.fetch(conversation_id=...)`. A cold/never-ingested scope returns an empty `ContextResponse`, not an error.
+- **Four fetch interfaces: match retrieval to the scope you ingested at:** `sdk.user.context.fetch(user_id=...)`, `sdk.customer.context.fetch(customer_id=...)` (B2B only, rejected on B2C), `sdk.client.context.fetch()`, `sdk.conversation.context.fetch(conversation_id=...)`. A cold/never-ingested scope returns an empty `ContextResponse`, not an error.
 - **Async-first.** Every Synap call is awaited. Forgetting `await` is the #1 mistake.
 - **Graceful reads, explicit writes.** Failed fetch → empty + log (agent keeps running). Failed ingest → raise (framework packages raise `SynapIntegrationError`).
 

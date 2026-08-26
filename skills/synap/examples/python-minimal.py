@@ -20,9 +20,12 @@ async def main():
 
     try:
         user_id = "alice"
-        customer_id = "acme"
 
-        # 1. Ingest a turn (user-scoped: we pass user_id)
+        # 1. Ingest a turn (user-scoped: we pass user_id).
+        # This is the B2C shape: user_id and nothing else. On a B2B instance
+        # (whoami reports user_context_isolation="strict") add customer_id="acme"
+        # to both calls below. On B2C a customer_id is rejected with HTTP 400, and
+        # the SDK raises client-side from 0.4.7.
         ingest = await sdk.memories.create(
             document=(
                 "User: I prefer concise bullet-point summaries.\n"
@@ -30,7 +33,6 @@ async def main():
             ),
             document_type="ai-chat-conversation",
             user_id=user_id,
-            customer_id=customer_id,
             mode="long-range",
         )
         print(f"ingestion_id={ingest.ingestion_id}  status={ingest.status}")

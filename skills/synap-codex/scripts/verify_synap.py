@@ -15,6 +15,13 @@ Optional round-trip check (writes + reads one throwaway memory) — only runs
 when you opt in, so the default smoke test never mutates your instance:
 
     SYNAP_VERIFY_ROUNDTRIP=1 python scripts/verify_synap.py
+
+On a B2B instance (whoami reports user_context_isolation="strict") the round-trip
+also needs a customer id, because a user_id on its own is an error there:
+
+    SYNAP_VERIFY_CUSTOMER_ID=acme SYNAP_VERIFY_ROUNDTRIP=1 python scripts/verify_synap.py
+
+Leave it unset on B2C (equals_customer): a customer_id is rejected there with HTTP 400.
 """
 
 import asyncio
@@ -54,10 +61,19 @@ async def verify() -> None:
 async def _roundtrip(sdk: MaximemSynapSDK) -> None:
     """Ingest a known fact, then fetch it back at user scope."""
     user_id = f"verify-{uuid.uuid4().hex[:8]}"
+
+    # B2C sends user_id alone. B2B (user_context_isolation="strict") also needs a
+    # customer_id, and a B2C instance rejects one with HTTP 400, so send it only
+    # when the caller has said this is a B2B instance.
+    scope = {"user_id": user_id}
+    customer_id = os.environ.get("SYNAP_VERIFY_CUSTOMER_ID")
+    if customer_id:
+        scope["customer_id"] = customer_id
+
     await sdk.memories.create(
         document="User: My favorite color is teal.\nAssistant: Got it.",
         document_type="ai-chat-conversation",
-        user_id=user_id,
+        **scope,
     )
     print("[OK] Ingest accepted (async pipeline; extraction is eventual)")
 
@@ -65,7 +81,7 @@ async def _roundtrip(sdk: MaximemSynapSDK) -> None:
     # drive retrieval from webhooks instead of sleeping.
     await asyncio.sleep(5)
 
-    ctx = await sdk.user.context.fetch(user_id=user_id, search_query=["favorite color"])
+    ctx = await sdk.user.context.fetch(search_query=["favorite color"], **scope)
     total = len(ctx.facts) + len(ctx.preferences)
     print(f"[OK] Fetched user context ({total} items; may be 0 on a cold pipeline)")
 

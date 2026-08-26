@@ -10,10 +10,12 @@ Work through this before the user's first production deployment, and again befor
 
 ## Scoping
 
-- [ ] Every ingestion call passes `user_id` (or explicit `customer_id` for org-shared content). No accidental client-scoped writes.
+- [ ] The instance's mode is known rather than assumed: `GET /api/v1/auth/whoami` returns `user_context_isolation` (`equals_customer` = B2C, `strict` = B2B), and every call site matches it.
+- [ ] On B2C, no call passes a `customer_id` (it is rejected with HTTP 400), and the user id is never reused as one.
+- [ ] On B2B, every user-scoped call passes `user_id` **and** `customer_id`. A `user_id` on its own is an error.
+- [ ] Every ingestion call passes `user_id` (or, on B2B, an explicit `customer_id` for org-shared content). No accidental client-scoped writes.
 - [ ] User IDs and customer IDs are stable, deterministic identifiers — not display names, not anything that can change.
-- [ ] If multi-tenant, verify scope isolation: ingest a memory under `customer_id=A`, fetch from a `customer_id=B` context, confirm it's not visible.
-- [ ] If using `user_id` only (no `customer_id`), confirm that's intended and not an oversight.
+- [ ] If multi-tenant (B2B), verify scope isolation: ingest a memory under `customer_id=A`, fetch from a `customer_id=B` context, confirm it's not visible.
 
 ## SDK lifecycle
 

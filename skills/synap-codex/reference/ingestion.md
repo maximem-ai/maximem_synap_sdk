@@ -9,7 +9,7 @@ response = await sdk.memories.create(
     document="User: I'm vegetarian.\nAssistant: Got it.",
     document_type="ai-chat-conversation",
     user_id="alice",
-    customer_id="acme",          # optional, scopes to org
+    customer_id="acme",          # B2B only: required there, rejected on B2C
     mode="long-range",           # "fast" or "long-range"
     metadata={"session_id": "..."},  # opaque, not indexed
 )
@@ -25,14 +25,14 @@ Returns immediately. Processing happens in the background.
 | --- | --- | --- |
 | `document` | `str` | Required. Raw content. For chat, include speaker labels. |
 | `document_type` | `str` | Default `"ai-chat-conversation"`. Drives extraction strategy. See list below. |
-| `user_id` | `str` | Required for user-scoped memories. |
-| `customer_id` | `str` | Required for customer-scoped or shared user-customer memories. |
+| `user_id` | `str` | Required for user-scoped memories, in both modes. |
+| `customer_id` | `str` | **B2B only.** Required on B2B for user-scoped and customer-scoped memories. On B2C it is rejected with HTTP 400. |
 | `mode` | `str` | `"long-range"` (default) or `"fast"`. |
 | `document_id` | `str` | Idempotency key. Same id → updates, doesn't duplicate. |
 | `document_created_at` | `datetime` | Original creation time. Improves temporal reasoning during retrieval. |
 | `metadata` | `dict` | Stored but not indexed. Use for your bookkeeping. |
 
-The official docs mark `customer_id` as required, but in practice many integrations support user-only scoping when org-shared memory isn't needed. When in doubt, pass both.
+Which ids you send is not a judgement call, the instance settles it. B2C (`user_context_isolation = "equals_customer"`) takes `user_id` alone and rejects a `customer_id` with HTTP 400; B2B (`strict`) requires `customer_id` and errors on a `user_id` sent by itself. When in doubt, call `GET /api/v1/auth/whoami` and read `user_context_isolation`. Do not pass both to cover yourself, and never reuse the user id as the customer id.
 
 ## Document types
 
@@ -80,13 +80,13 @@ documents = [
     CreateMemoryRequest(
         document="...",
         document_type="ai-chat-conversation",
-        user_id="alice",
+        user_id="alice",          # B2C shape; on B2B add customer_id="acme"
         mode="long-range",
     ),
     CreateMemoryRequest(
         document="Sprint planning notes...",
         document_type="meeting-transcript",
-        customer_id="acme",
+        customer_id="acme",       # customer scope: B2B instances only
         mode="fast",
     ),
 ]

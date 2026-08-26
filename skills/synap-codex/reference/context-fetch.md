@@ -105,7 +105,11 @@ m.compaction_applied      # True if context was compressed to fit token budget
 
 ## Scoped retrieval
 
-Beyond conversation-level, three scope-specific endpoints:
+Beyond conversation-level, three scope-specific endpoints. `sdk.customer.context.fetch`
+(`POST /v1/context/customer/fetch`) is **B2B only** and is rejected on a B2C instance.
+`sdk.user.context.fetch` and `sdk.client.context.fetch` work in both modes; on B2B a user
+fetch takes a `customer_id` alongside the `user_id`. `GET /api/v1/auth/whoami` returns
+`user_context_isolation`, which tells you which mode you are in.
 
 ```python
 # All user-scoped + broader memories for the user behind a conversation
@@ -116,7 +120,7 @@ user_ctx = await sdk.user.context.fetch(
     mode="accurate",
 )
 
-# Customer-shared memories (org-wide knowledge)
+# Customer-shared memories (org-wide knowledge). B2B instances only.
 cust_ctx = await sdk.customer.context.fetch(
     conversation_id=conv_id,
     search_query=["engineering OKRs"],
@@ -169,7 +173,7 @@ Use this context, but do not mention you're reading from a memory system.
     await sdk.memories.create(
         document=f"User: {user_message}\nAssistant: {answer}",
         document_type="ai-chat-conversation",
-        user_id=user_id,
+        user_id=user_id,          # B2C shape; on B2B add customer_id=...
         mode="long-range",
     )
 

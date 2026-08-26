@@ -17,7 +17,7 @@ from synap_google_adk import create_synap_tools
 tools = create_synap_tools(
     sdk=sdk,
     user_id="alice",
-    customer_id="acme",   # optional
+    customer_id="acme",   # B2B only; omit on B2C
 )
 
 agent = Agent(
@@ -33,6 +33,8 @@ agent = Agent(
 
 `create_synap_tools` returns `[search_memory, store_memory]` — pass directly to `Agent(tools=...)`.
 
+**Scoping:** `customer_id` is B2B only, and required there. On a B2C instance (`user_context_isolation = "equals_customer"`) pass `user_id` alone: a `customer_id` comes back as HTTP 400. `GET /api/v1/auth/whoami` tells you which mode the instance is in.
+
 ## Tool signatures
 
 ```
@@ -45,7 +47,7 @@ store_memory(content: str, memory_type: str = "fact") -> dict
 
 ## Multi-user setup
 
-The tools close over `user_id` / `customer_id` at construction. For multi-tenant, build per-user:
+The tools close over `user_id` / `customer_id` at construction. For multi-tenant (B2B), build per-user and pass both ids. The example below is the B2C shape, `user_id` on its own:
 
 ```python
 def build_agent_for_user(user_id: str) -> Agent:

@@ -17,7 +17,7 @@ from synap_haystack import SynapRetriever
 retriever = SynapRetriever(
     sdk=sdk,
     user_id="alice",
-    customer_id="acme",   # optional
+    customer_id="acme",   # B2B only; omit on B2C
     max_results=6,
     mode="fast",          # "fast" or "accurate"
 )
@@ -36,6 +36,8 @@ Each `Document` returned has:
 - `meta["type"]` — memory type (`"fact"`, `"preference"`, etc.)
 - `meta["confidence"]` — relevance score
 
+**Scoping:** `customer_id` is B2B only, and required there. On a B2C instance (`user_context_isolation = "equals_customer"`) pass `user_id` alone: a `customer_id` comes back as HTTP 400. `GET /api/v1/auth/whoami` tells you which mode the instance is in.
+
 ## SynapMemoryWriter
 
 Place at the end of your pipeline after the LLM response:
@@ -47,7 +49,7 @@ writer = SynapMemoryWriter(
     sdk=sdk,
     conversation_id="conv-001",   # UUID
     user_id="alice",
-    customer_id="acme",
+    customer_id="acme",   # B2B only; omit on B2C
 )
 
 pipeline = Pipeline()

@@ -24,14 +24,15 @@ async function main() {
 
   try {
     const userId = "alice";
-    const customerId = "acme"; // required by addMemory; on B2C, pass the same value as userId
+    // B2C shape: userId and nothing else. On a B2B instance (whoami reports
+    // user_context_isolation="strict") add customerId to the calls below. On B2C a
+    // customerId is rejected with HTTP 400, so never pass the user id as one.
     // conversation_id must be a UUID — derive deterministically from any session string
     const convId = uuidv5("session-2026-05-04", NAMESPACE_URL);
 
     // 1. Ingest a turn. The JS write path takes a `messages` array, not a `document` string.
     await sdk.addMemory({
       userId,
-      customerId,
       conversationId: convId,
       messages: [
         { role: "user", content: "I prefer concise bullet-point summaries." },
@@ -75,12 +76,14 @@ main().catch((e) => {
 // fetchUserContext) still work; the namespaced surface is added alongside them
 // and accepts camelCase OR snake_case argument keys:
 //
-//   await sdk.conversation.record_message({ conversationId, role, content, userId, customerId });
-//   await sdk.memories.create({ document, userId, customerId });
-//   const ctx = await sdk.user.context.fetch({ userId, customerId, searchQuery: ["..."] });
+//   await sdk.conversation.record_message({ conversationId, role, content, userId });
+//   await sdk.memories.create({ document, userId });
+//   const ctx = await sdk.user.context.fetch({ userId, searchQuery: ["..."] });
 //   const promptCtx = await sdk.conversation.context.get_context_for_prompt({ conversationId });
 //
-// Also: sdk.fetch(...), sdk.customer.context.fetch(...), sdk.client.context.fetch(...).
+// On a B2B instance each of those also takes customerId; on B2C it is rejected.
+// Also: sdk.fetch(...), sdk.customer.context.fetch(...) (B2B only),
+// sdk.client.context.fetch(...).
 // Namespaced calls return the raw (snake_case) response shape that the framework
 // integrations (@maximem/synap-mastra, @maximem/synap-claude-agent) consume.
 // ---------------------------------------------------------------------------

@@ -57,7 +57,7 @@ finally:
     await sdk.shutdown()
 ```
 
-TypeScript is **not** identical — the JS API is flat and camelCase: `const sdk = createClient({ apiKey })` from `@maximem/synap-js-sdk`, then `await sdk.init()` … `await sdk.shutdown()`. Write with `sdk.addMemory({ userId, customerId, messages, mode })`; read with `sdk.fetchUserContext({ userId, searchQuery, mode })` or `sdk.getContextForPrompt({ conversationId })`. There is no `MaximemSynapSDK` class and no `sdk.memories` / `sdk.conversation` namespaces.
+TypeScript is **not** identical: the JS API is flat and camelCase: `const sdk = createClient({ apiKey })` from `@maximem/synap-js-sdk`, then `await sdk.init()` … `await sdk.shutdown()`. Write with `sdk.addMemory({ userId, customerId, messages, mode })`; read with `sdk.fetchUserContext({ userId, searchQuery, mode })` or `sdk.getContextForPrompt({ conversationId })`. `customerId` is B2B only, and required there; on a B2C instance send `userId` alone. There is no `MaximemSynapSDK` class and no `sdk.memories` / `sdk.conversation` namespaces.
 
 The SDK is a **singleton per API key**. Don't fight it.
 
@@ -69,7 +69,7 @@ await sdk.memories.create(
     document="User: I prefer dark mode.\nAssistant: Noted.",
     document_type="ai-chat-conversation",
     user_id="alice",
-    customer_id="acme",            # optional, for org scoping
+    customer_id="acme",            # B2B only: required there, rejected on B2C
     mode="long-range",             # "fast" or "long-range" (default)
     document_id="...",             # optional idempotency key
 )
@@ -78,7 +78,7 @@ await sdk.memories.create(
 # wrote with user_id → read with sdk.user.context.fetch(user_id=...).
 context = await sdk.user.context.fetch(
     user_id="alice",
-    customer_id="acme",             # B2B: pass it; B2C: optional
+    customer_id="acme",             # B2B only: required there, rejected on B2C
     search_query=["query phrase"],
     max_results=10,
     types=["facts", "preferences"], # or omit for all
@@ -95,11 +95,21 @@ context = await sdk.user.context.fetch(
 USER  →  CUSTOMER  →  CLIENT  →  WORLD
 ```
 
-Decided at ingestion by which `*_id` you pass:
+First find out which mode the instance is in. `GET /api/v1/auth/whoami` returns `user_context_isolation`:
 
-- `user_id` + `customer_id` → user-scoped, customer-associated
-- `customer_id` only → org-shared
-- nothing → client-scoped (visible across all customers)
+| `user_context_isolation` | Mode | What you send |
+| --- | --- | --- |
+| `equals_customer` | B2C | `user_id` only. A `customer_id` is rejected with HTTP 400, on every call including `record_message` / `addMemory`. |
+| `strict` | B2B | `user_id` **and** `customer_id`. A `user_id` on its own is an error. |
+
+`sdk.customer.context.fetch` (`POST /v1/context/customer/fetch`) is B2B only and is rejected on B2C. The Python SDK raises client-side from 0.4.7 if you pass a `customer_id` on a B2C instance.
+
+Then scope is decided at ingestion by which `*_id` you pass:
+
+- B2C: `user_id` → user-scoped; nothing → client-scoped. That is the whole set.
+- B2B: `user_id` + `customer_id` → user-scoped, customer-associated
+- B2B: `customer_id` only → org-shared
+- either mode: nothing → client-scoped (visible across all customers)
 
 Narrower scopes have priority on retrieval merge. **You can broaden later by re-ingesting; you cannot narrow without re-ingesting.**
 
@@ -126,6 +136,7 @@ Production default: `long-range` ingest, `fast` retrieve.
 8. **Never hardcode credentials.** `SYNAP_API_KEY` must come from a secret manager.
 9. **Separate instances per environment.** Don't share dev/staging/prod instances.
 10. **Don't try to provision instances or keys from code.** The user does that in the dashboard.
+11. **Read the instance mode, never guess it.** `GET /api/v1/auth/whoami` → `user_context_isolation`. `equals_customer` = B2C, send `user_id` alone; `strict` = B2B, send both ids. Never pass the user id as a `customer_id` to fill the field, and never send both "to be safe": on B2C that is an HTTP 400 on every call.
 
 ## Supported framework integrations
 
@@ -153,7 +164,7 @@ There's a thin integration package per framework. Always prefer it over custom w
 | Vercel AI SDK (TS) | `@maximem/synap-vercel-adk` | Model middleware |
 | MCP (no-code) | hosted MCP server — URL + token | Remote MCP over HTTP |
 
-Every package shares one contract: takes a constructed `MaximemSynapSDK`, accepts `user_id` + optional `customer_id` + optional `conversation_id`, degrades reads, surfaces writes.
+Every package shares one contract: takes a constructed `MaximemSynapSDK`, accepts `user_id` + `customer_id` (B2B only, and required there) + optional `conversation_id`, degrades reads, surfaces writes.
 
 ## Per-framework signatures (cheat sheet)
 
@@ -230,7 +241,7 @@ const model = synap.wrap(anthropic("claude-sonnet-4-6"), { userId: "alice" });
 - Read env var `SYNAP_API_KEY`. Never hardcode. `SYNAP_INSTANCE_ID` is optional — the instance is resolved from the key.
 - Ingestion: `mode="long-range"`, `document_type="ai-chat-conversation"`.
 - Retrieval: `mode="fast"`, `max_results=10`.
-- Always pass `user_id`. Add `customer_id` only when multi-tenant.
+- Always pass `user_id`. Add `customer_id` only on a B2B (`strict`) instance, where it is required. On B2C it is rejected with HTTP 400. Check with whoami; don't infer it from the code you are reading.
 
 ## What this skill does NOT do
 

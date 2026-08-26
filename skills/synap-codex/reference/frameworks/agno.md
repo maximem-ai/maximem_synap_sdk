@@ -15,7 +15,7 @@ from agno.agent import Agent
 from agno.models.openai import OpenAIChat
 from synap_agno import SynapDb
 
-db = SynapDb(sdk=sdk, customer_id="acme")   # customer_id optional
+db = SynapDb(sdk=sdk, customer_id="acme")   # B2B only; on B2C use SynapDb(sdk=sdk)
 
 agent = Agent(
     db=db,
@@ -28,6 +28,8 @@ agent.run("What are my communication preferences?", user_id="alice")
 ```
 
 `enable_user_memories=True` is what makes Agno call into the db's memory methods. Without it, `SynapDb` is dormant.
+
+**Scoping:** `customer_id` is B2B only, and required there. On a B2C instance (`user_context_isolation = "equals_customer"`) pass `user_id` alone: a `customer_id` comes back as HTTP 400. `GET /api/v1/auth/whoami` tells you which mode the instance is in.
 
 ## How it overrides
 
@@ -47,7 +49,7 @@ All other `InMemoryDb` behavior (sessions, tool calls, non-memory storage) is in
 `user_id` is passed per-call by Agno's runtime, so one `SynapDb` instance serves all users:
 
 ```python
-db = SynapDb(sdk=sdk, customer_id="acme")
+db = SynapDb(sdk=sdk, customer_id="acme")   # B2B only; on B2C use SynapDb(sdk=sdk)
 
 for user_id in ["alice", "bob", "carol"]:
     agent.run("What do you remember about me?", user_id=user_id)

@@ -32,7 +32,7 @@ async def entrypoint(ctx: JobContext):
         chat_ctx=chat_ctx,
         sdk=sdk,
         user_id="alice",
-        customer_id="acme",
+        customer_id="acme",   # B2B only; omit on B2C
         max_results=8,
     )
 
@@ -52,11 +52,13 @@ async def entrypoint(ctx: JobContext):
         session=session,
         sdk=sdk,
         user_id="alice",
-        customer_id="acme",
+        customer_id="acme",   # B2B only; omit on B2C
     )
 
     await session.start(agent=agent, room=ctx.room)
 ```
+
+**Scoping:** `customer_id` is B2B only, and required there. On a B2C instance (`user_context_isolation = "equals_customer"`) pass `user_id` alone: a `customer_id` comes back as HTTP 400. `GET /api/v1/auth/whoami` tells you which mode the instance is in.
 
 ## preload_synap_context
 
@@ -67,7 +69,7 @@ await preload_synap_context(
     chat_ctx=chat_ctx,
     sdk=sdk,
     user_id="alice",
-    customer_id="acme",    # optional
+    customer_id="acme",    # B2B only; omit on B2C
     max_results=8,
     mode="fast",           # "fast" or "accurate"
 )
@@ -84,7 +86,7 @@ conversation_id = attach_synap_recording(
     session=session,
     sdk=sdk,
     user_id="alice",
-    customer_id="acme",
+    customer_id="acme",           # B2B only; omit on B2C
     conversation_id="call-001",   # optional; auto-generated if omitted
 )
 ```

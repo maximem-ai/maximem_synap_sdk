@@ -69,7 +69,7 @@ await sdk.memories.create(
     document="User: I prefer dark mode.\nAssistant: Noted.",
     document_type="ai-chat-conversation",
     user_id="alice",
-    customer_id="acme",          # optional, scopes to org
+    customer_id="acme",          # B2B only: required there, rejected on B2C
     mode="long-range",           # "fast" or "long-range"
 )
 
@@ -79,11 +79,16 @@ await sdk.memories.create(
 # sdk.conversation.record_message(...) first, then use sdk.conversation.context.fetch.)
 context = await sdk.user.context.fetch(
     user_id="alice",
+    customer_id="acme",          # B2B only: required there, rejected on B2C
     search_query=["user preferences"],
     max_results=10,
     mode="fast",                 # "fast" (~50-100ms) or "accurate" (~200-500ms)
 )
 ```
+
+**Two instance modes. Find out which one you are on before writing a single call:**
+
+`GET /api/v1/auth/whoami` returns `user_context_isolation`. `equals_customer` means B2C: the caller sends `user_id` only, and a `customer_id` is rejected with HTTP 400 (the Python SDK raises client-side from 0.4.7). `strict` means B2B: `customer_id` is required, and a `user_id` on its own is an error. `sdk.customer.context.fetch` (`POST /v1/context/customer/fetch`) is B2B only and is rejected on B2C. Never pass the user id as a customer id to fill the field, and never send both to see which one sticks: call whoami.
 
 **Four scope levels — wider scopes are visible to narrower ones, never the reverse:**
 
@@ -92,7 +97,7 @@ USER   →  CUSTOMER  →  CLIENT  →  WORLD
 private    org-wide      app-wide   global
 ```
 
-Decide scoping at ingestion time by which `*_id` you pass. `user_id` only → user-scoped. `user_id` + `customer_id` → both. `customer_id` only → org-shared. Nothing → client-scoped.
+Decide scoping at ingestion time by which `*_id` you pass. On B2C: `user_id` → user-scoped, nothing → client-scoped, and that is the whole set. On B2B: `user_id` + `customer_id` → user-scoped, `customer_id` only → org-shared, nothing → client-scoped.
 
 **Two modes per axis — pick one:**
 
@@ -128,6 +133,7 @@ const sdk = createClient({ apiKey: process.env.SYNAP_API_KEY! });
 await sdk.init();                 // note: init(), not initialize()
 // write: await sdk.addMemory({ userId, customerId, messages, mode })
 // read:  await sdk.fetchUserContext({ userId, searchQuery, mode })
+// customerId is B2B only: on a B2C instance send userId alone.
 await sdk.shutdown();
 ```
 
@@ -164,7 +170,7 @@ For any of these, jump to `reference/frameworks/<name>.md`. They share a contrac
 
 - **Read failures degrade gracefully** — context fetch errors return empty results and log; the agent keeps running.
 - **Write failures surface explicitly** — ingestion errors raise `SynapIntegrationError` (or framework equivalent).
-- **Same scoping model** — every helper accepts `user_id`, optional `customer_id`, optional `conversation_id`.
+- **Same scoping model**: every helper accepts `user_id`, `customer_id` (B2B only, and required there), optional `conversation_id`.
 
 ## Custom stack (no integration package)
 
@@ -177,7 +183,7 @@ When generating code, default to:
 - Read the environment variable `SYNAP_API_KEY`. Never hardcode. `SYNAP_INSTANCE_ID` is optional — the instance is resolved from the key.
 - Ingestion `mode="long-range"`, `document_type="ai-chat-conversation"`.
 - Retrieval `mode="fast"`, `max_results=10`.
-- Always pass `user_id`. Add `customer_id` only if the user mentions multi-tenant / B2B / orgs.
+- Always pass `user_id`. Add `customer_id` only on a B2B instance, where it is required. Confirm the mode with `GET /api/v1/auth/whoami` (`user_context_isolation`); on B2C a `customer_id` is rejected with HTTP 400.
 - `conversation_id` must be a valid UUID — if the user passes a session string, wrap it: `str(uuid5(NAMESPACE_URL, session_str))`.
 
 ## What this skill does NOT do
