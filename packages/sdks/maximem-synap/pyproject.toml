@@ -58,6 +58,14 @@ Repository = "https://github.com/maximem-synap/sdk-python"
 where = ["."]
 include = ["maximem_synap*"]
 
+# The behavior contract is data, not code, so setuptools will not pick it
+# up from the package scan. Without this the wheel ships without
+# anticipation.json and every import of maximem_synap.behavior raises
+# FileNotFoundError at runtime -- invisible in a source checkout, fatal
+# in an installed package.
+[tool.setuptools.package-data]
+"maximem_synap.behavior" = ["*.json"]
+
 [tool.setuptools.dynamic]
 version = {attr = "maximem_synap._version.__version__"}
 
