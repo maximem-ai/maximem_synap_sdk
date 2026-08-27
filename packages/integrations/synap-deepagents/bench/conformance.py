@@ -145,7 +145,9 @@ class SynapArm(Arm):
     def __init__(self, sdk: Any, customer_id: str) -> None:
         self.sdk = sdk
         # B2B instances reject a user_id with no customer_id, so the bench
-        # always supplies both. On a B2C instance the extra scope is harmless.
+        # always supplies both. On a B2C instance the opposite holds: a
+        # customer_id is rejected with HTTP 400, so this bench cannot run
+        # against one without sending user_id alone.
         self.customer_id = customer_id
         self._user_id: Optional[str] = None
 
