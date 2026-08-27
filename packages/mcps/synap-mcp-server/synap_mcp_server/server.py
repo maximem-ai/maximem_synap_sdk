@@ -25,7 +25,13 @@ mcp = FastMCP(
     "synap",
     instructions=(
         "Synap memory tools. Forward every user message to log_exchange so it can be "
-        "remembered, and call recall_context before replying to use what is already known."
+        "remembered, and call recall_context before replying to use what is already "
+        "known. Identifiers: pass the end-user's stable id as user_id on both tools. "
+        "customer_id is B2B ONLY: it is required on an instance with "
+        "user_context_isolation=strict, and refused with HTTP 400 on one with "
+        "user_context_isolation=equals_customer (B2C), where user_id is the whole "
+        "identity and no customer scope exists. If the mode is unknown, send user_id "
+        "alone; GET /api/v1/auth/whoami reports it."
     ),
     stateless_http=True,
     # DNS-rebinding protection restricts which Host/Origin headers the transport will

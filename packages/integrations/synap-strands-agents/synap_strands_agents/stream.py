@@ -57,7 +57,9 @@ class SynapStreamHook(HookProvider):
             an already-open stream and no-ops when none is active.
         conversation_id: Synap conversation id for the emitted events. **Required.**
         user_id: External user id for the conversation. **Required.**
-        customer_id: Optional customer/org scope.
+        customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
+            B2C instance (user_context_isolation=equals_customer): the server
+            rejects a call carrying one with HTTP 400. Leave it unset there.
         session_id: Optional session identifier attached to emitted events.
     """
 
