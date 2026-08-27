@@ -1,0 +1,267 @@
+{
+  "$comment": "SOURCE OF TRUTH for anticipation-cache behavior, shared by the Python and JS/TS SDKs. Do not duplicate these values into either SDK's source. See ../README.md. Regexes are restricted to the intersection of Python 're' and ECMAScript; both SDKs have a parity test.",
+  "version": 1,
+  "recall_bypass": {
+    "note": "WS4 of the playground query-hygiene plan. A recall-shaped question never serves from the anticipation cache. Asymmetric cost is why: a stale false-hit makes the agent answer 'I don't see that' while the store holds the fact (the BZQR6J cross-session failure), whereas bypassing costs only cold-fetch latency on a turn where the user already expects a lookup. Stem coverage cannot gate this \u2014 false hits were measured at coverage=1.00. Ties break toward INCLUDING a pattern.",
+    "env_flag": "SYNAP_SDK_CACHE_RECALL_BYPASS",
+    "default": false,
+    "patterns": [
+      {
+        "pattern": "\\bremind me\\b",
+        "flags": "i",
+        "note": "Original set (WS4, playground query-hygiene plan)."
+      },
+      {
+        "pattern": "\\bon file\\b",
+        "flags": "i",
+        "note": "Original set (WS4)."
+      },
+      {
+        "pattern": "\\b(your|my|the) records\\b",
+        "flags": "i",
+        "note": "Original set (WS4)."
+      },
+      {
+        "pattern": "\\bdo you (have|know|remember|recall|see)\\b",
+        "flags": "i",
+        "note": "Original set (WS4)."
+      },
+      {
+        "pattern": "\\bwhat (do|did) (i|you) (say|tell|mention|have)\\b",
+        "flags": "i",
+        "note": "Original set (WS4)."
+      },
+      {
+        "pattern": "\\bwhat('s| is) my\\b",
+        "flags": "i",
+        "note": "Original set (WS4)."
+      },
+      {
+        "pattern": "\\bwhere (am i|do i live)\\b",
+        "flags": "i",
+        "note": "Original set (WS4)."
+      },
+      {
+        "pattern": "\\bhow long have i\\b",
+        "flags": "i",
+        "note": "Original set (WS4)."
+      },
+      {
+        "pattern": "\\bwhich of my\\b",
+        "flags": "i",
+        "note": "Original set (WS4)."
+      },
+      {
+        "pattern": "\\bwhat .{0,40}\\b(again|earlier|last time|previously|yesterday)\\b",
+        "flags": "i",
+        "note": "Original set (WS4). 'again' alone is deliberately NOT a marker: 'book me a ride again' is a task query, not a recall query."
+      },
+      {
+        "pattern": "\\bwill you use to (contact|reach|notify)\\b",
+        "flags": "i",
+        "note": "Original set (WS4)."
+      },
+      {
+        "pattern": "\\b(confirm|verify|double.?check)\\b.{0,40}\\bmy\\b",
+        "flags": "i",
+        "note": "2026-07-16 eval register issue #11: 'can you confirm my email address?' served a stale bundle. Also catches 'confirm my booking' \u2014 an intentional over-match, costing one cloud fetch."
+      },
+      {
+        "pattern": "\\b(linked to|associated with|registered (to|on|with)) my\\b",
+        "flags": "i",
+        "note": "2026-07-16 eval register issue #11: 'what name is linked to my Uber account?' served a stale bundle."
+      },
+      {
+        "pattern": "\\b(best|preferred) way to (reach|contact|update|notify) me\\b",
+        "flags": "i",
+        "note": "2026-07-16 eval register issue #11: 'best way to contact me with updates' served a stale bundle."
+      },
+      {
+        "pattern": "\\bhow (do|will|can|should) you (reach|contact|notify) me\\b",
+        "flags": "i",
+        "note": "2026-07-16 eval register issue #11, sibling phrasing of the above."
+      },
+      {
+        "pattern": "\\bwhich .{0,40}\\b(are|will) you (going to )?(use|using)\\b",
+        "flags": "i",
+        "note": "2026-07-16 eval register issue #11: 'which email are you going to use?' served a stale bundle."
+      },
+      {
+        "pattern": "\\bon (my|the) account\\b",
+        "flags": "i",
+        "note": "2026-07-16 eval register issue #11."
+      }
+    ]
+  },
+  "thresholds": {
+    "bm25": {
+      "value": 1.5,
+      "note": "Nominal threshold. The value actually applied is derived per query: max(effective_floor, min(bm25, query_token_scale * len(query_tokens))). Short queries cannot reach the nominal score, so holding them to it would miss every time."
+    },
+    "novel_term": {
+      "value": 0.45,
+      "note": "Fraction of query stems absent from the cached corpus that forces a miss."
+    },
+    "min_corpus_for_novel_gate": {
+      "value": 200,
+      "note": "The novel-term gate is meaningless on a small corpus, where the ratio is dominated by ordinary English word forms. Measured: a fresh playground conversation reaches ~60 stems after the first push and would trip the 0.45 gate on essentially every second-turn query. 200 means the gate engages once a customer has ~3-4 typical bundles cached."
+    },
+    "effective_floor": {
+      "value": 0.6,
+      "note": "Lower bound on the derived per-query threshold. Below this, BM25 stops discriminating."
+    },
+    "query_token_scale": {
+      "value": 0.3,
+      "note": "Scales the threshold down for short queries: 0.3 points of score per query token."
+    }
+  },
+  "bm25": {
+    "k1": 1.5,
+    "b": 0.75,
+    "idf_floor": 0.5,
+    "min_token_len": 2,
+    "min_stem_len": 4,
+    "suffixes": [
+      "ences",
+      "ances",
+      "ation",
+      "tion",
+      "sion",
+      "ence",
+      "ance",
+      "ness",
+      "ment",
+      "able",
+      "ible",
+      "ical",
+      "ally",
+      "ies",
+      "ive",
+      "ful",
+      "ous",
+      "ing",
+      "ary",
+      "ly",
+      "ed",
+      "es",
+      "s"
+    ],
+    "stop_words": [
+      "a",
+      "about",
+      "after",
+      "an",
+      "and",
+      "are",
+      "at",
+      "be",
+      "been",
+      "before",
+      "being",
+      "but",
+      "by",
+      "can",
+      "could",
+      "did",
+      "do",
+      "does",
+      "for",
+      "from",
+      "had",
+      "has",
+      "have",
+      "how",
+      "if",
+      "in",
+      "into",
+      "is",
+      "it",
+      "its",
+      "may",
+      "might",
+      "no",
+      "nor",
+      "not",
+      "of",
+      "on",
+      "or",
+      "over",
+      "should",
+      "so",
+      "than",
+      "that",
+      "the",
+      "then",
+      "these",
+      "this",
+      "those",
+      "to",
+      "was",
+      "were",
+      "what",
+      "when",
+      "where",
+      "which",
+      "who",
+      "whom",
+      "why",
+      "will",
+      "with",
+      "would"
+    ],
+    "alias_token": {
+      "pattern": "\\[\\[([A-Za-z][A-Za-z0-9_]*_[a-z0-9]{12})\\]\\]",
+      "note": "An alias label as it appears in text: [[PERSON_PHONE_h2n7v5cx8m0d]]. Kept whole rather than split, because 'person' and 'phone' are boilerplate shared by every label of that field type and would make two different people's memories score alike. Mirrors synap/cloud/shared/tokenizer.py \u2014 keep the two in step."
+    },
+    "suffix_note": "Order matters: longest-first, because _stem returns on first match. Reordering this list silently changes every stem and therefore every BM25 score."
+  },
+  "env_flags": {
+    "$comment": "Read at CALL time, never at module load. Python does os.environ.get inside the function bodies; JS must do the same or late process.env mutation stops working and the flag looks broken. See gotcha G-S.",
+    "SYNAP_SDK_CACHE_RECALL_BYPASS": {
+      "default": false,
+      "truthy": [
+        "true",
+        "1",
+        "yes"
+      ]
+    },
+    "SYNAP_SDK_CACHE_HONOR_TTL_HINT": {
+      "default": false,
+      "truthy": [
+        "true",
+        "1",
+        "yes"
+      ],
+      "note": "A bundle's server ttl_hint_seconds may only SHORTEN the global TTL, never extend it."
+    },
+    "SYNAP_SDK_CACHE_INVALIDATE_ON_WRITE": {
+      "default": false,
+      "truthy": [
+        "true",
+        "1",
+        "yes"
+      ],
+      "note": "2026-07-16 eval register issue #8: the cloud invalidates its own Redis caches on ingest, but that stops at the process boundary."
+    },
+    "SYNAP_SDK_CACHE_MAX_ENTRY_AGE": {
+      "default": null,
+      "note": "2026-07-16 eval register issue #6: stored_at is a sliding lease renewed on hit, so under steady traffic a pre-update snapshot never expired. Defaults to 2x the sliding TTL; 0 disables."
+    },
+    "SYNAP_SDK_CACHE_COVERAGE_MIN": {
+      "default": null
+    }
+  },
+  "coverage_gate": {
+    "note": "Fraction of the query's stems present in the picked items. A bundle can clear the BM25 threshold on one shared token ('account') while lacking the asked-for fact entirely: the false HIT behind the eval's 'forgot the name' failure. ALWAYS computed and reported; ENFORCED only when SYNAP_SDK_CACHE_COVERAGE_MIN is explicitly set, so default behavior is unchanged. When it does fire it must gate BEFORE any side effect, so a rejected lookup leaves cache state untouched.",
+    "env_flag": "SYNAP_SDK_CACHE_COVERAGE_MIN",
+    "default": null,
+    "empty_query_coverage": 1.0
+  },
+  "telemetry": {
+    "rejected_items_cap": {
+      "value": 20,
+      "note": "Rejected items reported per lookup, highest score first, so a large cache cannot bloat the payload."
+    },
+    "content_preview_chars": 120
+  }
+}
