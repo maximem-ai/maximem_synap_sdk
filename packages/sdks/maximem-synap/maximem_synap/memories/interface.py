@@ -101,6 +101,7 @@ class MemoriesInterface:
         Returns:
             CreateMemoryResponse with ingestion_id and status
         """
+        self._sdk._check_customer_id(customer_id, where="memories.create")
         self._sdk._ensure_initialized()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = time.time()
@@ -466,7 +467,10 @@ class MemoriesInterface:
     async def create_from_file(
         self,
         user_id: str,
-        customer_id: str,
+        # Optional: on a B2C instance sending one is rejected by the server, and
+        # `relationship_type` already defaults to "b2c", so the old mandatory
+        # signature made the documented default combination impossible to call.
+        customer_id: Optional[str] = None,
         relationship_type: str = "b2c",
         file_path: Optional[str] = None,
         file: Optional[IO[bytes]] = None,
@@ -496,6 +500,7 @@ class MemoriesInterface:
         Returns:
             CreateMemoryResponse with ingestion_id and status
         """
+        self._sdk._check_customer_id(customer_id, where="memories.create_from_file")
         self._sdk._ensure_initialized()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = time.time()

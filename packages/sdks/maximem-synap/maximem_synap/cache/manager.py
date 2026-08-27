@@ -4,7 +4,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Sequence
 
 from ..models.enums import ContextScope
 from .backend import CacheBackend, NullCacheBackend
@@ -15,6 +15,18 @@ logger = logging.getLogger("synap.sdk.cache")
 
 # Alias ContextScope as CacheScope for cache layer usage
 CacheScope = ContextScope
+
+
+def _clean_path(path: Optional[Sequence[Any]]) -> tuple:
+    """Drop empty rungs from a scope path, without inventing any.
+
+    `is not None` before stringifying, because str(None) is the four-character
+    string "None" and is truthy. A caller whose path carries an unsupplied rung
+    would otherwise get a literal "None" segment in every key, splitting their
+    cache against itself in a way that reads as a low hit rate rather than as a
+    bug.
+    """
+    return tuple(str(x) for x in (path or ()) if x is not None and str(x) != "")
 
 
 class CacheManager:
@@ -56,10 +68,42 @@ class CacheManager:
         storage_path: Optional[str] = None,
         enabled: bool = True,
         instance_id: str = "",
+        reveal_grant: str = "",
+        scope_path: Optional[Sequence[str]] = None,
     ):
         self.client_id = client_id
         self.instance_id = instance_id
         self.enabled = enabled
+        # The resolved path above the entity, root first, as the ids the caller
+        # used. Empty for every caller today, which keeps keys byte-identical.
+        #
+        # D-05. `entity_id` is the external id the caller passed, and today two
+        # users of one client cannot share one, because the control plane keys
+        # users on (client_id, user_id). A nested ladder removes that: an
+        # identity level scoped to `parent` lets Infosys/payments/d-42 and
+        # TCS/risk/d-42 both exist, and they would produce the same key and
+        # serve each other's rows out of the same file.
+        #
+        # That is the 0.4.3 bug exactly, where the key omitted instance_id and
+        # two instances of one account shared a local database. Depth reopens
+        # it one level down, so the fix is the same shape: put the thing that
+        # distinguishes them into the key.
+        # `is not None` before stringifying, not `if str(p)`. str(None) is the
+        # four-character string "None", which is truthy, so a path carrying an
+        # unsupplied rung would put a literal "None" segment into the key and
+        # quietly partition the cache against itself.
+        self.scope_path: tuple = _clean_path(scope_path)
+        # Which sensitive field types this key is allowed to see in the clear.
+        # A short opaque string from the server, not a list, because the SDK
+        # has no business knowing what the field types are.
+        #
+        # Two keys of one client can have different entitlements. Without this
+        # in the key, a privileged key's fetch answers a restricted key's
+        # request out of the same file, and the restricted key receives values
+        # it was never allowed to see. That is a silent, on-disk, cross-key
+        # disclosure, so it goes in the key rather than being handled by
+        # remembering to use separate directories.
+        self.reveal_grant = reveal_grant
 
         root = Path(storage_path) if storage_path else Path.home() / ".synap"
         self.base_path = root / client_id
@@ -113,6 +157,7 @@ class CacheManager:
         entity_id: str,
         context_type: str,
         query_hash: Optional[str] = None,
+        scope_path: Optional[Sequence[str]] = None,
     ) -> str:
         """Build cache key.
 
@@ -124,20 +169,41 @@ class CacheManager:
         instance's row to another. Omitted when the instance is unknown, so
         keys stay byte-identical to the legacy format on that path.
         """
-        parts = [self._key_prefix(scope, entity_id).rstrip(":"), context_type]
+        parts = [self._key_prefix(scope, entity_id, scope_path).rstrip(":"), context_type]
         if query_hash:
             parts.append(query_hash)
         return ":".join(parts)
 
-    def _key_prefix(self, scope: CacheScope, entity_id: str) -> str:
+    def _key_prefix(
+        self,
+        scope: CacheScope,
+        entity_id: str,
+        scope_path: Optional[Sequence[str]] = None,
+    ) -> str:
         """The leading, entity-identifying part of a key, ending in ``:``.
 
         Single source of truth for key layout, shared by ``_build_key`` and by
         the bulk-delete path so the two cannot drift apart.
+
+        The reveal grant sits here, next to the identity segments, because it
+        is part of *whose* row this is rather than part of what was asked for.
+        It is omitted when empty so keys stay byte-identical to the previous
+        format for every caller who has no PII policy, which is all of them
+        until a client approves one.
+
+        The scope path sits here for the same reason and is omitted the same
+        way. It answers "which d-42", which is part of whose row this is. Under
+        a flat three-level ladder there is only one d-42 per client and the
+        path adds nothing; under a nested one there can be several, and without
+        it they share a key (D-05).
         """
         parts = [self.client_id]
         if self.instance_id:
             parts.append(self.instance_id)
+        if self.reveal_grant:
+            parts.append(self.reveal_grant)
+        path = self.scope_path if scope_path is None else _clean_path(scope_path)
+        parts.extend(path)
         parts.extend([scope.value, entity_id])
         return ":".join(parts) + ":"
 
@@ -154,6 +220,7 @@ class CacheManager:
         entity_id: str,
         context_type: str,
         query: Any = None,
+        scope_path: Optional[Sequence[str]] = None,
     ) -> Optional[bytes]:
         """Get cached value.
 
@@ -175,7 +242,7 @@ class CacheManager:
 
         backend = self._get_backend(scope, file_entity_id)
         query_hash = self._hash_query(query)
-        key = self._build_key(scope, entity_id, context_type, query_hash)
+        key = self._build_key(scope, entity_id, context_type, query_hash, scope_path)
 
         result = backend.get(key)
         if result:
@@ -192,6 +259,7 @@ class CacheManager:
         value: bytes,
         ttl_seconds: Optional[int] = None,
         query: Any = None,
+        scope_path: Optional[Sequence[str]] = None,
     ) -> None:
         """Set cached value.
 
@@ -205,7 +273,7 @@ class CacheManager:
         """
         backend = self._get_backend(scope, entity_id)
         query_hash = self._hash_query(query)
-        key = self._build_key(scope, entity_id, context_type, query_hash)
+        key = self._build_key(scope, entity_id, context_type, query_hash, scope_path)
         ttl = ttl_seconds or self.DEFAULT_TTLS.get(scope, 300)
 
         backend.set(key, value, ttl)
@@ -217,16 +285,25 @@ class CacheManager:
         entity_id: str,
         context_type: Optional[str] = None,
         query: Any = None,
+        scope_path: Optional[Sequence[str]] = None,
     ) -> None:
         """Delete cached value(s).
 
         If context_type is None, deletes all entries for entity.
+
+        ⚠ `scope_path` matters and it was missing. `get` and `set` both take one
+        per call, and this did not: both branches fell back to
+        `self.scope_path`, so anything written under a per-call path could never
+        be deleted or bulk-evicted. The SDK invalidates a user's cache after a
+        write, the eviction matched nothing, and that user kept being served
+        stale context. Found by audit 2026-08-23, and the comment below already
+        described this exact failure for a different missing segment.
         """
         backend = self._get_backend(scope, entity_id)
 
         if context_type:
             query_hash = self._hash_query(query)
-            key = self._build_key(scope, entity_id, context_type, query_hash)
+            key = self._build_key(scope, entity_id, context_type, query_hash, scope_path)
             backend.delete(key)
         else:
             # Delete all entries for this entity. The prefix has to be built
@@ -235,7 +312,7 @@ class CacheManager:
             # segment was added, and a bulk delete that matches nothing is a
             # no-op that looks like success. Scoped to THIS instance, matching
             # the key.
-            prefix = self._key_prefix(scope, entity_id)
+            prefix = self._key_prefix(scope, entity_id, scope_path)
             backend.clear_scope(prefix)
 
     def clear_user(self, user_id: str) -> None:

@@ -15,6 +15,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir \
     "mcp[cli]>=1.26.0,<2" \
+    "pydantic>=2" \
     "httpx>=0.27" \
     "uvicorn>=0.30" \
     "starlette>=0.37"
