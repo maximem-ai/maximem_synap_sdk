@@ -2,6 +2,9 @@
 
 Covers:
   - client.scope_for
+  - client.CustomerIdNotAcceptedError (message content)
+  - client.get_isolation (no-token short circuit)
+  - tools._server_message (400 body -> the fix text)
   - client.SynapAPIError  (constructor fields, __str__, retry_after)
   - tools._format_context (all buckets, empty items, None guard)
   - tools._summarize_status (all status branches)
@@ -15,9 +18,12 @@ Covers:
 import pytest
 
 from synap_mcp_server.client import (
+    B2C_ISOLATION,
     NETWORK_STATUS,
     TIMEOUT_STATUS,
+    CustomerIdNotAcceptedError,
     SynapAPIError,
+    get_isolation,
     scope_for,
     _auth_headers,
 )
@@ -29,6 +35,7 @@ from synap_mcp_server.context import (
 from synap_mcp_server.tools import (
     _describe_api_error,
     _format_context,
+    _server_message,
     _soft_recall_error,
     _summarize_status,
 )
@@ -448,3 +455,96 @@ def test_format_context_context_is_none():
     """context value is None: treated as {} -> returns empty string."""
     result = _format_context({"context": None})
     assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# The identifier contract
+# ---------------------------------------------------------------------------
+
+_REJECTION_BODY = (
+    '{"error": "customer_id_not_accepted_on_b2c", '
+    '"message": "customer_id is not accepted on a B2C instance.", '
+    '"detail": {"code": "customer_id_not_accepted_on_b2c", '
+    '"message": "customer_id is not accepted on a B2C instance.", '
+    '"where": "POST /v1/context/user/fetch", '
+    '"fix": "Send user_id only and omit customer_id entirely."}}'
+)
+
+
+def test_customer_id_rejection_names_the_value_the_mode_and_the_fix():
+    """All three or the message is not actionable: which value was refused, why
+    the instance refuses it, and what to send instead."""
+    exc = CustomerIdNotAcceptedError("POST /api/v1/memories/create", "acme")
+    msg = str(exc)
+    assert "'acme'" in msg
+    assert B2C_ISOLATION in msg
+    assert "user_id" in msg
+    assert "POST /api/v1/memories/create" in msg
+
+
+def test_customer_id_rejection_appends_the_route_specific_hint():
+    """A customer-only recall gets one extra sentence, because for that call the
+    whole ROUTE is gone, not just the field."""
+    exc = CustomerIdNotAcceptedError(
+        "POST /v1/context/customer/fetch", "acme",
+        extra="Customer-scoped retrieval does not exist on a B2C instance at all.",
+    )
+    assert "does not exist on a B2C instance" in str(exc)
+
+
+def test_customer_id_rejection_is_not_an_api_error():
+    """It is raised before anything is sent, so it must not be mistaken for an
+    upstream failure by a caller branching on SynapAPIError."""
+    exc = CustomerIdNotAcceptedError("where", "acme")
+    assert isinstance(exc, Exception)
+    assert not isinstance(exc, SynapAPIError)
+
+
+async def test_get_isolation_without_a_token_returns_none_without_a_request():
+    """No token means no whoami to make; returning None keeps the check inert
+    rather than turning a missing token into a scoping decision."""
+    set_token(None)
+    assert await get_isolation() is None
+
+
+def test_server_message_pulls_message_and_fix_out_of_a_rejection_body():
+    out = _server_message(_REJECTION_BODY)
+    assert "not accepted on a B2C instance" in out
+    assert "Send user_id only" in out
+    assert "{" not in out, "raw JSON must not be handed to the model"
+
+
+def test_server_message_falls_back_to_raw_text():
+    """Not every 400 is the contract. A plain-text body is better than nothing."""
+    assert "boom" in _server_message("boom")
+
+
+def test_server_message_on_json_without_the_expected_keys():
+    """A dict that carries neither message nor fix falls back rather than
+    returning an empty string, which would read as 'no explanation given'."""
+    out = _server_message('{"unexpected": true}')
+    assert out
+
+
+def test_server_message_on_empty_body():
+    assert _server_message("") == ""
+
+
+def test_describe_api_error_400_carries_the_fix_not_the_status():
+    """The old mapping printed 'status 400' and dropped the body, which turned the
+    one error that explains itself back into a bare status code."""
+    exc = SynapAPIError(400, _REJECTION_BODY)
+    msg = _describe_api_error(exc, "saving to memory")
+    assert "ERROR" in msg
+    assert "Send user_id only" in msg
+
+
+def test_soft_recall_error_400_is_loud_not_benign():
+    """Recall degrades quietly on outages and must NOT degrade quietly on a
+    rejected shape: 'no memory available' for a refused call is the exact failure
+    the contract exists to remove."""
+    exc = SynapAPIError(400, _REJECTION_BODY)
+    msg = _soft_recall_error(exc)
+    assert "ERROR" in msg
+    assert "Send user_id only" in msg
+    assert "No memory available" not in msg

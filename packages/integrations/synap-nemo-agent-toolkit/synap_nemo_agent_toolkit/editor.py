@@ -46,7 +46,9 @@ class SynapMemoryEditor(MemoryEditor):
 
     Args:
         sdk: Configured :class:`MaximemSynapSDK`.
-        customer_id: Optional customer/org scope. Empty string means
+        customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
+            B2C instance (user_context_isolation=equals_customer): the server
+            rejects a call carrying one with HTTP 400. Leave it unset there. Empty string means
             customer-less (forwarded to the SDK as ``None``).
         mode: Synap fetch mode — ``"accurate"`` (default) or ``"fast"``.
         document_type: ``document_type`` stamped on every ``memories.create``
