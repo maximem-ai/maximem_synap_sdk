@@ -42,7 +42,9 @@ class SynapDb(InMemoryDb):
 
     Args:
         sdk: Configured :class:`MaximemSynapSDK`.
-        customer_id: Optional customer/org scope. When empty, Synap treats
+        customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
+            B2C instance (user_context_isolation=equals_customer): the server
+            rejects a call carrying one with HTTP 400. Leave it unset there. When empty, Synap treats
             requests as customer-less.
         mode: Synap fetch mode; ``"accurate"`` (default) or ``"fast"``.
         max_results: Default cap on ``sdk.fetch`` when Agno doesn't specify.
