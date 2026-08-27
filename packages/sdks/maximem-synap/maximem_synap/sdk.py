@@ -734,6 +734,10 @@ class MaximemSynapSDK:
         await sdk.instance.listen()
     """
 
+    # The instance's scoping mode, learned from whoami on initialize(). None
+    # until then, and None against a server that does not report it.
+    _user_context_isolation: Optional[str] = None
+
     def __init__(
         self,
         instance_id: str = "",
@@ -978,6 +982,23 @@ class MaximemSynapSDK:
         count = self._turn_counters.get(key, 0)
         return count > 0 and count % self._user_summary_interval == 0
 
+    def _check_customer_id(self, customer_id, *, where: str) -> None:
+        """Refuse a customer_id on a B2C instance, at the call site.
+
+        Cheap and side-effect free, so every entry point can call it. See
+        `maximem_synap.scoping` for why an SDK that stays quiet here is worse
+        than one that raises.
+        """
+        from maximem_synap.scoping import check_customer_id
+        # getattr on both: this runs on the hot path of every entry point, and a
+        # check that can itself raise AttributeError on a partially-constructed
+        # SDK would turn a guard into a new failure mode. The instance id is
+        # only decoration on the message.
+        check_customer_id(
+            getattr(self, "_user_context_isolation", None), customer_id,
+            where=where, instance_id=getattr(self, "instance_id", None),
+        )
+
     async def initialize(self) -> None:
         """Initialize the SDK.
 
@@ -1037,6 +1058,11 @@ class MaximemSynapSDK:
                 )
                 resolved_client_id = whoami.get("client_id") or ""
                 resolved_instance_id = whoami.get("instance_id") or ""
+                # The instance's scoping mode. Absent against any server older
+                # than this field, and absent stays None, which every check
+                # below treats as "do not enforce". The server rejects
+                # independently either way.
+                self._user_context_isolation = whoami.get("user_context_isolation")
                 if resolved_client_id and not self._client_id:
                     self._client_id = resolved_client_id
                     if self._credential_manager._credentials is not None:
@@ -1316,6 +1342,7 @@ class MaximemSynapSDK:
                 scopes=["user", "customer"],
             )
         """
+        self._check_customer_id(customer_id, where="sdk.fetch")
         self._ensure_initialized()
         start_time = datetime.now(timezone.utc)
 
@@ -1549,6 +1576,7 @@ class MaximemSynapSDK:
             >>> # In an Anthropic agent loop:
             >>> tool = sdk.as_tool(scope="unified", user_id="u", style="anthropic")
         """
+        self._check_customer_id(customer_id, where="sdk.as_tool")
         scope = scope.lower()
         valid = {"conversation", "user", "customer", "client", "unified"}
         if scope not in valid:
@@ -1633,7 +1661,7 @@ class ConversationInterface:
         role: str,
         content: str,
         user_id: str,
-        customer_id: str,
+        customer_id: Optional[str] = None,
         session_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
@@ -1644,13 +1672,20 @@ class ConversationInterface:
             role: Message role ("user" or "assistant")
             content: Message content text
             user_id: User identifier (required, must be external ID)
-            customer_id: Customer identifier (required, must be external ID)
+            customer_id: Customer identifier. REQUIRED on a B2B instance.
+                NOT ACCEPTED on a B2C instance (user_context_isolation =
+                equals_customer), where the user_id is the whole identity.
+                This parameter used to be mandatory, which meant a B2C caller
+                could not use this method correctly at all: they were forced to
+                send a field the server files their data under, and then read it
+                back under a different one.
             session_id: Session identifier (optional, auto-generated if not provided)
             metadata: Additional metadata (optional)
 
         Returns:
             Dict with message_id, conversation_id, session_id, recorded_at
         """
+        self._sdk._check_customer_id(customer_id, where="conversation.record_message")
         validate_conversation_id(conversation_id)
         controller = self._ensure_controller()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
@@ -1802,6 +1837,7 @@ class ConversationInterface:
         """
         # NOTE: deliberately NO validate_conversation_id() here — the id is a
         # free-form client string the server coerces (spec §4.1).
+        self._sdk._check_customer_id(customer_id, where="ConversationInterface.ingest_transcript")
         self._sdk._ensure_initialized()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = datetime.now(timezone.utc)
@@ -1990,6 +2026,7 @@ class ConversationContextInterface:
         precision_level: str = "high",
         user_id: Optional[str] = None,
         customer_id: Optional[str] = None,
+        scope_path: Optional[Dict[str, str]] = None,
     ) -> ContextResponse:
         """Fetch context for a conversation.
 
@@ -2017,6 +2054,7 @@ class ConversationContextInterface:
         Returns:
             ContextResponse with facts, preferences, episodes, etc.
         """
+        self._sdk._check_customer_id(customer_id, where="ConversationContextInterface.fetch")
         self._sdk._ensure_initialized()
         validate_conversation_id(conversation_id)
 
@@ -2115,6 +2153,17 @@ class ConversationContextInterface:
                     body["precision_level"] = precision_level
                 if skip_server_st:
                     body["include_conversation_context"] = False
+                # Nested scoping. Names each rung of the client's own ladder
+                # down to the one this request is happening at, for example
+                # {"customer": "acme", "team": "payments", "user": "d-42"}.
+                #
+                # Only sent when supplied, so a caller who does not use custom
+                # levels sends exactly the body they sent before. The server
+                # refuses a path that skips a rung and names the rung it wanted,
+                # rather than guessing, because a wrong guess at or above the
+                # tenant would cross a customer boundary.
+                if scope_path:
+                    body["scope"] = scope_path
                 result = await self._sdk._http_transport.post(
                     "/v1/context/conversation/fetch",
                     auth_context=auth_context,
@@ -2633,6 +2682,7 @@ class UserInterface:
         Raises:
             ContextNotFoundError: 404 — no profile exists for this user yet.
         """
+        self._sdk._check_customer_id(customer_id, where="UserInterface.get_profile")
         self._sdk._ensure_initialized()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = datetime.now(timezone.utc)
@@ -2700,6 +2750,7 @@ class UserContextInterface:
         context_mode: str = "in-conversation",
         include_profile: bool = True,
         last_n_conversations: int = 1,
+        scope_path: Optional[Dict[str, str]] = None,
     ) -> ContextResponse:
         """Fetch context for a user.
 
@@ -2729,6 +2780,7 @@ class UserContextInterface:
             ContextResponse. In summary mode the item lists are empty and
             ``.profile`` / ``.conversations`` are populated.
         """
+        self._sdk._check_customer_id(customer_id, where="UserContextInterface.fetch")
         self._sdk._ensure_initialized()
 
         # Validate mode
@@ -2832,6 +2884,17 @@ class UserContextInterface:
                     body["precision_level"] = precision_level
                 if skip_server_st:
                     body["include_conversation_context"] = False
+                # Nested scoping. Names each rung of the client's own ladder
+                # down to the one this request is happening at, for example
+                # {"customer": "acme", "team": "payments", "user": "d-42"}.
+                #
+                # Only sent when supplied, so a caller who does not use custom
+                # levels sends exactly the body they sent before. The server
+                # refuses a path that skips a rung and names the rung it wanted,
+                # rather than guessing, because a wrong guess at or above the
+                # tenant would cross a customer boundary.
+                if scope_path:
+                    body["scope"] = scope_path
                 # Conditional body keys — only send the summary-mode params in
                 # summary mode, so an in-conversation fetch is byte-identical to
                 # today (zero regression).
@@ -2954,8 +3017,10 @@ class CustomerContextInterface:
         types: Optional[List[str]] = None,
         mode: str = "fast",
         precision_level: str = "high",
+        scope_path: Optional[Dict[str, str]] = None,
     ) -> ContextResponse:
         """Fetch context for a customer (B2B)."""
+        self._sdk._check_customer_id(customer_id, where="CustomerContextInterface.fetch")
         self._sdk._ensure_initialized()
 
         # Validate mode
@@ -3039,6 +3104,17 @@ class CustomerContextInterface:
                     body["precision_level"] = precision_level
                 if skip_server_st:
                     body["include_conversation_context"] = False
+                # Nested scoping. Names each rung of the client's own ladder
+                # down to the one this request is happening at, for example
+                # {"customer": "acme", "team": "payments", "user": "d-42"}.
+                #
+                # Only sent when supplied, so a caller who does not use custom
+                # levels sends exactly the body they sent before. The server
+                # refuses a path that skips a rung and names the rung it wanted,
+                # rather than guessing, because a wrong guess at or above the
+                # tenant would cross a customer boundary.
+                if scope_path:
+                    body["scope"] = scope_path
                 result = await self._sdk._http_transport.post(
                     "/v1/context/customer/fetch",
                     auth_context=auth_context,
@@ -3148,6 +3224,7 @@ class ClientContextInterface:
         types: Optional[List[str]] = None,
         mode: str = "fast",
         precision_level: str = "high",
+        scope_path: Optional[Dict[str, str]] = None,
     ) -> ContextResponse:
         """Fetch organizational context."""
         self._sdk._ensure_initialized()
@@ -3232,6 +3309,17 @@ class ClientContextInterface:
                     body["precision_level"] = precision_level
                 if skip_server_st:
                     body["include_conversation_context"] = False
+                # Nested scoping. Names each rung of the client's own ladder
+                # down to the one this request is happening at, for example
+                # {"customer": "acme", "team": "payments", "user": "d-42"}.
+                #
+                # Only sent when supplied, so a caller who does not use custom
+                # levels sends exactly the body they sent before. The server
+                # refuses a path that skips a rung and names the rung it wanted,
+                # rather than guessing, because a wrong guess at or above the
+                # tenant would cross a customer boundary.
+                if scope_path:
+                    body["scope"] = scope_path
                 result = await self._sdk._http_transport.post(
                     "/v1/context/client/fetch",
                     auth_context=auth_context,
@@ -3476,6 +3564,7 @@ class InstanceInterface:
         Raises:
             ListeningNotActiveError: If listen() has not been called.
         """
+        self._sdk._check_customer_id(customer_id, where="InstanceInterface.send_message")
         from .models.errors import ListeningNotActiveError
 
         if not self.is_listening:
@@ -3563,6 +3652,7 @@ class InstanceInterface:
         Raises:
             ListeningNotActiveError: If ``listen()`` has not been called.
         """
+        self._sdk._check_customer_id(customer_id, where="InstanceInterface.record_thinking")
         md: Dict[str, str] = dict(metadata or {})
         if step_index is not None:
             md["step_index"] = str(step_index)
@@ -3604,6 +3694,7 @@ class CacheInterface:
 
     def clear_customer(self, customer_id: str) -> None:
         """Clear cached data for a specific customer."""
+        self._sdk._check_customer_id(customer_id, where="CacheInterface.clear_customer")
         if self._sdk._cache_manager:
             self._sdk._cache_manager.clear_customer(customer_id)
 
