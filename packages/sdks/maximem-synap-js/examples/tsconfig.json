@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    // Deliberately the strictest realistic consumer config. If the SDK's
+    // shipped .d.ts only holds up under loose settings, that is worth failing
+    // on here rather than discovering in a customer's repo.
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noUnusedLocals": false,
+    "skipLibCheck": false,
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": ["test-ts-sdk.ts"]
+}

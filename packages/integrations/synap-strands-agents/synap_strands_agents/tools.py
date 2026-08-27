@@ -36,7 +36,9 @@ def create_synap_tools(
     Args:
         sdk: Initialised :class:`MaximemSynapSDK`.
         user_id: External user id these operations act on. **Required.**
-        customer_id: Optional customer/org scope. Empty means customer-less.
+        customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
+            B2C instance (user_context_isolation=equals_customer): the server
+            rejects a call carrying one with HTTP 400. Leave it unset there. Empty means customer-less.
         conversation_id: Optional Synap conversation id threaded into ``fetch``.
 
     Example::
