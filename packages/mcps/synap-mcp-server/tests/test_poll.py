@@ -8,7 +8,8 @@ Tests:
   - check_memory_status with 404 returns benign unknown-id message
   - check_memory_status missing token returns ERROR string
   - Various terminal-status aliases (done, success, partial_success)
-  - recall_context with customer_id uses customer scope
+  - recall_context with customer_id uses customer scope on B2B, and is refused
+    with an actionable ERROR on B2C
   - list_recent_memories happy path (no search_query)
   - list_recent_memories missing token returns ERROR string
   - recall_context with user_id uses user scope
@@ -20,7 +21,7 @@ import pytest
 import respx
 
 from synap_mcp_server.server import mcp
-from tests.conftest import API_BASE
+from tests.conftest import API_BASE, B2B, B2C, mock_whoami
 
 pytestmark = pytest.mark.asyncio
 
@@ -293,10 +294,11 @@ async def test_check_memory_status_missing_token_returns_error(no_token):
 
 
 @respx.mock
-async def test_recall_context_customer_scope_routes_to_customer_fetch(with_token):
-    """customer_id routes to /v1/context/customer/fetch."""
+async def test_recall_context_customer_scope_routes_to_customer_fetch_on_b2b(with_token):
+    """B2B only: customer_id routes to /v1/context/customer/fetch and is forwarded."""
     import json
 
+    mock_whoami(B2B)
     route = respx.post(f"{API_BASE}/v1/context/customer/fetch").mock(
         return_value=httpx.Response(200, json={"context": {}})
     )
@@ -306,6 +308,91 @@ async def test_recall_context_customer_scope_routes_to_customer_fetch(with_token
     assert route.called
     sent = json.loads(route.calls.last.request.read().decode())
     assert sent.get("customer_id") == "c1"
+
+
+@respx.mock
+async def test_recall_context_customer_id_on_b2c_is_a_loud_error(with_token):
+    """Recall is soft-fail by policy, and a rejected shape is the exception.
+
+    Answering "no memory available" to a call the instance refuses is precisely
+    how a B2C instance served thousands of consecutive empty reads without anyone
+    noticing. The model has to be told the call was wrong, and told what to send.
+    """
+    mock_whoami(B2C)
+    route = respx.post(f"{API_BASE}/v1/context/customer/fetch").mock(
+        return_value=httpx.Response(200, json={"context": {}})
+    )
+    text = _text(
+        await mcp.call_tool("recall_context", {"query": "prefs", "customer_id": "c1"})
+    )
+    assert not route.called
+    assert "ERROR" in text
+    assert "user_id" in text
+    assert "No memory available" not in text, (
+        "a refused request must not read as an empty memory"
+    )
+
+
+@respx.mock
+async def test_log_exchange_customer_id_on_b2c_is_a_hard_error(with_token):
+    """The write is refused rather than filed under a scope the caller did not ask
+    for. Silently collapsing the id is what let write and read address different
+    buckets in the first place."""
+    mock_whoami(B2C)
+    route = respx.post(f"{API_BASE}/api/v1/memories/create").mock(
+        return_value=httpx.Response(200, json={"ingestion_id": "ing_never"})
+    )
+    text = _text(
+        await mcp.call_tool(
+            "log_exchange", {"user_message": "hi", "user_id": "u1", "customer_id": "c1"}
+        )
+    )
+    assert not route.called
+    assert "ERROR" in text
+    assert "equals_customer" in text
+
+
+@respx.mock
+async def test_list_recent_memories_customer_id_on_b2c_is_an_error(with_token):
+    """The third scoped tool obeys the same rule. Two of three would be worse than
+    none, because the exception is the one an agent would settle on."""
+    mock_whoami(B2C)
+    respx.post(f"{API_BASE}/v1/context/customer/fetch").mock(
+        return_value=httpx.Response(200, json={"context": {}})
+    )
+    text = _text(await mcp.call_tool("list_recent_memories", {"customer_id": "c1"}))
+    assert "ERROR" in text
+    assert "No memories yet" not in text
+
+
+@respx.mock
+async def test_a_server_400_carries_the_fix_text_through_to_the_model(with_token):
+    """An old client, or a mode this server could not read, still meets the API's
+    own 400. That body says what to send instead, and it must not be reduced to
+    "status 400"."""
+    mock_whoami(None)  # mode unknown, so the local check stays out of the way
+    respx.post(f"{API_BASE}/api/v1/memories/create").mock(
+        return_value=httpx.Response(
+            400,
+            json={
+                "error": "customer_id_not_accepted_on_b2c",
+                "message": "customer_id is not accepted on a B2C instance.",
+                "detail": {
+                    "code": "customer_id_not_accepted_on_b2c",
+                    "message": "customer_id is not accepted on a B2C instance.",
+                    "where": "POST /api/v1/memories/create",
+                    "fix": "Send user_id only and omit customer_id entirely.",
+                },
+            },
+        )
+    )
+    text = _text(
+        await mcp.call_tool(
+            "log_exchange", {"user_message": "hi", "user_id": "u1", "customer_id": "c1"}
+        )
+    )
+    assert "ERROR" in text
+    assert "Send user_id only" in text, "the server's fix text must survive the mapping"
 
 
 @respx.mock

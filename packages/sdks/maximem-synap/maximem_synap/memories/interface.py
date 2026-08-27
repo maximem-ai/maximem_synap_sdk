@@ -5,7 +5,7 @@ import json as _json
 import os
 import time
 from datetime import datetime
-from typing import IO, List, Optional, Union
+from typing import IO, Dict, List, Optional, Union
 from uuid import UUID
 
 from ..utils.correlation import generate_correlation_id
@@ -76,6 +76,7 @@ class MemoriesInterface:
         document_created_at: Optional[datetime] = None,
         mode: str = "long-range",
         metadata: Optional[dict] = None,
+        scope: Optional[Dict[str, str]] = None,
         **kwargs,
     ) -> CreateMemoryResponse:
         """
@@ -97,10 +98,17 @@ class MemoriesInterface:
             document_created_at: When the document was originally created
             mode: "fast" or "long-range"
             metadata: Additional metadata
+            scope: The level this memory belongs to, named in full, one entry
+                per level down to it, for example
+                {"customer": "acme", "team": "payments", "user": "dana"}.
+                Only needed if your scope ladder has a level between customer
+                and user: two ids cannot say which one a write belongs to, and
+                the server refuses rather than guessing. Omit it otherwise.
 
         Returns:
             CreateMemoryResponse with ingestion_id and status
         """
+        self._sdk._check_customer_id(customer_id, where="memories.create")
         self._sdk._ensure_initialized()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = time.time()
@@ -112,6 +120,7 @@ class MemoriesInterface:
             document_created_at=document_created_at,
             user_id=user_id,
             customer_id=customer_id,
+            scope=scope,
             mode=IngestMode(mode),
             metadata=metadata or {},
         )
@@ -466,7 +475,10 @@ class MemoriesInterface:
     async def create_from_file(
         self,
         user_id: str,
-        customer_id: str,
+        # Optional: on a B2C instance sending one is rejected by the server, and
+        # `relationship_type` already defaults to "b2c", so the old mandatory
+        # signature made the documented default combination impossible to call.
+        customer_id: Optional[str] = None,
         relationship_type: str = "b2c",
         file_path: Optional[str] = None,
         file: Optional[IO[bytes]] = None,
@@ -496,6 +508,7 @@ class MemoriesInterface:
         Returns:
             CreateMemoryResponse with ingestion_id and status
         """
+        self._sdk._check_customer_id(customer_id, where="memories.create_from_file")
         self._sdk._ensure_initialized()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = time.time()
