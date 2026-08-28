@@ -173,6 +173,9 @@ class HTTPTransport:
         }
 
         last_error: Optional[Exception] = None
+        # Whether the most recent failure leaves it unknown if the server
+        # processed the request. Gates retries of non-idempotent methods.
+        outcome_unknown = False
         attempts = 0
         max_attempts = self.retry_policy.max_attempts if self.retry_policy else 1
 
@@ -216,40 +219,70 @@ class HTTPTransport:
                 return self._handle_response(response, correlation_id)
 
             except httpx.TimeoutException as e:
+                # The request may have been fully received and processed; we just
+                # never saw the response. Outcome unknown.
+                outcome_unknown = True
                 last_error = NetworkTimeoutError(
                     f"Request timed out: {e}",
                     correlation_id=correlation_id,
                 )
 
             except httpx.ConnectError as e:
+                # Connection establishment failed, so the application never saw
+                # the request. Safe to retry even for non-idempotent methods.
+                outcome_unknown = False
                 last_error = NetworkTimeoutError(
                     f"Connection failed: {e}",
                     correlation_id=correlation_id,
                 )
 
             except httpx.RemoteProtocolError as e:
-                # Typical cause: the server/CDN closed a kept-alive
-                # connection right as we reused it. Retryable — the pool
-                # opens a fresh connection on the next attempt.
+                # Typical cause: the server/CDN closed a kept-alive connection
+                # right as we reused it. httpx reports that as "Server
+                # disconnected without sending a response", and it means the
+                # connection was already being torn down, so the request almost
+                # never reaches application code. We keep retrying that case even
+                # for POST, because stale pooled connections are common enough
+                # against the CDN that dropping the retry would be a real
+                # reliability regression (see TestStaleConnectionRetry).
+                #
+                # The residual risk is a server that received the request, began
+                # processing, then died before responding. That is rare, and it is
+                # only fully solvable with a server-honoured idempotency key.
+                # Any other protocol error is treated as ambiguous.
+                disconnected_before_response = "disconnected" in str(e).lower()
+                outcome_unknown = not disconnected_before_response
                 last_error = NetworkTimeoutError(
                     f"Connection closed by peer: {e}",
                     correlation_id=correlation_id,
                 )
 
             except httpx.HTTPStatusError as e:
+                # We received a complete response, so the server told us what it
+                # did. The retryable statuses here (429, 503) are rejections
+                # issued before the request was processed.
+                outcome_unknown = False
                 last_error = self._map_status_error(e, correlation_id)
 
             except SynapError:
                 raise  # Don't wrap our own errors
 
             except Exception as e:
+                # Unrecognised failure: assume the worst.
+                outcome_unknown = True
                 last_error = SynapTransientError(
                     f"Unexpected error: {e}",
                     correlation_id=correlation_id,
                 )
 
             # Check if we should retry
-            if not self._should_retry(last_error, attempts, max_attempts):
+            if not self._should_retry(
+                last_error,
+                attempts,
+                max_attempts,
+                method=method,
+                outcome_unknown=outcome_unknown,
+            ):
                 break
 
             # Calculate backoff delay
@@ -385,13 +418,32 @@ class HTTPTransport:
         """Map httpx status error to SDK exception."""
         return self._handle_response(error.response, correlation_id)
 
+    #: Methods that HTTP defines as idempotent, i.e. sending the same request twice
+    #: has the same effect as sending it once. POST and PATCH are deliberately
+    #: absent: retrying those can duplicate a side effect.
+    _IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT", "DELETE"})
+
     def _should_retry(
         self,
         error: Exception,
         attempts: int,
         max_attempts: int,
+        method: str = "GET",
+        outcome_unknown: bool = False,
     ) -> bool:
-        """Determine if we should retry the request."""
+        """Determine if we should retry the request.
+
+        Args:
+            error: The error raised by the last attempt.
+            attempts: Attempts made so far.
+            max_attempts: Configured attempt ceiling.
+            method: HTTP method of the request, used for the idempotency check.
+            outcome_unknown: True when the failure leaves it genuinely unknown
+                whether the server processed the request (a read timeout, or the
+                connection dropping mid-flight). False when the request provably
+                never reached the application (connection refused) or when the
+                server returned a definitive rejection such as 429 or 503.
+        """
         if not self.retry_policy:
             return False
 
@@ -399,6 +451,25 @@ class HTTPTransport:
             return False
 
         if not isinstance(error, SynapTransientError):
+            return False
+
+        # A retry is only safe when either the method is idempotent, or we know
+        # the server never processed the first attempt. Retrying a POST whose
+        # outcome is unknown can duplicate the side effect: for
+        # POST /api/v1/memories/create that means ingesting the same content
+        # twice and billing the customer twice for it.
+        #
+        # NOTE: the durable fix is a server-honoured idempotency key, which would
+        # let writes retry safely. Until the server supports one, declining the
+        # retry is the only client-side option that cannot double-charge.
+        if outcome_unknown and method.upper() not in self._IDEMPOTENT_METHODS:
+            logger.warning(
+                "Not retrying %s: the outcome is unknown and the method is not "
+                "idempotent, so a retry could duplicate the request (for an ingest "
+                "that would mean storing and billing it twice). Original error: %s",
+                method.upper(),
+                error,
+            )
             return False
 
         # Check if error type is in retryable list
@@ -556,6 +627,7 @@ class HTTPTransport:
         }
 
         last_error: Optional[Exception] = None
+        outcome_unknown = False
         attempts = 0
         max_attempts = self.retry_policy.max_attempts if self.retry_policy else 1
 
@@ -585,15 +657,27 @@ class HTTPTransport:
                 return self._handle_response(response, correlation_id)
 
             except httpx.TimeoutException as e:
+                # Upload may have been received in full; outcome unknown.
+                outcome_unknown = True
                 last_error = NetworkTimeoutError(f"Request timed out: {e}", correlation_id=correlation_id)
             except httpx.ConnectError as e:
+                # Never reached the application; safe to retry.
+                outcome_unknown = False
                 last_error = NetworkTimeoutError(f"Connection failed: {e}", correlation_id=correlation_id)
             except SynapError:
                 raise
             except Exception as e:
+                outcome_unknown = True
                 last_error = SynapTransientError(f"Unexpected error: {e}", correlation_id=correlation_id)
 
-            if not self._should_retry(last_error, attempts, max_attempts):
+            # This path is always a multipart POST, which is not idempotent.
+            if not self._should_retry(
+                last_error,
+                attempts,
+                max_attempts,
+                method="POST",
+                outcome_unknown=outcome_unknown,
+            ):
                 break
 
             delay = self._calculate_backoff(attempts)

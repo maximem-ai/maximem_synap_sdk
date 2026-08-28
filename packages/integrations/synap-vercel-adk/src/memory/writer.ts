@@ -1,4 +1,5 @@
 import type { Credentials, SynapModelOptions } from '../types.js';
+import { newCorrelationId } from '../util/correlation.js';
 
 const DEFAULT_BASE_URL = 'https://synap-cloud-prod.maximem.ai';
 
@@ -27,7 +28,7 @@ export async function writeMemory(params: MemoryWriteParams): Promise<void> {
     { role: 'assistant', content: assistantResponse },
   ];
 
-  const correlationId = crypto.randomUUID();
+  const correlationId = newCorrelationId();
 
   const body: Record<string, unknown> = {
     messages: turn,

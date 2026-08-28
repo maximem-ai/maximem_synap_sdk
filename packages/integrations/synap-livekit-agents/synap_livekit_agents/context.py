@@ -48,7 +48,9 @@ async def preload_synap_context(
             inserted at the head of the item list.
         sdk: Configured :class:`MaximemSynapSDK`.
         user_id: Required — Synap memory is user-scoped.
-        customer_id: Optional customer/org scope. Empty string means
+        customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
+            B2C instance (user_context_isolation=equals_customer): the server
+            rejects a call carrying one with HTTP 400. Leave it unset there. Empty string means
             customer-less.
         mode: Synap fetch mode (``"accurate"`` or ``"fast"``).
         max_results: Cap on ``sdk.fetch`` results.

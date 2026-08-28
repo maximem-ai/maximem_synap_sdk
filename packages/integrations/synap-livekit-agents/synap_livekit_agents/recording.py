@@ -46,7 +46,9 @@ def attach_synap_recording(
             :class:`EventEmitter`).
         sdk: Configured :class:`MaximemSynapSDK`.
         user_id: Required — Synap conversations are user-scoped.
-        customer_id: Optional customer/org scope. Empty string means
+        customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
+            B2C instance (user_context_isolation=equals_customer): the server
+            rejects a call carrying one with HTTP 400. Leave it unset there. Empty string means
             customer-less.
         conversation_id: Explicit conversation id for this call. Auto-
             generated (``livekit-<hex>``) when absent.
