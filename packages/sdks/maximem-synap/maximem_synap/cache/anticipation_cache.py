@@ -7,12 +7,15 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+from ..behavior import recall_query_patterns, thresholds
 from .bm25 import BM25, tokenize
 
 logger = logging.getLogger("synap.sdk.cache.anticipation")
 
-_DEFAULT_BM25_THRESHOLD = 1.5
-_DEFAULT_NOVEL_TERM_THRESHOLD = 0.45
+# Tuned values live in the shared behavior contract so the Python and JS SDKs
+# cannot drift. See synap/sdk/CONTRACT/README.md. Do NOT re-inline them here.
+_DEFAULT_BM25_THRESHOLD = thresholds()["bm25"]
+_DEFAULT_NOVEL_TERM_THRESHOLD = thresholds()["novel_term"]
 
 
 def _honor_ttl_hint_enabled() -> bool:
@@ -43,35 +46,14 @@ def recall_bypass_enabled() -> bool:
 # against each raw query string. Deliberately phrase-level (not single words)
 # so ordinary task queries ("book me a ride again") don't over-bypass; "again"
 # alone is NOT a marker. Over-matching costs one cloud fetch of latency;
-# under-matching risks a wrong "I don't have that" answer — so ties break
+# under-matching risks a wrong "I don't have that" answer -- so ties break
 # toward including a pattern.
-_RECALL_QUERY_PATTERNS = (
-    re.compile(r"\bremind me\b", re.I),
-    re.compile(r"\bon file\b", re.I),
-    re.compile(r"\b(your|my|the) records\b", re.I),
-    re.compile(r"\bdo you (have|know|remember|recall|see)\b", re.I),
-    re.compile(r"\bwhat (do|did) (i|you) (say|tell|mention|have)\b", re.I),
-    re.compile(r"\bwhat('s| is) my\b", re.I),
-    re.compile(r"\bwhere (am i|do i live)\b", re.I),
-    re.compile(r"\bhow long have i\b", re.I),
-    re.compile(r"\bwhich of my\b", re.I),
-    re.compile(r"\bwhat .{0,40}\b(again|earlier|last time|previously|yesterday)\b", re.I),
-    re.compile(r"\bwill you use to (contact|reach|notify)\b", re.I),
-    # 2026-07-16 eval-register additions — every phrasing below was measured
-    # slipping past the gate and serving a stale bundle (issue #11):
-    #   "can you confirm my email address?"          → confirm/verify my
-    #   "what name is linked to my Uber account?"    → linked to my
-    #   "best way to contact me with updates…"       → best way to reach me
-    #   "which email are you going to use?"          → which … will you use
-    # "confirm my booking" now also bypasses — intentional over-match, costs
-    # one cloud fetch (the tie-break rule above).
-    re.compile(r"\b(confirm|verify|double.?check)\b.{0,40}\bmy\b", re.I),
-    re.compile(r"\b(linked to|associated with|registered (to|on|with)) my\b", re.I),
-    re.compile(r"\b(best|preferred) way to (reach|contact|update|notify) me\b", re.I),
-    re.compile(r"\bhow (do|will|can|should) you (reach|contact|notify) me\b", re.I),
-    re.compile(r"\bwhich .{0,40}\b(are|will) you (going to )?(use|using)\b", re.I),
-    re.compile(r"\bon (my|the) account\b", re.I),
-)
+#
+# The patterns themselves, and the dated eval-failure note behind each one,
+# live in the shared behavior contract and are loaded at import time. Adding
+# a pattern here instead of there changes Python's behavior without changing
+# JS's, which is precisely the drift this contract exists to prevent.
+_RECALL_QUERY_PATTERNS = recall_query_patterns()
 
 
 def is_recall_query(search_query: Optional[List[str]]) -> bool:
@@ -95,7 +77,9 @@ def is_recall_query(search_query: Optional[List[str]]) -> bool:
 # ~60 stems after the first agent push and trips the 0.45 gate on
 # essentially every second-turn query. Raising the floor to ~200 means
 # the gate kicks in once a customer has ~3-4 typical bundles in cache.
-_MIN_CORPUS_FOR_NOVEL_GATE = 200
+_MIN_CORPUS_FOR_NOVEL_GATE = thresholds()["min_corpus_for_novel_gate"]
+_EFFECTIVE_FLOOR = thresholds()["effective_floor"]
+_QUERY_TOKEN_SCALE = thresholds()["query_token_scale"]
 
 # Hook callable signatures (optional; default no-op).
 #
@@ -602,9 +586,12 @@ class AnticipationCache:
             customer_id=customer_id, client_id=client_id,
         )
 
+        # Derived per query. Short queries cannot reach the nominal score, so
+        # holding them to it would miss every time. Both constants live in the
+        # shared behavior contract.
         effective_threshold = max(
-            0.6,
-            min(self._bm25_threshold, 0.3 * len(query_tokens)),
+            _EFFECTIVE_FLOOR,
+            min(self._bm25_threshold, _QUERY_TOKEN_SCALE * len(query_tokens)),
         )
         hook_payload["bm25_threshold"] = round(float(effective_threshold), 4)
 

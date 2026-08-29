@@ -77,7 +77,8 @@ export interface SynapIdentityOptions {
   sdk: SynapSdkLike;
   /** Synap user scope (required). */
   userId: string;
-  /** Optional customer/org scope. */
+  /** B2B instances only, where it is required. NOT accepted on a B2C
+   * instance: the server rejects a call carrying one with HTTP 400. */
   customerId?: string;
   /** Synap fetch mode ("accurate" default, or "fast"). */
   mode?: string;

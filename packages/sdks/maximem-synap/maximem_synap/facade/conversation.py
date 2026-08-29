@@ -37,7 +37,10 @@ class ConversationController:
         role: str,
         content: str,
         user_id: str,
-        customer_id: str,
+        # Optional, to match ConversationInterface.record_message above it. A
+        # B2C caller sends no customer_id, and a controller that still demands
+        # one positionally is the same wall one layer down.
+        customer_id: Optional[str] = None,
         session_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         correlation_id: Optional[str] = None,
