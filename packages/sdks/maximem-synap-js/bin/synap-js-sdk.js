@@ -1,124 +1,47 @@
 #!/usr/bin/env node
+/**
+ * Compatibility shim.
+ *
+ * `npx synap-js-sdk setup` used to build a Python virtualenv and install the
+ * Python SDK into it. Since 0.4 the SDK is native TypeScript, so there is
+ * nothing to set up.
+ *
+ * The command is kept, and kept exiting 0, because it appears in published
+ * documentation and in customers' postinstall and CI scripts. Removing the
+ * binary would turn a no-longer-needed step into a hard failure on upgrade.
+ *
+ * ESM, not CommonJS: package.json declares "type": "module", so a `require`
+ * here would throw ERR_REQUIRE_ESM on every invocation.
+ */
 
-const { setupPythonRuntime } = require('../src/runtime');
-const { setupTypeScriptExtension } = require('../src/setup-typescript');
+const [, , command] = process.argv;
 
-function parseArgs(argv) {
-  const args = { _: [] };
+const NOTE = `
+@maximem/synap-js-sdk 0.4+ is a native TypeScript SDK. It does not use Python,
+so there is no setup step and this command does nothing.
 
-  for (let i = 0; i < argv.length; i += 1) {
-    const token = argv[i];
+If you are upgrading from 0.3.x:
+  - Remove any "npx synap-js-sdk setup" step from your install or CI scripts.
+  - ~/.synap-js-sdk/.venv is now orphaned and safe to delete.
+  - Node 20 or newer is required.
+  - listen() is now opt-in rather than started automatically.
 
-    if (!token.startsWith('--')) {
-      args._.push(token);
-      continue;
-    }
+See MIGRATING.md in the package for the full list.
+`.trim();
 
-    const key = token.slice(2);
-    const next = argv[i + 1];
-
-    if (!next || next.startsWith('--')) {
-      args[key] = true;
-      continue;
-    }
-
-    args[key] = next;
-    i += 1;
-  }
-
-  return args;
+switch (command) {
+  case 'setup':
+  case 'setup-ts':
+  case undefined:
+    console.log(NOTE);
+    break;
+  case '--version':
+  case '-v':
+    console.log(process.env['npm_package_version'] ?? '0.4+');
+    break;
+  default:
+    console.log(`Unknown command: ${command}\n\n${NOTE}`);
+    // Still exit 0: an unknown subcommand in a legacy script should not break
+    // a customer's build on upgrade.
+    break;
 }
-
-function printHelp() {
-  console.log(`synap-js-sdk
-
-Usage:
-  synap-js-sdk setup [options]
-  synap-js-sdk setup-ts [options]
-
-setup options:
-  --python <bin>             Python bootstrap binary (default: python3)
-  --sdk-home <path>          SDK home (default: ~/.synap-js-sdk)
-  --venv <path>              Virtualenv path (default: <sdk-home>/.venv)
-  --package <name>           Python package name (default: maximem-synap)
-  --sdk-version <ver>        Python SDK version to install
-  --no-deps                  Install without dependencies
-  --no-build-isolation       Disable pip build isolation
-  --upgrade                  Use pip --upgrade
-  --force-recreate-venv      Recreate virtualenv
-
-setup-ts options:
-  --project-dir <path>       Target Node project directory (default: cwd)
-  --package-manager <name>   npm | pnpm | yarn | bun (auto-detect if omitted)
-  --skip-install             Skip installing typescript and @types/node
-  --tsconfig-path <path>     tsconfig output path (default: tsconfig.json)
-  --wrapper-path <path>      Typed wrapper output path (default: src/synap.ts)
-  --no-wrapper               Do not generate the typed wrapper file
-  --force                    Overwrite generated files when they already exist
-
-global:
-  --help                     Show this help
-`);
-}
-
-async function run() {
-  const args = parseArgs(process.argv.slice(2));
-  const command = args._[0];
-
-  if (!command || args.help || command === 'help') {
-    printHelp();
-    process.exit(0);
-  }
-
-  if (command === 'setup') {
-    try {
-      const result = await setupPythonRuntime({
-        pythonBootstrap: args.python,
-        sdkHome: args['sdk-home'],
-        venvPath: args.venv,
-        pythonPackage: args.package,
-        pythonSdkVersion: args['sdk-version'],
-        noDeps: !!args['no-deps'],
-        noBuildIsolation: !!args['no-build-isolation'],
-        upgrade: !!args.upgrade,
-        forceRecreateVenv: !!args['force-recreate-venv'],
-      });
-
-      console.log('Synap JS SDK Python runtime setup complete.');
-      console.log(JSON.stringify(result, null, 2));
-      return;
-    } catch (error) {
-      console.error('Setup failed:');
-      console.error(error.message || String(error));
-      process.exit(1);
-    }
-  }
-
-  if (command === 'setup-ts') {
-    try {
-      const result = await setupTypeScriptExtension({
-        projectDir: args['project-dir'],
-        packageManager: args['package-manager'],
-        skipInstall: !!args['skip-install'],
-        tsconfigPath: args['tsconfig-path'],
-        wrapperPath: args['wrapper-path'],
-        noWrapper: !!args['no-wrapper'],
-        force: !!args.force,
-      });
-
-      console.log('Synap JS SDK TypeScript extension setup complete.');
-      console.log(JSON.stringify(result, null, 2));
-      return;
-    } catch (error) {
-      console.error('TypeScript setup failed:');
-      console.error(error.message || String(error));
-      process.exit(1);
-    }
-  }
-
-  console.error(`Unknown command: ${command}`);
-  printHelp();
-  process.exit(1);
-}
-
-run();
