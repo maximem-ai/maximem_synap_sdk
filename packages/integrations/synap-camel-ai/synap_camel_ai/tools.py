@@ -32,7 +32,9 @@ def create_synap_tools(
     Args:
         sdk: Configured :class:`MaximemSynapSDK`.
         user_id: Synap user scope. **Required.**
-        customer_id: Optional customer/org scope; empty means customer-less.
+        customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
+            B2C instance (user_context_isolation=equals_customer): the server
+            rejects a call carrying one with HTTP 400. Leave it unset there.
 
     Returns:
         A list ``[search_memory, store_memory]`` of :class:`FunctionTool`.
