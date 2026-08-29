@@ -39,7 +39,8 @@ export interface SynapToolOptions {
    * it unset wherever the session carries a real principal.
    */
   userId?: string;
-  /** Optional customer/org scope. */
+  /** B2B instances only, where it is required. NOT accepted on a B2C
+   * instance: the server rejects a call carrying one with HTTP 400. */
   customerId?: string;
   /** Explicit conversation id. Defaults to the eve session id. */
   conversationId?: string;
