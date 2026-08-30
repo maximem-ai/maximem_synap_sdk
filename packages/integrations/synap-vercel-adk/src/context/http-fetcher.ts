@@ -1,6 +1,7 @@
 import type { Credentials, FetchedContext, SynapModelOptions, RawContextItem, RawConversationContext } from '../types.js';
 import { rawItemToContextItem } from '../transform/messages.js';
 import { SDK_VERSION } from '../version.js';
+import { newCorrelationId } from '../util/correlation.js';
 
 const DEFAULT_BASE_URL = 'https://synap-cloud-prod.maximem.ai';
 
@@ -20,7 +21,7 @@ export async function fetchContext(params: FetchContextParams): Promise<FetchedC
   const { endpoint, body } = buildRequest(modelOptions, searchQuery);
   const url = `${baseUrl}${endpoint}`;
 
-  const correlationId = crypto.randomUUID();
+  const correlationId = newCorrelationId();
 
   const res = await fetch(url, {
     method: 'POST',

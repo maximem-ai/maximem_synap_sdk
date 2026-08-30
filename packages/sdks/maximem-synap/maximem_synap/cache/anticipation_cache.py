@@ -7,12 +7,15 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+from ..behavior import recall_query_patterns, thresholds
 from .bm25 import BM25, tokenize
 
 logger = logging.getLogger("synap.sdk.cache.anticipation")
 
-_DEFAULT_BM25_THRESHOLD = 1.5
-_DEFAULT_NOVEL_TERM_THRESHOLD = 0.45
+# Tuned values live in the shared behavior contract so the Python and JS SDKs
+# cannot drift. See synap/sdk/CONTRACT/README.md. Do NOT re-inline them here.
+_DEFAULT_BM25_THRESHOLD = thresholds()["bm25"]
+_DEFAULT_NOVEL_TERM_THRESHOLD = thresholds()["novel_term"]
 
 
 def _honor_ttl_hint_enabled() -> bool:
@@ -43,35 +46,14 @@ def recall_bypass_enabled() -> bool:
 # against each raw query string. Deliberately phrase-level (not single words)
 # so ordinary task queries ("book me a ride again") don't over-bypass; "again"
 # alone is NOT a marker. Over-matching costs one cloud fetch of latency;
-# under-matching risks a wrong "I don't have that" answer — so ties break
+# under-matching risks a wrong "I don't have that" answer -- so ties break
 # toward including a pattern.
-_RECALL_QUERY_PATTERNS = (
-    re.compile(r"\bremind me\b", re.I),
-    re.compile(r"\bon file\b", re.I),
-    re.compile(r"\b(your|my|the) records\b", re.I),
-    re.compile(r"\bdo you (have|know|remember|recall|see)\b", re.I),
-    re.compile(r"\bwhat (do|did) (i|you) (say|tell|mention|have)\b", re.I),
-    re.compile(r"\bwhat('s| is) my\b", re.I),
-    re.compile(r"\bwhere (am i|do i live)\b", re.I),
-    re.compile(r"\bhow long have i\b", re.I),
-    re.compile(r"\bwhich of my\b", re.I),
-    re.compile(r"\bwhat .{0,40}\b(again|earlier|last time|previously|yesterday)\b", re.I),
-    re.compile(r"\bwill you use to (contact|reach|notify)\b", re.I),
-    # 2026-07-16 eval-register additions — every phrasing below was measured
-    # slipping past the gate and serving a stale bundle (issue #11):
-    #   "can you confirm my email address?"          → confirm/verify my
-    #   "what name is linked to my Uber account?"    → linked to my
-    #   "best way to contact me with updates…"       → best way to reach me
-    #   "which email are you going to use?"          → which … will you use
-    # "confirm my booking" now also bypasses — intentional over-match, costs
-    # one cloud fetch (the tie-break rule above).
-    re.compile(r"\b(confirm|verify|double.?check)\b.{0,40}\bmy\b", re.I),
-    re.compile(r"\b(linked to|associated with|registered (to|on|with)) my\b", re.I),
-    re.compile(r"\b(best|preferred) way to (reach|contact|update|notify) me\b", re.I),
-    re.compile(r"\bhow (do|will|can|should) you (reach|contact|notify) me\b", re.I),
-    re.compile(r"\bwhich .{0,40}\b(are|will) you (going to )?(use|using)\b", re.I),
-    re.compile(r"\bon (my|the) account\b", re.I),
-)
+#
+# The patterns themselves, and the dated eval-failure note behind each one,
+# live in the shared behavior contract and are loaded at import time. Adding
+# a pattern here instead of there changes Python's behavior without changing
+# JS's, which is precisely the drift this contract exists to prevent.
+_RECALL_QUERY_PATTERNS = recall_query_patterns()
 
 
 def is_recall_query(search_query: Optional[List[str]]) -> bool:
@@ -95,7 +77,9 @@ def is_recall_query(search_query: Optional[List[str]]) -> bool:
 # ~60 stems after the first agent push and trips the 0.45 gate on
 # essentially every second-turn query. Raising the floor to ~200 means
 # the gate kicks in once a customer has ~3-4 typical bundles in cache.
-_MIN_CORPUS_FOR_NOVEL_GATE = 200
+_MIN_CORPUS_FOR_NOVEL_GATE = thresholds()["min_corpus_for_novel_gate"]
+_EFFECTIVE_FLOOR = thresholds()["effective_floor"]
+_QUERY_TOKEN_SCALE = thresholds()["query_token_scale"]
 
 # Hook callable signatures (optional; default no-op).
 #
@@ -114,6 +98,69 @@ _MIN_CORPUS_FOR_NOVEL_GATE = 200
 # hooks unset → zero overhead.
 BundleStoreHook = Callable[..., None]
 LookupHook = Callable[..., None]
+
+
+# ── the rung a request or a bundle stands at ────────────────────────────────
+#
+# A pushed bundle is stamped with the scope rung the server retrieved it at,
+# and a fetch names one through `scope_path`. Both are written the same way so
+# they can be compared as strings, because nothing in this process can resolve
+# anything: the server speaks in registry node ids and this SDK has never seen
+# one, so the comparison happens in the vocabulary the CALLER uses, which is
+# level keys and the client's own external ids.
+#
+# The recipe and its golden vectors live in the shared behavior contract
+# (CONTRACT/behavior/anticipation.json, `rung_key`), because it is written
+# three times: here, in the JS SDK, and on the server, and the producer is not
+# an SDK so the usual "port it once" rule cannot apply. Do NOT re-tune it here.
+_RUNG_SEPARATOR = "|"
+_RUNG_ASSIGN = "="
+
+
+def rung_key(scope_path: Optional[Dict[str, str]]) -> Optional[str]:
+    """The rung a `scope_path` names, canonically, or None for no path.
+
+    Sorted by level key because a dict carries whatever order the caller wrote
+    it in, and the ladder's own order is not knowable here. Only the value is
+    escaped: level keys are `^[a-z][a-z0-9_]{0,63}$`, so they can hold neither
+    separator. Backslash is escaped first, or `a|b` and `a\\pb` would encode to
+    the same string, which is a false match between two different rungs.
+    """
+    if not scope_path:
+        return None
+    pairs = [
+        (str(k), str(v))
+        for k, v in scope_path.items()
+        if k is not None and v is not None and str(k) != "" and str(v) != ""
+    ]
+    if not pairs:
+        return None
+    pairs.sort(key=lambda kv: kv[0])
+    return _RUNG_SEPARATOR.join(
+        f"{k}{_RUNG_ASSIGN}"
+        + v.replace("\\", "\\\\")
+           .replace(_RUNG_SEPARATOR, "\\p")
+           .replace(_RUNG_ASSIGN, "\\e")
+        for k, v in pairs
+    )
+
+
+def _rung_serves(bundle_rung: Optional[str], request_rung: Optional[str]) -> bool:
+    """May a bundle stamped `bundle_rung` answer a request at `request_rung`?
+
+    Equality, and equality on purpose. A subset rule ("the bundle names more
+    rungs than you did, close enough") reads as the generous option and is the
+    dangerous one: the rung nobody named is exactly the rung that tells two
+    people who share an external id apart, which is the case the whole ladder
+    exists for. Being wrong here costs a cold fetch; being wrong the other way
+    hands one person's context to another.
+
+    None on either side means "named no rung". Both None is every request in
+    production today, and it serves, so nothing changes for anyone who has not
+    turned nested scoping on. `""` is normalised to None because a proto string
+    field has no null and an unstamped bundle arrives as the empty string.
+    """
+    return (bundle_rung or None) == (request_rung or None)
 
 
 def invalidate_on_write_enabled() -> bool:
@@ -158,6 +205,10 @@ class _CacheEntry:
     confidence: float = 0.0
     origin_pattern_id: str = ""
     ttl_hint_seconds: int = 0
+    # The scope rung the server retrieved this bundle at, as `rung_key` writes
+    # one. None for a bundle whose request named no rung, which is every bundle
+    # a client without nested scoping receives.
+    scope_rung: Optional[str] = None
 
 
 @dataclass
@@ -302,6 +353,10 @@ class AnticipationCache:
             or "_any"
         )
         conversation_id = bundle.get("_anticipation_conversation_id")
+        # The rung. Stamped by the server on the bundle it pushed; absent (and
+        # therefore None) from anything an older server sent, which the lookup
+        # treats as "named no rung" rather than as "matches anything".
+        scope_rung = bundle.get("_anticipation_scope_rung") or None
         bundle_type = bundle.get("_bundle_type", "anticipation")
         bundle_id = bundle.get("bundle_id", str(time.monotonic()))
         search_queries = bundle.get("search_queries", [])
@@ -318,6 +373,7 @@ class AnticipationCache:
             confidence=float(bundle.get("_bundle_confidence", 0.0) or 0.0),
             origin_pattern_id=bundle.get("_origin_pattern_id", "") or "",
             ttl_hint_seconds=int(bundle.get("_ttl_hint_seconds", 0) or 0),
+            scope_rung=scope_rung,
         )
 
         items_by_type = bundle.get("items_by_type", {})
@@ -330,7 +386,7 @@ class AnticipationCache:
                 content = item_dict.get("content", "")
                 if not content:
                     continue
-                dedup_key = self._dedup_key(entity_id, content)
+                dedup_key = self._dedup_key(entity_id, content, scope_rung)
                 if dedup_key in self._item_dedup:
                     items_deduped += 1
                     continue
@@ -359,7 +415,7 @@ class AnticipationCache:
                 content = ext_item.get("content", "")
                 if not content:
                     continue
-                dedup_key = self._dedup_key(entity_id, content)
+                dedup_key = self._dedup_key(entity_id, content, scope_rung)
                 if dedup_key in self._item_dedup:
                     items_deduped += 1
                     continue
@@ -412,6 +468,7 @@ class AnticipationCache:
         *,
         customer_id: Optional[str] = None,
         client_id: Optional[str] = None,
+        scope_rung: Optional[str] = None,
     ) -> Optional[Dict]:
         """Find cached items matching the query.
 
@@ -428,6 +485,13 @@ class AnticipationCache:
         ``customer_id`` and ``client_id`` are keyword-only to keep the
         existing positional signature compatible with older callers; those
         callers still work but only match user-scope and ``"_any"`` bundles.
+
+        ``scope_rung`` is a SECOND, independent dimension and NOT another tier
+        of that funnel. The funnel widens; the rung does not. A bundle is
+        servable only when the rung it was prefetched at equals the rung this
+        request names, because a rung is a boundary and a boundary that widens
+        is not one. Build it with ``rung_key(scope_path)``; ``None`` means the
+        caller named no rung, which is every caller today.
         """
         self._evict_expired()
 
@@ -448,6 +512,7 @@ class AnticipationCache:
                     "customer_id": customer_id,
                     "client_id": client_id,
                     "conversation_id": conversation_id,
+                    "scope_rung": scope_rung,
                 },
                 "scope_filter_accepted": sorted(
                     self._build_accepted_scope(entity_id, customer_id, client_id)
@@ -465,7 +530,7 @@ class AnticipationCache:
         has_query = search_query and any(q.strip() for q in search_query if q)
 
         if not has_query:
-            return self._freshness_lookup(entity_id)
+            return self._freshness_lookup(entity_id, scope_rung=scope_rung)
 
         # WS4 recall bypass: an explicit memory-recall question must never be
         # answered from a pre-fetched bundle — a stale false-hit here makes the
@@ -489,6 +554,7 @@ class AnticipationCache:
                     "customer_id": customer_id,
                     "client_id": client_id,
                     "conversation_id": conversation_id,
+                    "scope_rung": scope_rung,
                 },
                 "scope_filter_accepted": sorted(
                     self._build_accepted_scope(entity_id, customer_id, client_id)
@@ -506,6 +572,7 @@ class AnticipationCache:
         return self._item_lookup(
             search_query, entity_id, conversation_id, max_items,
             customer_id=customer_id, client_id=client_id,
+            scope_rung=scope_rung,
         )
 
     def _item_lookup(
@@ -517,6 +584,7 @@ class AnticipationCache:
         *,
         customer_id: Optional[str] = None,
         client_id: Optional[str] = None,
+        scope_rung: Optional[str] = None,
     ) -> Optional[Dict]:
         # Pre-build the telemetry skeleton — the hook fires on every exit
         # path. Most fields are filled below; we never reach `return None`
@@ -533,6 +601,7 @@ class AnticipationCache:
                 "customer_id": customer_id,
                 "client_id": client_id,
                 "conversation_id": conversation_id,
+                "scope_rung": scope_rung,
             },
             "scope_filter_accepted": sorted(
                 self._build_accepted_scope(entity_id, customer_id, client_id)
@@ -551,7 +620,7 @@ class AnticipationCache:
         if not query_tokens:
             hook_payload["exit_reason"] = "no_query_tokens"
             self._fire_lookup_hook(hook_payload)
-            return self._freshness_lookup(entity_id)
+            return self._freshness_lookup(entity_id, scope_rung=scope_rung)
 
         hook_payload["bm25_query_tokens"] = list(query_tokens)
 
@@ -600,11 +669,15 @@ class AnticipationCache:
         valid_bundles = self._get_valid_bundle_ids(
             entity_id, conversation_id,
             customer_id=customer_id, client_id=client_id,
+            scope_rung=scope_rung,
         )
 
+        # Derived per query. Short queries cannot reach the nominal score, so
+        # holding them to it would miss every time. Both constants live in the
+        # shared behavior contract.
         effective_threshold = max(
-            0.6,
-            min(self._bm25_threshold, 0.3 * len(query_tokens)),
+            _EFFECTIVE_FLOOR,
+            min(self._bm25_threshold, _QUERY_TOKEN_SCALE * len(query_tokens)),
         )
         hook_payload["bm25_threshold"] = round(float(effective_threshold), 4)
 
@@ -786,6 +859,7 @@ class AnticipationCache:
         *,
         customer_id: Optional[str] = None,
         client_id: Optional[str] = None,
+        scope_rung: Optional[str] = None,
     ) -> Set[str]:
         """Return bundle ids that match the requested scope.
 
@@ -809,10 +883,20 @@ class AnticipationCache:
         ``entity_id`` continues to use the widened scope tiers (see
         ``_build_accepted_scope``) so customer- and client-shared
         bundles remain reachable from a user-scope request.
+
+        The rung is checked FIRST and it never widens. Everything else here
+        widens deliberately: a user-scope request reaches customer-shared
+        bundles, and a conversation-scope request reaches the user-scope ones.
+        A rung is the opposite kind of thing. It is the statement of what a
+        caller may read, so "close enough" is the one answer it cannot give,
+        and it is checked before the tiers so no amount of widening can put a
+        cross-rung bundle back in.
         """
         accepted_scope = self._build_accepted_scope(entity_id, customer_id, client_id)
         valid: Set[str] = set()
         for bid, entry in self._entries.items():
+            if not _rung_serves(entry.scope_rung, scope_rung):
+                continue
             if entity_id is not None and entry.entity_id not in accepted_scope:
                 continue
             if conversation_id is not None:
@@ -830,22 +914,36 @@ class AnticipationCache:
         telemetry so a fat cache doesn't blow up a row. Used by the
         lookup-hook payload."""
         scope_breakdown: Dict[str, int] = {}
+        rung_breakdown: Dict[str, int] = {}
         for entry in self._entries.values():
             scope_breakdown[entry.entity_id] = scope_breakdown.get(entry.entity_id, 0) + 1
+            rung = entry.scope_rung or "_none"
+            rung_breakdown[rung] = rung_breakdown.get(rung, 0) + 1
         return {
             "total_entries": len(self._entries),
             "total_items": len(self._items),
             "corpus_vocab_size": len(self._corpus_vocab),
             "scope_breakdown": scope_breakdown,
+            # Without this, a lookup refused for standing at the wrong rung and
+            # a lookup that found an empty cache produce the same telemetry,
+            # and "nothing leaked" and "nothing came back" are the two things
+            # this feature must never confuse.
+            "rung_breakdown": rung_breakdown,
         }
 
     def _freshness_lookup(
         self,
         entity_id: Optional[str] = None,
+        *,
+        scope_rung: Optional[str] = None,
     ) -> Optional[Dict]:
+        # This path serves a WHOLE bundle on no query at all, so it is the
+        # least filtered way out of this cache and needs the rung as much as
+        # the scored path does.
         summary_candidates = {
             bid: e for bid, e in self._entries.items()
             if e.bundle_type == "user_summary"
+            and _rung_serves(e.scope_rung, scope_rung)
             and (entity_id is None or e.entity_id in (entity_id, "_any"))
         }
         if not summary_candidates:
@@ -861,6 +959,8 @@ class AnticipationCache:
     def lookup_user_summary(
         self,
         entity_id: Optional[str] = None,
+        *,
+        scope_rung: Optional[str] = None,
     ) -> Optional[Dict]:
         """Return the freshest user_summary bundle for ``entity_id``.
 
@@ -881,6 +981,7 @@ class AnticipationCache:
         candidates = {
             bid: entry for bid, entry in self._entries.items()
             if entry.bundle_type == "user_summary"
+            and _rung_serves(entry.scope_rung, scope_rung)
             and entry.entity_id in (entity_id, "_any")
         }
         if not candidates:
@@ -897,7 +998,9 @@ class AnticipationCache:
         self._bm25_dirty = True
         self._rebuild_vocab()
 
-    def _dedup_key(self, entity_id: str, content: str) -> str:
+    def _dedup_key(
+        self, entity_id: str, content: str, scope_rung: Optional[str] = None
+    ) -> str:
         """Scope-qualified item-dedup key.
 
         Keying on content alone made the dedup set cache-GLOBAL: with the
@@ -905,8 +1008,17 @@ class AnticipationCache:
         facts were swallowed against visitor A's copy, never indexed under
         B's bundle — so B was permanently scope_filter_excluded for that
         content and always cold-fetched (2026-07-16 eval register issue #9).
-        Scoping the key keeps within-visitor dedup intact."""
-        return f"{entity_id}|{content.lower().strip()[:120]}"
+        Scoping the key keeps within-visitor dedup intact.
+
+        The rung is part of that scope for exactly the same reason one level
+        down. Two rungs sharing an external id are two people, and their seed
+        facts read identically; without the rung here the second rung's items
+        are swallowed against the first's, never indexed under the second
+        rung's bundle, and that rung then misses forever while the first is
+        the only one that can be served. `None` keeps the key byte-identical
+        for every bundle that names no rung."""
+        rung_part = f"{scope_rung}|" if scope_rung else ""
+        return f"{rung_part}{entity_id}|{content.lower().strip()[:120]}"
 
     def _rebuild_vocab(self) -> None:
         self._corpus_vocab = set()

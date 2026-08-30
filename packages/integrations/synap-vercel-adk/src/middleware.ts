@@ -8,6 +8,7 @@ import { injectContextIntoPrompt, extractSearchQuery, promptToTranscript } from 
 import { writeMemory } from './memory/writer.js';
 import type { GrpcStreamClient } from './grpc/stream-client.js';
 import { SDK_VERSION } from './version.js';
+import { newCorrelationId } from './util/correlation.js';
 
 export interface SynapMiddlewareOptions extends SynapModelOptions {
   credentials: Credentials;
@@ -149,7 +150,7 @@ async function emitContextTelemetry(
   const customerId = opts.customerId ?? '';
 
   await grpc.sendContextAssembledEvent({
-    correlation_id: ctx.correlationId || crypto.randomUUID(),
+    correlation_id: ctx.correlationId || newCorrelationId(),
     conversation_id: conversationId,
     user_id: userId,
     customer_id: customerId,

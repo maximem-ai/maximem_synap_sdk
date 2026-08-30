@@ -62,7 +62,7 @@ All helpers accept:
 
 - `sdk`: a configured `MaximemSynapSDK`
 - `user_id`: required — Synap memory is user-scoped
-- `customer_id`: optional customer/org scope; empty string means customer-less
+- `customer_id`: B2B instances only, where it is required. Not accepted on a B2C instance, which rejects it with HTTP 400.
 - `conversation_id` *(recording only)*: optional explicit id; auto-generated when absent
 - `mode` *(read helpers only)*: `"accurate"` or `"fast"`, passed through to `sdk.fetch`
 - `max_results` *(read helpers only)*: cap per fetch
