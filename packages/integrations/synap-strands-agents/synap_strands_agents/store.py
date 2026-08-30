@@ -53,7 +53,9 @@ class SynapMemoryStore:
     Args:
         sdk: Initialised :class:`MaximemSynapSDK`.
         user_id: External user id these memories are about. **Required.**
-        customer_id: Optional customer/org scope. Empty means customer-less.
+        customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
+            B2C instance (user_context_isolation=equals_customer): the server
+            rejects a call carrying one with HTTP 400. Leave it unset there. Empty means customer-less.
         conversation_id: Optional Synap conversation id; also seeds the stable
             ``document_id`` used by ``add_messages`` so repeated ingests of a
             growing transcript update one document rather than duplicating.
