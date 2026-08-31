@@ -105,6 +105,20 @@ message ConversationEvent {
   // context_request fields
   repeated string search_queries = 12;
   repeated string context_types = 13;
+
+  // The rung this conversation belongs to, root to leaf, as
+  // {level_key: external_id}. Optional: omitting it behaves exactly as before,
+  // and the two ids above say where the conversation sits.
+  //
+  // Added only after the rung had somewhere to live. `conversation.scope_path`
+  // (migration 106) stores it, `_resolve_scope_from_conversation` reads it back
+  // and compaction carries it. A field nothing downstream reads is worse than
+  // no field, because the client believes they addressed a rung.
+  //
+  // Sent once is enough: the conversation row fills a missing path and never
+  // overwrites one, so a client can put it on the first event or on all of
+  // them.
+  map<string, string> scope = 14;
 }
 
 message HeartbeatPing {

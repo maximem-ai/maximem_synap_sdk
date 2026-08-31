@@ -1,12 +1,10 @@
 # @maximem/synap-js-sdk
 
-Node.js wrapper for the Synap Python SDK.
+Native TypeScript SDK for [Synap](https://synap.maximem.ai) context and memory
+management.
 
-## Prerequisites
-
-- Node.js 18+
-- Python 3.11+ (the wrapper runs the Python SDK in a subprocess, and
-  `maximem-synap` requires 3.11 or later)
+**No Python required.** 0.4 replaced the Python-subprocess bridge with a native
+client. Upgrading from 0.3.x? See [MIGRATING.md](./MIGRATING.md).
 
 ## Install
 
@@ -14,121 +12,123 @@ Node.js wrapper for the Synap Python SDK.
 npm install @maximem/synap-js-sdk
 ```
 
-## Setup (JS Runtime)
+Requires Node.js 20+. **That is the whole installation.** There is no setup
+command, and TypeScript needs no extra step: types ship in the package.
 
-Install the Python runtime used by the wrapper:
+Verified against TypeScript 5.7 and 7.0 with `moduleResolution` set to `node`,
+`node16`, `nodenext` and `bundler`.
 
-```bash
-npx synap-js-sdk setup --upgrade
-```
+## Quick start
 
-This installs the latest `maximem-synap` into a virtualenv at `~/.synap-js-sdk/.venv`.
+```ts
+import { SynapClient } from '@maximem/synap-js-sdk';
 
-Pin a specific version with `--sdk-version <ver>` only if you have a reason to.
-Do not pin below `0.2.3`: the bridge authenticates with `MaximemSynapSDK(api_key=...)`,
-and older releases predate API-key auth, so `init()` fails with
-`__init__() got an unexpected keyword argument 'api_key'`.
+const client = new SynapClient({ apiKey: process.env.SYNAP_API_KEY });
 
-If `python3` on your PATH is older than 3.11, point the bootstrap at a newer one
-and recreate the virtualenv:
-
-```bash
-npx synap-js-sdk setup --python python3.11 --force-recreate-venv --upgrade
-```
-
-## Verify Runtime
-
-macOS/Linux:
-
-```bash
-~/.synap-js-sdk/.venv/bin/python -c "import maximem_synap; print(maximem_synap.__version__)"
-```
-
-Windows:
-
-```powershell
-$env:USERPROFILE\.synap-js-sdk\.venv\Scripts\python.exe -c "import maximem_synap; print(maximem_synap.__version__)"
-```
-
-## Required Environment Variable
-
-- `SYNAP_API_KEY` (from the Synap dashboard — Instances → Generate API Key)
-
-The SDK uses the default Synap cloud endpoints automatically. `SYNAP_BASE_URL`,
-`SYNAP_GRPC_HOST`, `SYNAP_GRPC_PORT`, and `SYNAP_GRPC_TLS` are only needed for
-advanced overrides such as local development or custom environments.
-
-## Quick Start (JavaScript)
-
-```js
-const { createClient } = require('@maximem/synap-js-sdk');
-
-const synap = createClient({
-  apiKey: process.env.SYNAP_API_KEY,
+// Store
+await client.memories.create({
+  document: 'The user prefers aisle seats on long-haul flights.',
+  user_id: 'user-123',
+  // Optional. Defaults to 'ai-chat-conversation'. It selects the extraction
+  // path, so setting it wrongly stores less from the same text.
+  document_type: 'ai-chat-conversation',
 });
 
-async function run() {
-  await synap.init();
+// Retrieve
+const context = await client.user.context.fetch({
+  user_id: 'user-123',
+  search_query: ['seat preference'],
+});
 
-  await synap.addMemory({
-    userId: 'user-123',
-    customerId: 'customer-456',
-    conversationId: 'conv-123',
-    messages: [{ role: 'user', content: 'My name is Alex and I live in Austin.' }],
-  });
+await client.shutdown();
+```
 
-  const context = await synap.fetchUserContext({
-    userId: 'user-123',
-    customerId: 'customer-456',
-    conversationId: 'conv-123',
-    searchQuery: ['Where does the user live?'],
-    maxResults: 10,
-  });
+## Scopes
 
-  console.log(context.facts);
+Scopes are **client > customer > user**. A narrower request also matches
+broader-scope memories.
 
-  const promptContext = await synap.getContextForPrompt({
-    conversationId: 'conv-123',
-    style: 'structured',
-  });
+```ts
+await client.user.context.fetch({ user_id, customer_id });
+await client.customer.context.fetch({ customer_id });
+await client.client.context.fetch({});
+```
 
-  console.log(promptContext.formattedContext);
-  await synap.shutdown();
+`conversation_id` is **not** a scope tier. It groups turns within a scope, and
+narrows a fetch rather than selecting a different one.
+
+## Errors
+
+Every error carries a stable `.code`. Branch on that rather than on the class,
+because a dual ESM/CJS dependency graph can hand you two copies of the same
+class:
+
+```ts
+import { isSynapError } from '@maximem/synap-js-sdk';
+
+try {
+  await client.memories.create({ document, user_id });
+} catch (e) {
+  if (!isSynapError(e)) throw e;
+  switch (e.code) {
+    case 'insufficient_credits': /* top up */ break;
+    case 'rate_limit':           /* e.retryAfterSeconds */ break;
+    case 'authentication':       /* bad key */ break;
+    default: throw e;
+  }
 }
-
-run().catch(console.error);
 ```
 
-## TypeScript Extension Setup
+Transient errors are retried automatically. Ingestion is deliberately **not**
+retried when a failure leaves the outcome unknown, because a retry would store
+and bill twice.
 
-Add TypeScript support to an existing JS project:
+## Runtime support
+
+| Runtime | HTTP context + memories | gRPC anticipation stream |
+|---|---|---|
+| Node.js 20+ | Yes | Yes (opt-in) |
+| Bun | Yes | Unverified |
+| Deno 2 | Yes | Unverified |
+| Vercel Edge | Yes | No |
+| Cloudflare Workers | Yes | No |
+| Browser | Yes (do not ship an API key) | No |
+
+Edge and Workers cannot run gRPC at all: it needs raw TCP and `node:http2`,
+which they do not provide. Bun and Deno have both, so gRPC is plausible on each,
+but **bidirectional streaming has not been tested there**, so those cells stay
+unverified rather than claimed either way.
+
+Importing the SDK on Edge is safe: gRPC lives behind the
+`@maximem/synap-js-sdk/grpc` subpath and is only ever loaded lazily.
+
+## Configuration
+
+| Option | Default | Notes |
+|---|---|---|
+| `apiKey` | `SYNAP_API_KEY` | Required. |
+| `clientId` | `SYNAP_CLIENT_ID` | Skips a `whoami` round trip. |
+| `baseUrl` | prod | |
+| `heartbeat` | `false` | Keeps the connection warm. Worth it for a long-lived process, pointless in serverless. |
+| `timeouts` | 5s connect / 30s read | |
+| `retryPolicy` | 3 attempts | |
+
+Environment flags are read at call time, so you can toggle them at runtime:
+`SYNAP_SDK_CACHE_RECALL_BYPASS`, `SYNAP_SDK_CACHE_HONOR_TTL_HINT`,
+`SYNAP_SDK_CACHE_INVALIDATE_ON_WRITE`, `SYNAP_SDK_CACHE_COVERAGE_MIN`,
+`SYNAP_SDK_CACHE_MAX_ENTRY_AGE`.
+
+## Development
 
 ```bash
-npx synap-js-sdk setup-ts
+npm install
+npm test
+npm run build
+npm run typecheck
+npm run sync-behavior   # after changing synap/sdk/CONTRACT/**
 ```
 
-This command can:
-- install `typescript` and `@types/node`
-- generate `tsconfig.json` (if missing)
-- generate `src/synap.ts` typed wrapper (if missing)
-
-## Single-Flow Setup (JS + TS)
-
-```bash
-npm install @maximem/synap-js-sdk && npx synap-js-sdk setup --upgrade && npx synap-js-sdk setup-ts
-```
-
-## API Notes
-
-- `addMemory()` now requires `customerId` to match the Python SDK's explicit ingestion scope.
-- `fetchUserContext()`, `fetchCustomerContext()`, and `fetchClientContext()` expose the structured Python `ContextResponse` surface in JS/TS.
-- `getContextForPrompt()` exposes compacted context plus recent un-compacted messages.
-- `searchMemory()` and `getMemories()` remain convenience helpers built on top of user-scoped context fetches.
-- Temporal fields are exposed in JS/TS as `eventDate`, `validUntil`, `temporalCategory`, `temporalConfidence`, plus top-level `temporalEvents`.
-
-## CLI Commands
-
-```bash
-synap-js-sdk setup [options]
-synap-js-sdk setup-ts [options]
-```
+Retrieval behavior (recall-bypass patterns, BM25 thresholds, the stemmer) is
+**not defined in this package**. It lives in `synap/sdk/CONTRACT/`, shared
+byte-identically with the Python SDK, and both SDKs run the same conformance
+corpus. Never edit the vendored copy in `src/behavior/`.
