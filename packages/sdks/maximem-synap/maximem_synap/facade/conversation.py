@@ -37,9 +37,13 @@ class ConversationController:
         role: str,
         content: str,
         user_id: str,
-        customer_id: str,
+        # Optional, to match ConversationInterface.record_message above it. A
+        # B2C caller sends no customer_id, and a controller that still demands
+        # one positionally is the same wall one layer down.
+        customer_id: Optional[str] = None,
         session_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        scope_path: Optional[Dict[str, str]] = None,
         correlation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Record a single conversation message.
@@ -52,6 +56,9 @@ class ConversationController:
             customer_id: Customer identifier (required)
             session_id: Session identifier (optional, auto-generated if not provided)
             metadata: Additional metadata (optional)
+            scope_path: The rung this conversation belongs to, named in full.
+                Sent to the server as ``scope``. Only meaningful on a client
+                with a ladder deeper than the default three rungs.
             correlation_id: Optional correlation ID for tracing
 
         Returns:
@@ -78,6 +85,10 @@ class ConversationController:
         }
         if session_id:
             payload["session_id"] = session_id
+        # Named `scope` on the wire and `scope_path` in the SDK, matching
+        # `memories.create` and `ingest_transcript`, which made the same split.
+        if scope_path:
+            payload["scope"] = scope_path
 
         result = await self._transport.post(
             "/v1/conversations/messages",
@@ -104,6 +115,10 @@ class ConversationController:
                 - customer_id: Optional[str]
                 - session_id: Optional[str]
                 - metadata: Optional[Dict]
+                - scope_path: Optional[Dict[str, str]] — the rung, same as the
+                  single-message method. Normalised to the wire name `scope`
+                  below so a batch caller and a single caller spell it the
+                  same way.
             correlation_id: Optional correlation ID for tracing
 
         Returns:
@@ -127,10 +142,22 @@ class ConversationController:
 
         auth_context = await self._auth_provider(correlation_id)
 
+        # Copy rather than mutate: the caller's list is theirs, and the batch
+        # mirror in sdk.py reads the same dicts afterwards.
+        wire = []
+        for msg in messages:
+            if "scope_path" in msg:
+                m = {k: v for k, v in msg.items() if k != "scope_path"}
+                if msg["scope_path"]:
+                    m["scope"] = msg["scope_path"]
+                wire.append(m)
+            else:
+                wire.append(msg)
+
         result = await self._transport.post(
             "/v1/conversations/messages/batch",
             auth_context=auth_context,
-            json={"messages": messages},
+            json={"messages": wire},
             correlation_id=correlation_id,
         )
 

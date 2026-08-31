@@ -24,6 +24,7 @@
 
 import type { LanguageModelV1Message, LanguageModelV1Prompt } from '@ai-sdk/provider';
 import type { Credentials } from './types.js';
+import { newCorrelationId } from './util/correlation.js';
 
 const DEFAULT_BASE_URL =
   // mirror the Python SDK env-var precedence: explicit option > env var > prod default
@@ -89,10 +90,7 @@ export async function fetchShortTermContext(
   const url =
     `${baseUrl}/v1/conversations/${encodeURIComponent(conversationId)}/context-for-prompt` +
     `?style=${encodeURIComponent(style)}`;
-  const correlationId =
-    typeof crypto !== 'undefined' && crypto.randomUUID
-      ? crypto.randomUUID()
-      : `synap-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const correlationId = newCorrelationId();
 
   try {
     const res = await fetchImpl(url, {

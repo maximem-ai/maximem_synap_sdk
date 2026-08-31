@@ -1,0 +1,22 @@
+{
+  "name": "synap-js-sdk-method-tests",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Runnable per-method exercisers for the native Synap JS/TS SDK",
+  "scripts": {
+    "test:js": "node test-js-sdk.mjs",
+    "test:ts": "tsx test-ts-sdk.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@maximem/synap-js-sdk": "file:..",
+    "@grpc/grpc-js": "^1.12.0",
+    "@grpc/proto-loader": "^0.7.13"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

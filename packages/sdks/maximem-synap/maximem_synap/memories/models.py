@@ -59,6 +59,20 @@ class CreateMemoryRequest(BaseModel):
     user_id: Optional[str] = None
     customer_id: Optional[str] = None
 
+    # The rung this write belongs to, named in full, one entry per level down
+    # to it: {"customer": "acme", "team": "payments", "user": "dana"}.
+    #
+    # Only needed by an account whose scope ladder has a level between its
+    # customer and its user levels. `user_id` and `customer_id` cannot say
+    # which one a write belongs to, so on such a ladder the server refuses the
+    # write rather than guessing: a wrong guess at or above the customer level
+    # crosses a tenant boundary.
+    #
+    # Omit it and nothing changes. Sending one to an account without nested
+    # scoping is an error rather than ignored, because the caller asked to be
+    # narrowed and ignoring them widens.
+    scope: Optional[Dict[str, str]] = None
+
     # Processing options
     mode: IngestMode = IngestMode.LONG_RANGE
 
