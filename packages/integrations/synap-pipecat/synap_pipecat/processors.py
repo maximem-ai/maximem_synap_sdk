@@ -71,7 +71,9 @@ class SynapMemoryProcessor(FrameProcessor):
     Args:
         sdk: Configured :class:`MaximemSynapSDK`.
         user_id: Required — Synap memory is user-scoped.
-        customer_id: Optional customer/org scope. Empty string means
+        customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
+            B2C instance (user_context_isolation=equals_customer): the server
+            rejects a call carrying one with HTTP 400. Leave it unset there. Empty string means
             customer-less.
         context: Shared :class:`LLMContext` used by the user/assistant
             aggregators. When ``None``, the processor is inert (no
@@ -194,7 +196,9 @@ class SynapRecorder(FrameProcessor):
     Args:
         sdk: Configured :class:`MaximemSynapSDK`.
         user_id: Required — Synap conversations are user-scoped.
-        customer_id: Optional customer/org scope. Empty string means
+        customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
+            B2C instance (user_context_isolation=equals_customer): the server
+            rejects a call carrying one with HTTP 400. Leave it unset there. Empty string means
             customer-less.
         conversation_id: Stable id for this call. Auto-generated per
             processor lifetime when absent.

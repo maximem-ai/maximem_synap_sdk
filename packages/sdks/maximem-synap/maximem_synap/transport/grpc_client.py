@@ -675,6 +675,13 @@ class GRPCTransport:
             "_anticipation_user_id": proto.anticipation_user_id or None,
             "_anticipation_customer_id": proto.anticipation_customer_id or None,
             "_anticipation_conversation_id": proto.anticipation_conversation_id or None,
+            # The scope rung the server retrieved this bundle at. `getattr`
+            # with a default because a server older than this SDK does not
+            # send the field, and an absent rung must read as "named no rung"
+            # rather than as an AttributeError on the stream-reader loop.
+            "_anticipation_scope_rung": (
+                getattr(proto, "anticipation_scope_rung", "") or None
+            ),
             "_bundle_type": proto.bundle_type or "anticipation",
             "conversation_context": conv_ctx,
             # Section 16 — bundle composition extensions. Defaults preserve
