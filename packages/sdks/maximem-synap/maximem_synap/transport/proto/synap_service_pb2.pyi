@@ -163,7 +163,7 @@ class StreamSignal(_message.Message):
     def __init__(self, signal_type: _Optional[str] = ..., reason: _Optional[str] = ..., metadata: _Optional[_Mapping[str, str]] = ...) -> None: ...
 
 class ContextBundleProto(_message.Message):
-    __slots__ = ("bundle_id", "decision_id", "items_by_type", "total_tokens", "token_budget", "budget_exceeded", "retrieval_mode", "sources_queried", "degradation_level", "warnings", "created_at", "retrieval_time_ms", "cache_hit", "search_queries", "anticipation_user_id", "anticipation_customer_id", "anticipation_conversation_id", "search_keywords", "bundle_type", "conversation_context", "bundle_confidence", "origin_pattern_id", "ttl_hint_seconds")
+    __slots__ = ("bundle_id", "decision_id", "items_by_type", "total_tokens", "token_budget", "budget_exceeded", "retrieval_mode", "sources_queried", "degradation_level", "warnings", "created_at", "retrieval_time_ms", "cache_hit", "search_queries", "anticipation_user_id", "anticipation_customer_id", "anticipation_conversation_id", "search_keywords", "bundle_type", "conversation_context", "bundle_confidence", "origin_pattern_id", "ttl_hint_seconds", "anticipation_scope_rung")
     class ItemsByTypeEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -194,6 +194,7 @@ class ContextBundleProto(_message.Message):
     BUNDLE_CONFIDENCE_FIELD_NUMBER: _ClassVar[int]
     ORIGIN_PATTERN_ID_FIELD_NUMBER: _ClassVar[int]
     TTL_HINT_SECONDS_FIELD_NUMBER: _ClassVar[int]
+    ANTICIPATION_SCOPE_RUNG_FIELD_NUMBER: _ClassVar[int]
     bundle_id: str
     decision_id: str
     items_by_type: _containers.MessageMap[str, ContextItemList]
@@ -217,7 +218,8 @@ class ContextBundleProto(_message.Message):
     bundle_confidence: float
     origin_pattern_id: str
     ttl_hint_seconds: int
-    def __init__(self, bundle_id: _Optional[str] = ..., decision_id: _Optional[str] = ..., items_by_type: _Optional[_Mapping[str, ContextItemList]] = ..., total_tokens: _Optional[int] = ..., token_budget: _Optional[int] = ..., budget_exceeded: bool = ..., retrieval_mode: _Optional[str] = ..., sources_queried: _Optional[_Iterable[str]] = ..., degradation_level: _Optional[str] = ..., warnings: _Optional[_Iterable[str]] = ..., created_at: _Optional[str] = ..., retrieval_time_ms: _Optional[int] = ..., cache_hit: bool = ..., search_queries: _Optional[_Iterable[str]] = ..., anticipation_user_id: _Optional[str] = ..., anticipation_customer_id: _Optional[str] = ..., anticipation_conversation_id: _Optional[str] = ..., search_keywords: _Optional[_Iterable[str]] = ..., bundle_type: _Optional[str] = ..., conversation_context: _Optional[_Union[ConversationContextProto, _Mapping]] = ..., bundle_confidence: _Optional[float] = ..., origin_pattern_id: _Optional[str] = ..., ttl_hint_seconds: _Optional[int] = ...) -> None: ...
+    anticipation_scope_rung: str
+    def __init__(self, bundle_id: _Optional[str] = ..., decision_id: _Optional[str] = ..., items_by_type: _Optional[_Mapping[str, ContextItemList]] = ..., total_tokens: _Optional[int] = ..., token_budget: _Optional[int] = ..., budget_exceeded: bool = ..., retrieval_mode: _Optional[str] = ..., sources_queried: _Optional[_Iterable[str]] = ..., degradation_level: _Optional[str] = ..., warnings: _Optional[_Iterable[str]] = ..., created_at: _Optional[str] = ..., retrieval_time_ms: _Optional[int] = ..., cache_hit: bool = ..., search_queries: _Optional[_Iterable[str]] = ..., anticipation_user_id: _Optional[str] = ..., anticipation_customer_id: _Optional[str] = ..., anticipation_conversation_id: _Optional[str] = ..., search_keywords: _Optional[_Iterable[str]] = ..., bundle_type: _Optional[str] = ..., conversation_context: _Optional[_Union[ConversationContextProto, _Mapping]] = ..., bundle_confidence: _Optional[float] = ..., origin_pattern_id: _Optional[str] = ..., ttl_hint_seconds: _Optional[int] = ..., anticipation_scope_rung: _Optional[str] = ...) -> None: ...
 
 class ConversationContextProto(_message.Message):
     __slots__ = ("summary", "current_state_json", "key_extractions_json", "recent_turns", "compaction_id", "compacted_at", "conversation_id")

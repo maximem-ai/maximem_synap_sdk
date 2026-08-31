@@ -507,3 +507,211 @@ class TestIngestionIdEdgeCases:
         _, remember = _get_tools(sdk)
         result = await remember.handler({"content": "no attr fact"})
         assert "ingestion_id=" in result["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# The identifier contract: customer_id is B2B only
+# ---------------------------------------------------------------------------
+#
+# customer_id is bound at construction and injected into every call, so the model
+# cannot leave it out. On a B2C instance the API refuses it, which used to mean
+# every search and every write failed forever for a reason no tool argument could
+# fix. These pin the conditional injection, and pin just as hard that B2B still
+# gets the id it REQUIRES.
+
+from synap_claude_agent.mcp_server import (  # noqa: E402
+    B2C_ISOLATION,
+    _CustomerScope,
+    _is_b2c_rejection,
+    _sdk_isolation,
+)
+
+B2B_ISOLATION = "strict"
+
+
+def _sdk_in_mode(isolation, formatted="ctx"):
+    """A fake SDK whose whoami-derived mode is `isolation` (None = not known)."""
+    sdk = _fake_sdk(formatted)
+    if isolation is not None:
+        sdk._user_context_isolation = isolation
+    return sdk
+
+
+class _Refused(Exception):
+    """Shaped like the rejection the SDK raises and the API returns."""
+
+    def __init__(self):
+        super().__init__(
+            "customer_id is not accepted on this instance, which is B2C "
+            f"(user_context_isolation='{B2C_ISOLATION}'). Send user_id only."
+        )
+
+
+class TestModeDetection:
+    def test_reads_the_mode_the_sdk_learned_from_whoami(self):
+        assert _sdk_isolation(_sdk_in_mode(B2C_ISOLATION)) == B2C_ISOLATION
+
+    def test_a_mock_attribute_is_not_an_answer(self):
+        """A MagicMock answers every attribute. Treating that as a mode would let
+        a test double decide scoping, so only a real non-empty string counts."""
+        assert _sdk_isolation(MagicMock()) is None
+
+    def test_a_property_that_raises_is_not_an_answer(self):
+        class Exploding:
+            @property
+            def user_context_isolation(self):
+                raise RuntimeError("boom")
+
+        assert _sdk_isolation(Exploding()) is None
+
+    def test_recognises_the_rejection_by_text(self):
+        assert _is_b2c_rejection(_Refused())
+
+    def test_recognises_the_api_error_code(self):
+        assert _is_b2c_rejection(Exception("customer_id_not_accepted_on_b2c"))
+
+    def test_an_unrelated_failure_is_not_a_rejection(self):
+        """Otherwise a timeout would silently drop the id on a B2B instance,
+        turning a transient outage into permanently wrong scoping."""
+        assert not _is_b2c_rejection(TimeoutError("connection timed out"))
+
+
+class TestCustomerScope:
+    def test_b2b_keeps_the_id(self):
+        """The half that must not move: customer_id is REQUIRED on B2B."""
+        scope = _CustomerScope(_sdk_in_mode(B2B_ISOLATION), "acme")
+        assert scope.value() == "acme"
+        assert not scope.suppressed
+
+    def test_b2c_drops_the_id_before_the_first_call(self):
+        scope = _CustomerScope(_sdk_in_mode(B2C_ISOLATION), "acme")
+        assert scope.value() is None
+        assert scope.suppressed
+
+    def test_unknown_mode_keeps_the_id(self):
+        """Not knowing must mean not acting. Guessing B2C here would strip a B2B
+        caller's mandatory field against any server that has not shipped the
+        whoami field, or any SDK not yet initialised."""
+        scope = _CustomerScope(_sdk_in_mode(None), "acme")
+        assert scope.value() == "acme"
+
+    def test_learns_from_the_first_rejection(self):
+        scope = _CustomerScope(_sdk_in_mode(None), "acme")
+        assert scope.note_rejection(_Refused()) is True
+        assert scope.value() is None
+
+    def test_does_not_learn_from_an_unrelated_failure(self):
+        scope = _CustomerScope(_sdk_in_mode(None), "acme")
+        assert scope.note_rejection(TimeoutError("boom")) is False
+        assert scope.value() == "acme"
+
+    def test_no_configured_id_means_nothing_to_learn(self):
+        scope = _CustomerScope(_sdk_in_mode(None), "")
+        assert scope.note_rejection(_Refused()) is False
+        assert scope.value() is None
+
+    def test_the_warning_names_the_argument_to_remove(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            _CustomerScope(_sdk_in_mode(B2C_ISOLATION), "acme")
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "acme" in text
+        assert "create_synap_mcp_server" in text
+
+    def test_the_warning_is_logged_once_not_per_call(self, caplog):
+        scope = _CustomerScope(_sdk_in_mode(None), "acme")
+        with caplog.at_level(logging.WARNING):
+            scope.note_rejection(_Refused())
+            scope.note_rejection(_Refused())
+        assert len([r for r in caplog.records if "customer_id" in r.getMessage()]) == 1
+
+
+@pytest.mark.asyncio
+class TestToolsHonourTheContract:
+    async def test_b2c_search_omits_the_customer_id(self):
+        sdk = _sdk_in_mode(B2C_ISOLATION)
+        search, _ = _get_tools(sdk, user_id="alice", customer_id="acme")
+        await _call_tool(search, {"query": "q"})
+        assert sdk.fetch.call_args.kwargs["customer_id"] is None
+
+    async def test_b2b_search_still_sends_the_customer_id(self):
+        sdk = _sdk_in_mode(B2B_ISOLATION)
+        search, _ = _get_tools(sdk, user_id="alice", customer_id="acme")
+        await _call_tool(search, {"query": "q"})
+        assert sdk.fetch.call_args.kwargs["customer_id"] == "acme"
+
+    async def test_b2c_remember_omits_the_customer_id(self):
+        sdk = _sdk_in_mode(B2C_ISOLATION)
+        _, remember = _get_tools(sdk, user_id="alice", customer_id="acme")
+        await _call_tool(remember, {"content": "x"})
+        assert sdk.memories.create.call_args.kwargs["customer_id"] is None
+
+    async def test_a_rejected_search_is_retried_without_the_id_and_succeeds(self):
+        """The SDK may not have been initialised, so the first call is where the
+        instance says no. Nothing was read, so retrying is safe, and it is what
+        turns "the first call always fails" into "it works"."""
+        sdk = _sdk_in_mode(None)
+        sdk.fetch = AsyncMock(
+            side_effect=[_Refused(), MagicMock(formatted_context="recovered")]
+        )
+        search, _ = _get_tools(sdk, user_id="alice", customer_id="acme")
+        result = await _call_tool(search, {"query": "q"})
+        assert sdk.fetch.await_count == 2
+        assert sdk.fetch.await_args_list[0].kwargs["customer_id"] == "acme"
+        assert sdk.fetch.await_args_list[1].kwargs["customer_id"] is None
+        assert "recovered" in result["content"][0]["text"]
+        assert not result.get("isError")
+
+    async def test_a_rejected_write_is_retried_without_the_id_and_succeeds(self):
+        sdk = _sdk_in_mode(None)
+        ok = MagicMock()
+        ok.ingestion_id = "ing-retry"
+        sdk.memories.create = AsyncMock(side_effect=[_Refused(), ok])
+        _, remember = _get_tools(sdk, user_id="alice", customer_id="acme")
+        result = await _call_tool(remember, {"content": "x"})
+        assert sdk.memories.create.await_count == 2
+        assert "ing-retry" in result["content"][0]["text"]
+        assert not result.get("isError")
+
+    async def test_the_id_is_dropped_for_every_later_call_too(self):
+        """Learning once and forgetting would pay the rejection on every call."""
+        sdk = _sdk_in_mode(None)
+        sdk.fetch = AsyncMock(
+            side_effect=[_Refused(), MagicMock(formatted_context="a"),
+                         MagicMock(formatted_context="b")]
+        )
+        search, _ = _get_tools(sdk, user_id="alice", customer_id="acme")
+        await _call_tool(search, {"query": "one"})
+        await _call_tool(search, {"query": "two"})
+        assert sdk.fetch.await_count == 3, "the second call must not be retried"
+        assert sdk.fetch.await_args_list[2].kwargs["customer_id"] is None
+
+    async def test_a_persistent_rejection_is_never_reported_as_no_context(self):
+        """The read path degrades quietly on outages, and must NOT degrade quietly
+        on a refused shape: "no relevant context" for a call the instance rejects
+        is the silent failure this whole contract exists to remove."""
+        sdk = _sdk_in_mode(None)
+        sdk.fetch = AsyncMock(side_effect=_Refused())
+        search, _ = _get_tools(sdk, user_id="alice", customer_id="acme")
+        result = await _call_tool(search, {"query": "q"})
+        text = result["content"][0]["text"]
+        assert result["isError"] is True
+        assert "no context available" not in text
+        assert B2C_ISOLATION in text
+        assert "Remove customer_id" in text
+
+    async def test_a_persistent_rejection_on_write_names_the_fix(self):
+        sdk = _sdk_in_mode(None)
+        sdk.memories.create = AsyncMock(side_effect=_Refused())
+        _, remember = _get_tools(sdk, user_id="alice", customer_id="acme")
+        result = await _call_tool(remember, {"content": "x"})
+        assert result["isError"] is True
+        assert "Remove customer_id" in result["content"][0]["text"]
+
+    async def test_an_ordinary_read_failure_still_degrades_quietly(self):
+        """The non-contract path is unchanged: a timeout must not wedge the loop."""
+        sdk = _sdk_in_mode(None)
+        sdk.fetch = AsyncMock(side_effect=TimeoutError("boom"))
+        search, _ = _get_tools(sdk, user_id="alice", customer_id="acme")
+        result = await _call_tool(search, {"query": "q"})
+        assert result["isError"] is False
+        assert "no context available" in result["content"][0]["text"]
