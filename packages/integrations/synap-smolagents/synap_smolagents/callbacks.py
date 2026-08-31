@@ -60,7 +60,9 @@ def create_synap_recorder(
         sdk: Configured :class:`MaximemSynapSDK`.
         user_id: Synap user scope. **Required.**
         conversation_id: Conversation id; seeds each step's document id. **Required.**
-        customer_id: Optional customer/org scope; empty means customer-less.
+        customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
+            B2C instance (user_context_isolation=equals_customer): the server
+            rejects a call carrying one with HTTP 400. Leave it unset there.
 
     Returns:
         A callable ``recorder(memory_step, agent=None)`` for ``step_callbacks``.
