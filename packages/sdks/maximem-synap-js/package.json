@@ -1,32 +1,65 @@
 {
   "name": "@maximem/synap-js-sdk",
-  "version": "0.3.0",
-  "description": "JavaScript wrapper around the Synap Python SDK",
-  "main": "src/index.js",
-  "types": "types/index.d.ts",
-  "type": "commonjs",
+  "version": "0.4.8",
+  "description": "Native TypeScript SDK for Synap context and memory management",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maximem-ai/maximem_synap.git",
+    "directory": "synap/sdk/js"
+  },
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./grpc": {
+      "import": {
+        "types": "./dist/grpc/index.d.ts",
+        "default": "./dist/grpc/index.js"
+      },
+      "require": {
+        "types": "./dist/grpc/index.d.cts",
+        "default": "./dist/grpc/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "typesVersions": {
+    "*": {
+      "grpc": [
+        "./dist/grpc/index.d.ts"
+      ]
+    }
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md",
+    "MIGRATING.md"
+  ],
   "bin": {
     "synap-js-sdk": "bin/synap-js-sdk.js"
   },
-  "files": [
-    "src",
-    "types",
-    "bridge/synap_bridge.py",
-    "bin",
-    "README.md",
-    ".env.example"
-  ],
   "scripts": {
-    "setup": "node bin/synap-js-sdk.js setup",
-    "setup:ts": "node bin/synap-js-sdk.js setup-ts",
-    "check": "node -e \"const sdk=require('./src'); console.log(Object.keys(sdk));\"",
-    "test": "vitest run"
-  },
-  "devDependencies": {
-    "vitest": "^2.1.9"
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "sync-behavior": "bash ../scripts/sync-contract.sh",
+    "lint:publish": "publint && attw --pack ."
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "publishConfig": {
     "access": "public"
@@ -34,9 +67,26 @@
   "keywords": [
     "synap",
     "sdk",
-    "python",
-    "wrapper",
-    "bridge"
+    "memory",
+    "context",
+    "llm",
+    "typescript"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "optionalDependencies": {
+    "@grpc/grpc-js": "^1.12.0",
+    "@grpc/proto-loader": "^0.7.13"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.17.0",
+    "@grpc/grpc-js": "^1.12.0",
+    "@grpc/proto-loader": "^0.7.13",
+    "@types/node": "^22.0.0",
+    "protobufjs": "^7.4.0",
+    "publint": "^0.2.12",
+    "tsup": "^8.3.0",
+    "typescript": "^5.7.0",
+    "undici": "^6.21.0",
+    "vitest": "^2.1.9"
+  }
 }

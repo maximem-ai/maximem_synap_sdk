@@ -131,7 +131,7 @@ The package never polls `wait_for_completion` on the agent's path. Waiting would
 ```python
 SynapBackend(
     sdk,
-    user_id="alice",              # at least one of user_id / customer_id required
+    user_id="alice",              # required. On B2B add customer_id; on B2C it is rejected.
     customer_id="acme",
     conversation_id=None,
     recall_filename="AGENTS.md",  # basename that maps to the synthesized recall doc
