@@ -5,4 +5,4 @@ no-code platforms (Gumloop, n8n) can give their agents persistent memory with no
 pasted MCP URL and a Bearer token. No new backend, storage, or pipeline.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

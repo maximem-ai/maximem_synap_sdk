@@ -31,6 +31,10 @@ from .models.errors import (
 )
 from .auth.manager import CredentialManager
 from .cache.manager import CacheManager, CacheScope
+# Imported at module level, not lazily like AnticipationCache below it: a
+# rung is computed on every fetch, and an import inside a hot path is a
+# dict lookup per call for no benefit.
+from .cache.anticipation_cache import rung_key as _rung_key
 from .transport.http_client import HTTPTransport
 from .transport.grpc_client import GRPCTransport
 from .telemetry.collector import TelemetryCollector, emit_fetch_event, emit_memory_event
@@ -734,6 +738,10 @@ class MaximemSynapSDK:
         await sdk.instance.listen()
     """
 
+    # The instance's scoping mode, learned from whoami on initialize(). None
+    # until then, and None against a server that does not report it.
+    _user_context_isolation: Optional[str] = None
+
     def __init__(
         self,
         instance_id: str = "",
@@ -978,6 +986,23 @@ class MaximemSynapSDK:
         count = self._turn_counters.get(key, 0)
         return count > 0 and count % self._user_summary_interval == 0
 
+    def _check_customer_id(self, customer_id, *, where: str) -> None:
+        """Refuse a customer_id on a B2C instance, at the call site.
+
+        Cheap and side-effect free, so every entry point can call it. See
+        `maximem_synap.scoping` for why an SDK that stays quiet here is worse
+        than one that raises.
+        """
+        from maximem_synap.scoping import check_customer_id
+        # getattr on both: this runs on the hot path of every entry point, and a
+        # check that can itself raise AttributeError on a partially-constructed
+        # SDK would turn a guard into a new failure mode. The instance id is
+        # only decoration on the message.
+        check_customer_id(
+            getattr(self, "_user_context_isolation", None), customer_id,
+            where=where, instance_id=getattr(self, "instance_id", None),
+        )
+
     async def initialize(self) -> None:
         """Initialize the SDK.
 
@@ -1037,6 +1062,11 @@ class MaximemSynapSDK:
                 )
                 resolved_client_id = whoami.get("client_id") or ""
                 resolved_instance_id = whoami.get("instance_id") or ""
+                # The instance's scoping mode. Absent against any server older
+                # than this field, and absent stays None, which every check
+                # below treats as "do not enforce". The server rejects
+                # independently either way.
+                self._user_context_isolation = whoami.get("user_context_isolation")
                 if resolved_client_id and not self._client_id:
                     self._client_id = resolved_client_id
                     if self._credential_manager._credentials is not None:
@@ -1316,6 +1346,7 @@ class MaximemSynapSDK:
                 scopes=["user", "customer"],
             )
         """
+        self._check_customer_id(customer_id, where="sdk.fetch")
         self._ensure_initialized()
         start_time = datetime.now(timezone.utc)
 
@@ -1549,6 +1580,7 @@ class MaximemSynapSDK:
             >>> # In an Anthropic agent loop:
             >>> tool = sdk.as_tool(scope="unified", user_id="u", style="anthropic")
         """
+        self._check_customer_id(customer_id, where="sdk.as_tool")
         scope = scope.lower()
         valid = {"conversation", "user", "customer", "client", "unified"}
         if scope not in valid:
@@ -1633,9 +1665,10 @@ class ConversationInterface:
         role: str,
         content: str,
         user_id: str,
-        customer_id: str,
+        customer_id: Optional[str] = None,
         session_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        scope_path: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Record a single conversation message.
 
@@ -1644,13 +1677,31 @@ class ConversationInterface:
             role: Message role ("user" or "assistant")
             content: Message content text
             user_id: User identifier (required, must be external ID)
-            customer_id: Customer identifier (required, must be external ID)
+            customer_id: Customer identifier. REQUIRED on a B2B instance.
+                NOT ACCEPTED on a B2C instance (user_context_isolation =
+                equals_customer), where the user_id is the whole identity.
+                This parameter used to be mandatory, which meant a B2C caller
+                could not use this method correctly at all: they were forced to
+                send a field the server files their data under, and then read it
+                back under a different one.
             session_id: Session identifier (optional, auto-generated if not provided)
             metadata: Additional metadata (optional)
+            scope_path: The rung this conversation belongs to, named in full,
+                e.g. ``{"tenant": "acme", "practice": "high_street"}``.
+
+                Only relevant to a client whose ladder is deeper than the
+                default three rungs (root, tenant, person). On the default
+                ladder, ``customer_id`` and ``user_id`` already say everything
+                a path could, and this can be left alone.
+
+                Sending it once per conversation is enough. The server fills a
+                missing path and never overwrites one, so it can go on the
+                first turn, on every turn, or on neither.
 
         Returns:
             Dict with message_id, conversation_id, session_id, recorded_at
         """
+        self._sdk._check_customer_id(customer_id, where="conversation.record_message")
         validate_conversation_id(conversation_id)
         controller = self._ensure_controller()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
@@ -1662,6 +1713,7 @@ class ConversationInterface:
             customer_id=customer_id,
             session_id=session_id,
             metadata=metadata,
+            scope_path=scope_path,
             correlation_id=correlation_id,
         )
         # Mirror the turn into the local ST store only AFTER the server
@@ -1703,7 +1755,9 @@ class ConversationInterface:
         """Record multiple conversation messages in a batch.
 
         Args:
-            messages: List of message dicts with conversation_id, role, content, etc.
+            messages: List of message dicts with conversation_id, role, content,
+                etc. A message may also carry ``scope_path``, the rung, spelled
+                exactly as in ``record_message``.
 
         Returns:
             Dict with total, succeeded, failed, results[]
@@ -1751,6 +1805,7 @@ class ConversationInterface:
         metadata: Optional[Dict[str, Any]] = None,
         started_at: Optional[datetime] = None,
         ended_at: Optional[datetime] = None,
+        scope_path: Optional[Dict[str, str]] = None,
     ) -> TranscriptIngestResponse:
         """One-shot push of a full conversation transcript for async ingestion.
 
@@ -1802,6 +1857,7 @@ class ConversationInterface:
         """
         # NOTE: deliberately NO validate_conversation_id() here — the id is a
         # free-form client string the server coerces (spec §4.1).
+        self._sdk._check_customer_id(customer_id, where="ConversationInterface.ingest_transcript")
         self._sdk._ensure_initialized()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = datetime.now(timezone.utc)
@@ -1838,6 +1894,13 @@ class ConversationInterface:
             body["started_at"] = started_at.isoformat()
         if ended_at is not None:
             body["ended_at"] = ended_at.isoformat()
+        # The rung these memories belong to. Only needed on a ladder with a
+        # level between your customer and your user levels, where two ids cannot
+        # say which one a transcript belongs to and the server refuses rather
+        # than guessing. Omitted when unset, so an existing caller sends exactly
+        # the body it sent before.
+        if scope_path:
+            body["scope"] = scope_path
 
         emit_memory_event(
             self._sdk._telemetry_collector,
@@ -1990,6 +2053,7 @@ class ConversationContextInterface:
         precision_level: str = "high",
         user_id: Optional[str] = None,
         customer_id: Optional[str] = None,
+        scope_path: Optional[Dict[str, str]] = None,
     ) -> ContextResponse:
         """Fetch context for a conversation.
 
@@ -2017,6 +2081,7 @@ class ConversationContextInterface:
         Returns:
             ContextResponse with facts, preferences, episodes, etc.
         """
+        self._sdk._check_customer_id(customer_id, where="ConversationContextInterface.fetch")
         self._sdk._ensure_initialized()
         validate_conversation_id(conversation_id)
 
@@ -2041,6 +2106,18 @@ class ConversationContextInterface:
             "types": types,
             "mode": mode,
             "precision_level": precision_level,
+            # ⚠ The rung this read is addressed to is PART OF THE KEY.
+            #
+            # `scope_path` reached the request body and nothing else, so two
+            # fetches differing only in the rung they named hashed to one key
+            # and whichever ran first served the other for the whole TTL —
+            # without a request leaving the process, so no server log shows it.
+            # Measured on production 2026-08-27: a customer-scope read for
+            # practice "riverside" returned practice "high-street"'s equipment
+            # facts, and clearing the cache between the two calls made both
+            # correct. Same shape as the 0.4.3 defect where the key omitted
+            # instance_id and two instances shared one database.
+            "scope_path": scope_path,
         }
 
         # Check anticipation cache first (bundles pre-fetched via gRPC stream).
@@ -2051,12 +2128,23 @@ class ConversationContextInterface:
         # Funnel scope: thread (user_id, customer_id, client_id) so the
         # lookup widens to customer-shared and client-shared bundles when
         # appropriate. See AnticipationCache._get_valid_bundle_ids.
+        # The rung this read is addressed to, in the same words the server
+        # stamped on the bundles it pushed. A prefetched bundle is servable
+        # only at the rung it was prefetched for; without this the cache
+        # matched on entity and conversation alone and a bundle fetched for
+        # one rung answered a caller standing at another, entirely inside this
+        # process, so no server log shows it. `None` when no path was named,
+        # which is every caller who has not turned nested scoping on, and that
+        # case behaves exactly as it did.
+        _rung = _rung_key(scope_path)
+
         anticipated = self._sdk._anticipation_cache.lookup(
             search_query=search_query,
             entity_id=user_id,
             conversation_id=conversation_id,
             customer_id=customer_id,
             client_id=self._sdk._client_id,
+            scope_rung=_rung,
         )
         if anticipated:
             response = _build_anticipation_response(
@@ -2115,6 +2203,17 @@ class ConversationContextInterface:
                     body["precision_level"] = precision_level
                 if skip_server_st:
                     body["include_conversation_context"] = False
+                # Nested scoping. Names each rung of the client's own ladder
+                # down to the one this request is happening at, for example
+                # {"customer": "acme", "team": "payments", "user": "d-42"}.
+                #
+                # Only sent when supplied, so a caller who does not use custom
+                # levels sends exactly the body they sent before. The server
+                # refuses a path that skips a rung and names the rung it wanted,
+                # rather than guessing, because a wrong guess at or above the
+                # tenant would cross a customer boundary.
+                if scope_path:
+                    body["scope"] = scope_path
                 result = await self._sdk._http_transport.post(
                     "/v1/context/conversation/fetch",
                     auth_context=auth_context,
@@ -2200,7 +2299,9 @@ class ConversationContextInterface:
         # summary lookup, so we skip rather than risk cross-user splice.
         turn = self._sdk._increment_turn(conversation_id)
         if user_id and self._sdk._should_inject_user_summary(conversation_id):
-            summary = self._sdk._anticipation_cache.lookup_user_summary(entity_id=user_id)
+            summary = self._sdk._anticipation_cache.lookup_user_summary(
+                entity_id=user_id, scope_rung=_rung,
+            )
             if summary:
                 response = _merge_user_summary_into_response(response, summary)
                 logger.debug("Injected user summary at turn %d for conversation %s", turn, conversation_id)
@@ -2633,6 +2734,7 @@ class UserInterface:
         Raises:
             ContextNotFoundError: 404 — no profile exists for this user yet.
         """
+        self._sdk._check_customer_id(customer_id, where="UserInterface.get_profile")
         self._sdk._ensure_initialized()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = datetime.now(timezone.utc)
@@ -2700,6 +2802,7 @@ class UserContextInterface:
         context_mode: str = "in-conversation",
         include_profile: bool = True,
         last_n_conversations: int = 1,
+        scope_path: Optional[Dict[str, str]] = None,
     ) -> ContextResponse:
         """Fetch context for a user.
 
@@ -2729,6 +2832,7 @@ class UserContextInterface:
             ContextResponse. In summary mode the item lists are empty and
             ``.profile`` / ``.conversations`` are populated.
         """
+        self._sdk._check_customer_id(customer_id, where="UserContextInterface.fetch")
         self._sdk._ensure_initialized()
 
         # Validate mode
@@ -2769,16 +2873,39 @@ class UserContextInterface:
             "context_mode": context_mode,
             "include_profile": include_profile if summary_mode else None,
             "last_n_conversations": last_n_conversations if summary_mode else None,
+            # ⚠ The rung this read is addressed to is PART OF THE KEY.
+            #
+            # `scope_path` reached the request body and nothing else, so two
+            # fetches differing only in the rung they named hashed to one key
+            # and whichever ran first served the other for the whole TTL —
+            # without a request leaving the process, so no server log shows it.
+            # Measured on production 2026-08-27: a customer-scope read for
+            # practice "riverside" returned practice "high-street"'s equipment
+            # facts, and clearing the cache between the two calls made both
+            # correct. Same shape as the 0.4.3 defect where the key omitted
+            # instance_id and two instances shared one database.
+            "scope_path": scope_path,
         }
 
         # Check anticipation cache first (bundles pre-fetched via gRPC stream).
         # Funnel scope: widen to customer-shared + client-shared bundles when
         # the request has those IDs available.
+        # The rung this read is addressed to, in the same words the server
+        # stamped on the bundles it pushed. A prefetched bundle is servable
+        # only at the rung it was prefetched for; without this the cache
+        # matched on entity and conversation alone and a bundle fetched for
+        # one rung answered a caller standing at another, entirely inside this
+        # process, so no server log shows it. `None` when no path was named,
+        # which is every caller who has not turned nested scoping on, and that
+        # case behaves exactly as it did.
+        _rung = _rung_key(scope_path)
+
         anticipated = self._sdk._anticipation_cache.lookup(
             search_query=search_query,
             entity_id=user_id,
             customer_id=customer_id,
             client_id=self._sdk._client_id,
+            scope_rung=_rung,
         )
         if anticipated:
             response = _build_anticipation_response(
@@ -2832,6 +2959,17 @@ class UserContextInterface:
                     body["precision_level"] = precision_level
                 if skip_server_st:
                     body["include_conversation_context"] = False
+                # Nested scoping. Names each rung of the client's own ladder
+                # down to the one this request is happening at, for example
+                # {"customer": "acme", "team": "payments", "user": "d-42"}.
+                #
+                # Only sent when supplied, so a caller who does not use custom
+                # levels sends exactly the body they sent before. The server
+                # refuses a path that skips a rung and names the rung it wanted,
+                # rather than guessing, because a wrong guess at or above the
+                # tenant would cross a customer boundary.
+                if scope_path:
+                    body["scope"] = scope_path
                 # Conditional body keys — only send the summary-mode params in
                 # summary mode, so an in-conversation fetch is byte-identical to
                 # today (zero regression).
@@ -2922,7 +3060,7 @@ class UserContextInterface:
         turn = self._sdk._increment_turn(conversation_id)
         if self._sdk._should_inject_user_summary(conversation_id):
             summary = self._sdk._anticipation_cache.lookup_user_summary(
-                entity_id=user_id,
+                entity_id=user_id, scope_rung=_rung,
             )
             if summary:
                 response = _merge_user_summary_into_response(response, summary)
@@ -2954,8 +3092,10 @@ class CustomerContextInterface:
         types: Optional[List[str]] = None,
         mode: str = "fast",
         precision_level: str = "high",
+        scope_path: Optional[Dict[str, str]] = None,
     ) -> ContextResponse:
         """Fetch context for a customer (B2B)."""
+        self._sdk._check_customer_id(customer_id, where="CustomerContextInterface.fetch")
         self._sdk._ensure_initialized()
 
         # Validate mode
@@ -2979,16 +3119,39 @@ class CustomerContextInterface:
             "types": types,
             "mode": mode,
             "precision_level": precision_level,
+            # ⚠ The rung this read is addressed to is PART OF THE KEY.
+            #
+            # `scope_path` reached the request body and nothing else, so two
+            # fetches differing only in the rung they named hashed to one key
+            # and whichever ran first served the other for the whole TTL —
+            # without a request leaving the process, so no server log shows it.
+            # Measured on production 2026-08-27: a customer-scope read for
+            # practice "riverside" returned practice "high-street"'s equipment
+            # facts, and clearing the cache between the two calls made both
+            # correct. Same shape as the 0.4.3 defect where the key omitted
+            # instance_id and two instances shared one database.
+            "scope_path": scope_path,
         }
 
         # Check anticipation cache first (bundles pre-fetched via gRPC stream).
         # Funnel scope: customer-scope requests widen to client-shared bundles
         # but explicitly DO NOT widen to user-scoped bundles (those would
         # leak one visitor's data into another visitor's customer fetch).
+        # The rung this read is addressed to, in the same words the server
+        # stamped on the bundles it pushed. A prefetched bundle is servable
+        # only at the rung it was prefetched for; without this the cache
+        # matched on entity and conversation alone and a bundle fetched for
+        # one rung answered a caller standing at another, entirely inside this
+        # process, so no server log shows it. `None` when no path was named,
+        # which is every caller who has not turned nested scoping on, and that
+        # case behaves exactly as it did.
+        _rung = _rung_key(scope_path)
+
         anticipated = self._sdk._anticipation_cache.lookup(
             search_query=search_query,
             entity_id=customer_id,
             client_id=self._sdk._client_id,
+            scope_rung=_rung,
         )
         if anticipated:
             response = _build_anticipation_response(
@@ -3039,6 +3202,17 @@ class CustomerContextInterface:
                     body["precision_level"] = precision_level
                 if skip_server_st:
                     body["include_conversation_context"] = False
+                # Nested scoping. Names each rung of the client's own ladder
+                # down to the one this request is happening at, for example
+                # {"customer": "acme", "team": "payments", "user": "d-42"}.
+                #
+                # Only sent when supplied, so a caller who does not use custom
+                # levels sends exactly the body they sent before. The server
+                # refuses a path that skips a rung and names the rung it wanted,
+                # rather than guessing, because a wrong guess at or above the
+                # tenant would cross a customer boundary.
+                if scope_path:
+                    body["scope"] = scope_path
                 result = await self._sdk._http_transport.post(
                     "/v1/context/customer/fetch",
                     auth_context=auth_context,
@@ -3117,7 +3291,7 @@ class CustomerContextInterface:
         turn = self._sdk._increment_turn(conversation_id)
         if self._sdk._should_inject_user_summary(conversation_id):
             summary = self._sdk._anticipation_cache.lookup_user_summary(
-                entity_id=customer_id,
+                entity_id=customer_id, scope_rung=_rung,
             )
             if summary:
                 response = _merge_user_summary_into_response(response, summary)
@@ -3148,6 +3322,7 @@ class ClientContextInterface:
         types: Optional[List[str]] = None,
         mode: str = "fast",
         precision_level: str = "high",
+        scope_path: Optional[Dict[str, str]] = None,
     ) -> ContextResponse:
         """Fetch organizational context."""
         self._sdk._ensure_initialized()
@@ -3173,6 +3348,18 @@ class ClientContextInterface:
             "types": types,
             "mode": mode,
             "precision_level": precision_level,
+            # ⚠ The rung this read is addressed to is PART OF THE KEY.
+            #
+            # `scope_path` reached the request body and nothing else, so two
+            # fetches differing only in the rung they named hashed to one key
+            # and whichever ran first served the other for the whole TTL —
+            # without a request leaving the process, so no server log shows it.
+            # Measured on production 2026-08-27: a customer-scope read for
+            # practice "riverside" returned practice "high-street"'s equipment
+            # facts, and clearing the cache between the two calls made both
+            # correct. Same shape as the 0.4.3 defect where the key omitted
+            # instance_id and two instances shared one database.
+            "scope_path": scope_path,
         }
 
         # Check anticipation cache first (bundles pre-fetched via gRPC stream).
@@ -3180,10 +3367,21 @@ class ClientContextInterface:
         # bundles or the "_any" sentinel. The "_client" entity_id remains
         # to keep matching legacy bundles that were stored under that
         # sentinel before the client_id marker existed.
+        # The rung this read is addressed to, in the same words the server
+        # stamped on the bundles it pushed. A prefetched bundle is servable
+        # only at the rung it was prefetched for; without this the cache
+        # matched on entity and conversation alone and a bundle fetched for
+        # one rung answered a caller standing at another, entirely inside this
+        # process, so no server log shows it. `None` when no path was named,
+        # which is every caller who has not turned nested scoping on, and that
+        # case behaves exactly as it did.
+        _rung = _rung_key(scope_path)
+
         anticipated = self._sdk._anticipation_cache.lookup(
             search_query=search_query,
             entity_id="_client",
             client_id=self._sdk._client_id,
+            scope_rung=_rung,
         )
         if anticipated:
             response = _build_anticipation_response(
@@ -3232,6 +3430,17 @@ class ClientContextInterface:
                     body["precision_level"] = precision_level
                 if skip_server_st:
                     body["include_conversation_context"] = False
+                # Nested scoping. Names each rung of the client's own ladder
+                # down to the one this request is happening at, for example
+                # {"customer": "acme", "team": "payments", "user": "d-42"}.
+                #
+                # Only sent when supplied, so a caller who does not use custom
+                # levels sends exactly the body they sent before. The server
+                # refuses a path that skips a rung and names the rung it wanted,
+                # rather than guessing, because a wrong guess at or above the
+                # tenant would cross a customer boundary.
+                if scope_path:
+                    body["scope"] = scope_path
                 result = await self._sdk._http_transport.post(
                     "/v1/context/client/fetch",
                     auth_context=auth_context,
@@ -3308,7 +3517,7 @@ class ClientContextInterface:
         turn = self._sdk._increment_turn(conversation_id)
         if self._sdk._should_inject_user_summary(conversation_id):
             summary = self._sdk._anticipation_cache.lookup_user_summary(
-                entity_id="_client",
+                entity_id="_client", scope_rung=_rung,
             )
             if summary:
                 response = _merge_user_summary_into_response(response, summary)
@@ -3476,6 +3685,7 @@ class InstanceInterface:
         Raises:
             ListeningNotActiveError: If listen() has not been called.
         """
+        self._sdk._check_customer_id(customer_id, where="InstanceInterface.send_message")
         from .models.errors import ListeningNotActiveError
 
         if not self.is_listening:
@@ -3563,6 +3773,7 @@ class InstanceInterface:
         Raises:
             ListeningNotActiveError: If ``listen()`` has not been called.
         """
+        self._sdk._check_customer_id(customer_id, where="InstanceInterface.record_thinking")
         md: Dict[str, str] = dict(metadata or {})
         if step_index is not None:
             md["step_index"] = str(step_index)
@@ -3604,6 +3815,7 @@ class CacheInterface:
 
     def clear_customer(self, customer_id: str) -> None:
         """Clear cached data for a specific customer."""
+        self._sdk._check_customer_id(customer_id, where="CacheInterface.clear_customer")
         if self._sdk._cache_manager:
             self._sdk._cache_manager.clear_customer(customer_id)
 

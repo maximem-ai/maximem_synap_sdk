@@ -1,6 +1,6 @@
 [project]
 name = "maximem-synap-mcp-server"
-version = "0.1.0"
+version = "0.1.1"
 description = "Hosted remote MCP server (Streamable HTTP) adapter over the Synap public REST API."
 requires-python = ">=3.11"
 dependencies = [
@@ -9,6 +9,10 @@ dependencies = [
     # `mcp.server.fastmcp`, so server.py fails to import and the container
     # crash-loops while the rest of the stack reports healthy.
     "mcp[cli]>=1.26.0,<2",
+    # tools.py imports Field directly to attach per-parameter descriptions to the
+    # published tool schema. mcp already pulls pydantic in, but an undeclared
+    # import is one you only find out about on somebody else's upgrade.
+    "pydantic>=2",
     "httpx>=0.27",
     "uvicorn>=0.30",
     "starlette>=0.37",

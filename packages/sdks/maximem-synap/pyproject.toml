@@ -26,6 +26,16 @@ dependencies = [
     "cryptography>=41.0",
     "httpx>=0.25.0",
     "grpcio>=1.60.0",
+    # grpcio does NOT pull protobuf in transitively, and the generated
+    # `synap_service_pb2` starts with `from google.protobuf import descriptor`.
+    # Without this line a clean `pip install maximem-synap` gets grpcio and no
+    # protobuf, and because every proto import in grpc_client is lazy (inside
+    # _create_stub, _send_heartbeat, _write_conversation_event and two more)
+    # the package imports fine, the SDK constructs fine, and the failure only
+    # arrives the moment a client opens the stream. That also made anticipation
+    # unreachable: the only writer to the prefetch cache is the stream's
+    # on_message callback, so the cache could never be populated at all.
+    "protobuf>=4.25.0",
 ]
 
 [project.optional-dependencies]
@@ -57,6 +67,14 @@ Repository = "https://github.com/maximem-synap/sdk-python"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["maximem_synap*"]
+
+# The behavior contract is data, not code, so setuptools will not pick it
+# up from the package scan. Without this the wheel ships without
+# anticipation.json and every import of maximem_synap.behavior raises
+# FileNotFoundError at runtime -- invisible in a source checkout, fatal
+# in an installed package.
+[tool.setuptools.package-data]
+"maximem_synap.behavior" = ["*.json"]
 
 [tool.setuptools.dynamic]
 version = {attr = "maximem_synap._version.__version__"}

@@ -31,8 +31,8 @@ def _text(result) -> str:
     return "\n".join(parts)
 
 
-async def test_tools_list_exposes_three_tools():
-    """TC-MCP-02: the three tools are discoverable with descriptions."""
+async def test_tools_list_exposes_four_tools():
+    """TC-MCP-02: all four tools are discoverable with descriptions."""
     tools = await mcp.list_tools()
     names = {t.name for t in tools}
     assert {"log_exchange", "recall_context", "list_recent_memories"} <= names
