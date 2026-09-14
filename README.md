@@ -269,7 +269,7 @@ agent = ReActAgent.from_tools(tools, memory=memory)
 
 ## MCP server
 
-Give **no-code and low-code agents** (Gumloop, n8n, and any MCP-compatible client) persistent memory with nothing but an MCP URL and your Synap API key. No SDK, no code. The server exposes Synap's memory as three MCP tools (`log_exchange`, `recall_context`, `list_recent_memories`) over Streamable HTTP.
+Give **no-code and low-code agents** (Gumloop, n8n, and any MCP-compatible client) persistent memory with nothing but an MCP URL and your Synap API key. No SDK, no code. The server exposes Synap's memory as four MCP tools (`log_exchange`, `check_memory_status`, `recall_context`, `list_recent_memories`) over Streamable HTTP.
 
 It's a **stateless adapter** over the hosted Synap API: each call maps to one REST operation and your Bearer token is forwarded verbatim, so there's no separate backend to run. Use the managed endpoint (grab the URL and token from your [dashboard](https://synap.maximem.ai)), or self-host the adapter from source.
 

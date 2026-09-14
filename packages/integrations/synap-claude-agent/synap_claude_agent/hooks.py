@@ -53,7 +53,9 @@ def create_synap_hooks(
     Args:
         sdk: Configured :class:`MaximemSynapSDK` instance.
         user_id: Synap user scope. Required.
-        customer_id: Optional customer/org scope.
+        customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
+            B2C instance (user_context_isolation=equals_customer): the server
+            rejects a call carrying one with HTTP 400. Leave it unset there.
         conversation_id: Optional static conversation id. When ``None`` the
             SDK's per-session ``session_id`` is used instead.
         mode: Synap fetch mode; ``"accurate"`` (default) or ``"fast"``.
