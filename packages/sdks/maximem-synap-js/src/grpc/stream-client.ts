@@ -17,6 +17,7 @@
 
 import type { AnticipationCache } from '../context/anticipation-cache.js';
 import { SYNAP_PROTO_DESCRIPTOR } from './descriptor.js';
+import { InsufficientCreditsError, RateLimitError, type SynapError } from '../errors.js';
 
 export type StreamState =
   | 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'closed';
@@ -66,6 +67,108 @@ export interface StreamClientOptions {
   onCompactionUpdate?: (conversationId: string, bundle: Record<string, unknown>) => void;
 }
 
+/**
+ * grpc-js status code for RESOURCE_EXHAUSTED. Hard-coded rather than read from
+ * `grpc.status`, because this module is loaded before grpc-js on some paths and
+ * the numbers are fixed by the gRPC spec.
+ */
+const GRPC_RESOURCE_EXHAUSTED = 8;
+
+/**
+ * The credit gate refuses a call with RESOURCE_EXHAUSTED, these details, and
+ * the balance and reason in trailing metadata. See
+ * synap/cloud/application/credits/grpc_gate.py.
+ */
+export const CREDIT_ABORT_DETAILS = 'insufficient_credits';
+
+/**
+ * Reasons that end the stream. A reconnect re-runs the same gate with the same
+ * balance, so retrying only delays the answer the caller needs. Mirrors
+ * `CREDIT_STOP_REASONS` in `transport/grpc_client.py`.
+ */
+export const CREDIT_STOP_REASONS = new Set([
+  'overages_disabled',
+  'trial_limit_reached',
+  'subscription_inactive',
+]);
+
+function metadataValue(metadata: unknown, key: string): string | null {
+  if (metadata === null || typeof metadata !== 'object') return null;
+  const getter = (metadata as { get?: (k: string) => unknown }).get;
+  const raw = typeof getter === 'function'
+    ? getter.call(metadata, key)
+    : (metadata as Record<string, unknown>)[key];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (value === undefined || value === null) return null;
+  const text = typeof value === 'string' ? value : String(value);
+  return text === '' ? null : text;
+}
+
+function numberOrNull(value: string | null): number | null {
+  if (value === null) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Translate a credit refusal into the same error HTTP would have raised.
+ *
+ * RESOURCE_EXHAUSTED on its own is indistinguishable from server overload, so
+ * this keys on `credit-reason`: `overages_disabled` is an
+ * `InsufficientCreditsError` (permanent, a paid plan at zero that has not
+ * allowed usage past zero), while `trial_limit_reached` and
+ * `subscription_inactive` are a `RateLimitError`. Returns null for anything
+ * else, including a RESOURCE_EXHAUSTED that is not a credit refusal and a
+ * reason this SDK does not know: the caller then keeps its existing behaviour
+ * of treating the abort as transient. Mirrors `credit_error_from_rpc`.
+ */
+export function creditErrorFromRpc(
+  error: unknown,
+  correlationId: string | null = null,
+): SynapError | null {
+  if (error === null || typeof error !== 'object') return null;
+  if ((error as { code?: unknown }).code !== GRPC_RESOURCE_EXHAUSTED) return null;
+
+  const metadata = (error as { metadata?: unknown }).metadata;
+  const reason = metadataValue(metadata, 'credit-reason');
+  if (reason === null || !CREDIT_STOP_REASONS.has(reason)) return null;
+
+  const rawDetails = (error as { details?: unknown }).details;
+  const details = typeof rawDetails === 'string' && rawDetails !== ''
+    ? rawDetails
+    : CREDIT_ABORT_DETAILS;
+  const requestId = metadataValue(metadata, 'request-id') ?? correlationId;
+  const manageUrl = metadataValue(metadata, 'credit-manage-url');
+
+  if (reason === 'overages_disabled') {
+    return new InsufficientCreditsError(details, {
+      correlationId: requestId,
+      balanceCredits: numberOrNull(metadataValue(metadata, 'credit-balance')),
+      requiredCredits: numberOrNull(metadataValue(metadata, 'credit-minimum-required')),
+      recoveryUrl: metadataValue(metadata, 'credit-recovery-url'),
+      redeemUrl: metadataValue(metadata, 'credit-redeem-url'),
+      reason,
+      manageUrl,
+    });
+  }
+
+  return new RateLimitError(details, {
+    correlationId: requestId,
+    reason,
+    upgradeUrl: metadataValue(metadata, 'credit-upgrade-url'),
+    manageUrl,
+  });
+}
+
+/** True for an error this module raised from a credit refusal. */
+export function isCreditStop(error: unknown): boolean {
+  if (!(error instanceof InsufficientCreditsError) && !(error instanceof RateLimitError)) {
+    return false;
+  }
+  const reason = (error as { reason?: unknown }).reason;
+  return typeof reason === 'string' && CREDIT_STOP_REASONS.has(reason);
+}
+
 interface DuplexCall {
   write: (msg: unknown) => void;
   on: (event: string, handler: (arg?: unknown) => void) => void;
@@ -102,6 +205,9 @@ export class GrpcStreamClient {
   #missedHeartbeats = 0;
   #heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   #shutdownRequested = false;
+  // Why the stream stopped, when it stopped for a reason the caller can act on
+  // (today: a credit refusal). Mirrors Python's `last_error`.
+  #lastError: SynapError | null = null;
 
   #grpc: typeof import('@grpc/grpc-js') | null = null;
   #ServiceStub: (new (target: string, creds: unknown, opts: unknown) => Record<string, unknown>) | null = null;
@@ -130,9 +236,19 @@ export class GrpcStreamClient {
   get currentState(): StreamState { return this.#state; }
   get isConnected(): boolean { return this.#state === 'connected'; }
 
+  /**
+   * The error that ended the stream, if one did.
+   *
+   * Set when the server refused the stream for credits, so an `onDisconnect`
+   * handler can read the balance, the reason and the URL to fix it. Null for an
+   * ordinary disconnect.
+   */
+  get lastError(): SynapError | null { return this.#lastError; }
+
   async connect(): Promise<void> {
     await this.#loadGrpc();
     this.#shutdownRequested = false;
+    this.#lastError = null;
     await this.#establish();
     this.#startHeartbeat();
   }
@@ -248,7 +364,16 @@ export class GrpcStreamClient {
 
     const call = (stub['Listen'] as (m: unknown) => DuplexCall)(metadata);
     call.on('data', (msg) => this.#handleMessage(msg as Record<string, unknown>));
-    call.on('error', (err) => { void this.#handleDisconnect(`error: ${String(err)}`); });
+    call.on('error', (err) => {
+      // A credit refusal arrives here, not from waitForReady: the channel is
+      // healthy and the gate aborts the call itself.
+      const creditError = creditErrorFromRpc(err);
+      if (creditError !== null) {
+        this.#handleCreditStop(creditError);
+        return;
+      }
+      void this.#handleDisconnect(`error: ${String(err)}`);
+    });
     call.on('end', () => { void this.#handleDisconnect('server_close'); });
 
     this.#call = call;
@@ -324,6 +449,21 @@ export class GrpcStreamClient {
     });
   }
 
+  /**
+   * End the stream because the server refused it for credits.
+   *
+   * Reconnecting cannot clear a credit refusal, so the stream closes and the
+   * typed error is kept on `lastError` for the application to read. Mirrors
+   * Python's `_handle_credit_stop`.
+   */
+  #handleCreditStop(error: SynapError): void {
+    this.#lastError = error;
+    this.#shutdownRequested = true;
+    this.#stopHeartbeat();
+    this.#closeCall();
+    this.#setState('disconnected');
+  }
+
   async #handleDisconnect(_reason: string): Promise<void> {
     if (this.#shutdownRequested) return;
 
@@ -347,7 +487,11 @@ export class GrpcStreamClient {
     if (this.#shutdownRequested) return;
     try {
       await this.#establish();
-    } catch {
+    } catch (error) {
+      if (isCreditStop(error)) {
+        this.#handleCreditStop(error as SynapError);
+        return;
+      }
       void this.#handleDisconnect('reconnect_failed');
     }
   }
