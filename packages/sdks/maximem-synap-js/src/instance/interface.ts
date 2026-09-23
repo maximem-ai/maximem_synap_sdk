@@ -209,6 +209,10 @@ export function createInstanceNamespace(
       const onReconnect = options.on_reconnect ?? options.onReconnect;
       let reconnectAttempts = 0;
 
+      // Assigned immediately below; the callbacks that read it only run later,
+      // once the stream is live.
+      let stream: InstanceType<typeof GrpcStreamClient> | null = null;
+
       const created = new GrpcStreamClient(credentials(), cache, {
         host: options.host ?? getEnv('SYNAP_GRPC_HOST') ?? DEFAULT_GRPC_HOST,
         port: options.port ?? envPort() ?? DEFAULT_GRPC_PORT,
@@ -222,10 +226,18 @@ export function createInstanceNamespace(
             reconnectAttempts += 1;
             onReconnect?.(reconnectAttempts);
           } else if (state === 'disconnected') {
-            onDisconnect?.('stream disconnected');
+            // A credit refusal names itself, the way Python's transport does,
+            // so a handler can tell "the server ran out of patience" from
+            // "this account cannot pay for the stream".
+            const stopped = stream?.lastError ?? null;
+            const reason = stopped === null
+              ? 'stream disconnected'
+              : `credit_stop:${(stopped as { reason?: string | null }).reason ?? 'unknown'}`;
+            onDisconnect?.(reason);
           }
         },
       });
+      stream = created;
 
       try {
         await created.connect();

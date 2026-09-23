@@ -363,6 +363,36 @@ function toTransportError(error: unknown, correlationId: string): SynapError {
   );
 }
 
+/**
+ * Values the credit gate sends as the body's `error` field. Only these are read
+ * as a reason, so an unrelated 429 carrying some other `error` string is not
+ * mistaken for a credit stop. Mirrors `_CREDIT_ERRORS` in `http_client.py`.
+ */
+const CREDIT_ERRORS = new Set(['insufficient_credits', 'trial_limit_reached']);
+
+/**
+ * The credit gate's structured body, however the server nested it.
+ *
+ * The gate raises an HTTPException, so FastAPI wraps its payload in `detail`;
+ * the burn-service path returns the same fields at the top level. Reading only
+ * the top level (what this transport did) meant the gate's balance, reason and
+ * URLs never reached the caller.
+ */
+function creditPayload(
+  parsed: Record<string, unknown>,
+  detailObject: Record<string, unknown> | null,
+): Record<string, unknown> {
+  return detailObject ?? parsed;
+}
+
+/** Why the request was refused, or null if this was not a credit stop. */
+function creditReason(payload: Record<string, unknown>): string | null {
+  const reason = stringOrNull(payload['reason']);
+  if (reason !== null) return reason;
+  const error = stringOrNull(payload['error']);
+  return error !== null && CREDIT_ERRORS.has(error) ? error : null;
+}
+
 async function toHttpError(response: Response, correlationId: string): Promise<SynapError> {
   const body = await response.text().catch(() => '');
   let parsed: Record<string, unknown> = {};
@@ -395,21 +425,25 @@ async function toHttpError(response: Response, correlationId: string): Promise<S
       return new AuthenticationError(message, opts);
     case 404:
       return new ContextNotFoundError(message, opts);
-    case 402:
+    case 402: {
       // The server sends `minimum_required_credits` (see
       // synap/cloud/application/credits/enforcement.py). We read
       // `required_credits` for a while, a key that never exists, so
       // `requiredCredits` was always null. `recovery_url` and `redeem_url`
       // were dropped entirely, leaving no way to surface a top-up link.
+      const credit = creditPayload(parsed, detailObject);
       return new InsufficientCreditsError(message, {
         ...opts,
-        balanceCredits: numberOrNull(parsed['balance_credits']),
+        balanceCredits: numberOrNull(credit['balance_credits']),
         requiredCredits:
-          numberOrNull(parsed['minimum_required_credits']) ??
-          numberOrNull(parsed['required_credits']),
-        recoveryUrl: stringOrNull(parsed['recovery_url']),
-        redeemUrl: stringOrNull(parsed['redeem_url']),
+          numberOrNull(credit['minimum_required_credits']) ??
+          numberOrNull(credit['required_credits']),
+        recoveryUrl: stringOrNull(credit['recovery_url']),
+        redeemUrl: stringOrNull(credit['redeem_url']),
+        reason: creditReason(credit),
+        manageUrl: stringOrNull(credit['manage_url']),
       });
+    }
     case 409:
       // Conflict is PERMANENT and never retried. Python discriminates on the
       // structured body so a transcript-immutability conflict becomes
@@ -422,11 +456,19 @@ async function toHttpError(response: Response, correlationId: string): Promise<S
       }
       return new ConflictError(message, opts);
     case 429: {
+      // Either an ordinary rate limit or a credit stop that time or a plan
+      // change clears: the spent Trial cap (`trial_limit_reached`) and a paid
+      // plan whose subscription lapsed (`subscription_inactive`). The credit
+      // fields are absent on the plain rate limit.
       const header = response.headers.get('retry-after');
       const retryAfter = header !== null && header.trim() !== '' ? Number(header) : null;
+      const credit = creditPayload(parsed, detailObject);
       return new RateLimitError(message, {
         ...opts,
         retryAfterSeconds: retryAfter !== null && Number.isFinite(retryAfter) ? retryAfter : null,
+        reason: creditReason(credit),
+        upgradeUrl: stringOrNull(credit['upgrade_url']),
+        manageUrl: stringOrNull(credit['manage_url']),
       });
     }
     case 503:

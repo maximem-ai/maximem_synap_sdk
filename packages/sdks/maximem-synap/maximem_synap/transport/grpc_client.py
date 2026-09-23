@@ -17,12 +17,127 @@ from ..models.errors import (
     NetworkTimeoutError,
     ServiceUnavailableError,
     AuthenticationError,
+    InsufficientCreditsError,
+    RateLimitError,
+    SynapError,
 )
 from ..auth.models import AuthContext
 from ..utils.correlation import generate_correlation_id
 
 
 logger = logging.getLogger("synap.sdk.transport.grpc")
+
+
+# The credit gate refuses a call with RESOURCE_EXHAUSTED, these details, and
+# the balance and reason in trailing metadata. See
+# synap/cloud/application/credits/grpc_gate.py.
+CREDIT_ABORT_DETAILS = "insufficient_credits"
+
+REASON_OVERAGES_DISABLED = "overages_disabled"
+REASON_TRIAL_LIMIT_REACHED = "trial_limit_reached"
+REASON_SUBSCRIPTION_INACTIVE = "subscription_inactive"
+
+# Reasons that end the stream. A reconnect re-runs the same gate with the same
+# balance, so retrying only delays the answer the caller needs.
+CREDIT_STOP_REASONS = frozenset(
+    {REASON_OVERAGES_DISABLED, REASON_TRIAL_LIMIT_REACHED, REASON_SUBSCRIPTION_INACTIVE}
+)
+
+
+def _trailing_metadata(error: Any) -> Dict[str, str]:
+    """Trailing metadata as a lowercased dict, for sync and aio errors alike."""
+    getter = getattr(error, "trailing_metadata", None)
+    metadata = getter() if callable(getter) else None
+    out: Dict[str, str] = {}
+    if not metadata:
+        return out
+    for entry in metadata:
+        key = getattr(entry, "key", None)
+        value = getattr(entry, "value", None)
+        if key is None:
+            try:
+                key, value = entry
+            except (TypeError, ValueError):
+                continue
+        if isinstance(key, bytes):
+            key = key.decode("utf-8", errors="replace")
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        out[str(key).lower()] = value
+    return out
+
+
+def _float_or_none(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def credit_error_from_rpc(
+    error: Any, correlation_id: Optional[str] = None
+) -> Optional[SynapError]:
+    """Translate a credit refusal into the same error HTTP would have raised.
+
+    The gate aborts with ``RESOURCE_EXHAUSTED``, which on its own is
+    indistinguishable from server overload, so this keys on ``credit-reason``
+    in the trailing metadata:
+
+    - ``overages_disabled`` -> :class:`InsufficientCreditsError` (permanent):
+      a paid plan at zero that has not allowed usage past zero.
+    - ``trial_limit_reached`` / ``subscription_inactive`` ->
+      :class:`RateLimitError`: the Trial cap, or a lapsed subscription.
+
+    Returns ``None`` for anything else, including a ``RESOURCE_EXHAUSTED``
+    that is not a credit refusal and a credit reason this SDK does not know:
+    the caller then keeps its existing behaviour of treating the abort as
+    transient.
+    """
+    code = getattr(error, "code", None)
+    if not callable(code) or code() is not grpc.StatusCode.RESOURCE_EXHAUSTED:
+        return None
+
+    metadata = _trailing_metadata(error)
+    reason = metadata.get("credit-reason")
+    if reason not in CREDIT_STOP_REASONS:
+        return None
+
+    details = getattr(error, "details", None)
+    details = details() if callable(details) else None
+    if not isinstance(details, str) or not details:
+        details = CREDIT_ABORT_DETAILS
+
+    request_id = metadata.get("request-id") or correlation_id
+    manage_url = metadata.get("credit-manage-url")
+
+    if reason == REASON_OVERAGES_DISABLED:
+        return InsufficientCreditsError(
+            details,
+            balance_credits=_float_or_none(metadata.get("credit-balance")),
+            minimum_required_credits=_float_or_none(
+                metadata.get("credit-minimum-required")
+            ),
+            recovery_url=metadata.get("credit-recovery-url"),
+            redeem_url=metadata.get("credit-redeem-url"),
+            correlation_id=request_id,
+            reason=reason,
+            manage_url=manage_url,
+        )
+
+    return RateLimitError(
+        details,
+        correlation_id=request_id,
+        reason=reason,
+        upgrade_url=metadata.get("credit-upgrade-url"),
+        manage_url=manage_url,
+    )
+
+
+def is_credit_stop(error: Any) -> bool:
+    """True for an error this module raised from a credit refusal."""
+    return isinstance(
+        error, (InsufficientCreditsError, RateLimitError)
+    ) and getattr(error, "reason", None) in CREDIT_STOP_REASONS
 
 
 class StreamState(str, Enum):
@@ -97,6 +212,9 @@ class GRPCTransport:
         self._reconnect_attempts = 0
         self._last_pong_time: float = 0.0
         self._shutdown_event = asyncio.Event()
+        # Why the stream stopped, when it stopped for a reason the caller can
+        # act on (today: a credit refusal). Read via `last_error`.
+        self._last_error: Optional[SynapError] = None
         # Serializes ALL writes to the bidi stream. grpc.aio forbids concurrent
         # write() on one call: a 2nd outstanding SEND_MESSAGE terminates the RPC
         # (AioRpcError), after which every write raises InvalidStateError
@@ -123,6 +241,16 @@ class GRPCTransport:
         """Check if stream is connected."""
         return self._state == StreamState.CONNECTED
 
+    @property
+    def last_error(self) -> Optional[SynapError]:
+        """The error that ended the stream, if one did.
+
+        Set when the server refused the stream for credits, so an
+        ``on_disconnect`` handler can read the balance, the reason and the
+        URL to fix it. ``None`` for an ordinary disconnect.
+        """
+        return self._last_error
+
     async def connect(self, auth_context: AuthContext) -> None:
         """Establish gRPC connection.
 
@@ -131,6 +259,7 @@ class GRPCTransport:
         """
         self._auth_context = auth_context
         self._shutdown_event.clear()
+        self._last_error = None
 
         await self._establish_connection()
 
@@ -184,6 +313,11 @@ class GRPCTransport:
             self._state = StreamState.DISCONNECTED
             if e.code() == grpc.StatusCode.UNAUTHENTICATED:
                 raise AuthenticationError(f"gRPC authentication failed: {e.details()}")
+            credit_error = credit_error_from_rpc(
+                e, self._auth_context.correlation_id if self._auth_context else None
+            )
+            if credit_error is not None:
+                raise credit_error
             raise ServiceUnavailableError(f"gRPC connection failed: {e.details()}")
 
     def _create_stub(self, channel):
@@ -243,6 +377,12 @@ class GRPCTransport:
                             logger.error(f"Message handler error: {e}")
 
             except grpc.RpcError as e:
+                credit_error = credit_error_from_rpc(
+                    e, self._auth_context.correlation_id if self._auth_context else None
+                )
+                if credit_error is not None:
+                    await self._handle_credit_stop(credit_error)
+                    break
                 logger.warning(f"gRPC stream error: {e}")
                 await self._handle_disconnect(f"grpc_error:{e.code()}")
 
@@ -294,6 +434,29 @@ class GRPCTransport:
         )
         async with self._write_lock:
             await self._stream.write(ping)
+
+    async def _handle_credit_stop(self, error: SynapError) -> None:
+        """End the stream because the server refused it for credits.
+
+        Reconnecting cannot clear a credit refusal, so the stream closes and
+        the typed error is kept on :attr:`last_error` for the application to
+        read. ``on_disconnect`` receives ``credit_stop:<reason>``.
+        """
+        self._last_error = error
+        reason = f"credit_stop:{getattr(error, 'reason', None) or 'unknown'}"
+
+        if self._channel:
+            await self._channel.close()
+            self._channel = None
+        self._stream = None
+        self._state = StreamState.DISCONNECTED
+        self._shutdown_event.set()
+
+        logger.error("gRPC stream stopped, %s: %s", reason, error)
+        self._emit_telemetry("listen_disconnect", reason=reason)
+
+        if self.on_disconnect:
+            self.on_disconnect(reason)
 
     async def _handle_disconnect(self, reason: str) -> None:
         """Handle disconnection and attempt reconnect."""
@@ -349,6 +512,9 @@ class GRPCTransport:
                 return  # Success
 
             except Exception as e:
+                if is_credit_stop(e):
+                    await self._handle_credit_stop(e)
+                    return
                 logger.warning(f"Reconnection failed: {e}")
 
         # Max retries exceeded
