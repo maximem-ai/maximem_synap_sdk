@@ -109,6 +109,10 @@ export class GrpcStreamClient {
           timestamp_ms: event.timestamp_ms,
           search_queries: event.search_queries,
           context_types: event.context_types,
+          tool_name: event.tool_name ?? '',
+          tool_args_json: event.tool_args_json ?? '',
+          tool_result_json: event.tool_result_json ?? '',
+          tool_call_id: event.tool_call_id ?? '',
         },
       };
       (this.call as { write: (msg: unknown) => void }).write(msg);

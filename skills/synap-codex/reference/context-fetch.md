@@ -18,7 +18,9 @@ Returns a `ContextResponse` with separate fields per memory type.
 
 ## `conversation_id` must be a UUID
 
-Non-UUID strings cause `ServiceUnavailableError`. If your app's session/thread id isn't a UUID, deterministically map it once:
+Non-UUID strings raise `InvalidConversationIdError` ("Invalid conversation ID: ..."),
+client-side, before any request leaves. If your app's session/thread id isn't a
+UUID, deterministically map it once:
 
 ```python
 from uuid import uuid5, NAMESPACE_URL
@@ -114,6 +116,7 @@ fetch takes a `customer_id` alongside the `user_id`. `GET /api/v1/auth/whoami` r
 ```python
 # All user-scoped + broader memories for the user behind a conversation
 user_ctx = await sdk.user.context.fetch(
+    user_id=user_id,          # REQUIRED. Omitting it is a TypeError, not an empty result.
     conversation_id=conv_id,
     search_query=["travel preferences"],
     max_results=20,
@@ -122,6 +125,7 @@ user_ctx = await sdk.user.context.fetch(
 
 # Customer-shared memories (org-wide knowledge). B2B instances only.
 cust_ctx = await sdk.customer.context.fetch(
+    customer_id=customer_id,  # REQUIRED. Omitting it is a TypeError.
     conversation_id=conv_id,
     search_query=["engineering OKRs"],
     max_results=15,
@@ -195,4 +199,4 @@ This is what most integrations do under the hood.
 `https://docs.maximem.ai/sdk/context-fetch`
 
 ---
-*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.3.0 (JS) — verified 2026-06-20. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
