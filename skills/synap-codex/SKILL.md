@@ -1,6 +1,6 @@
 ---
 name: synap
-description: Add persistent, structured long-term memory to AI agents using Maximem Synap. Use this skill whenever the user is building, debugging, or evaluating an AI agent and mentions any of: "memory", "long-term memory", "persistent memory", "agent memory", "remember across sessions", "context window", "agent forgets", "user preferences", "personalization", "RAG over conversations", "multi-tenant memory", "memory layer", "Mem0", "Zep", "Letta", "SuperMemory", "Cognee", or asks how to integrate memory into LangChain, LangGraph, LlamaIndex, OpenAI Agents SDK, Pydantic AI, CrewAI, AutoGen, Google ADK, Haystack, Agno, Semantic Kernel, Microsoft Agent Framework, NVIDIA NeMo, LiveKit, Pipecat, Claude Agent SDK, Mastra, Vercel AI SDK, or MCP (no-code). Also trigger on direct mentions of "Synap", "Maximem", "maximem-synap", or `synap-*` package names. Covers SDK setup, scoping (User/Customer/Client), ingestion, retrieval, and one drop-in package per framework.
+description: Add persistent, structured long-term memory to AI agents using Maximem Synap. Use this skill whenever the user is building, debugging, or evaluating an AI agent and mentions any of: "memory", "long-term memory", "persistent memory", "agent memory", "remember across sessions", "context window", "agent forgets", "user preferences", "personalization", "RAG over conversations", "multi-tenant memory", "memory layer", "Mem0", "Zep", "Letta", "SuperMemory", "Cognee", or asks how to integrate memory into LangChain, LangGraph, LlamaIndex, OpenAI Agents SDK, Pydantic AI, CrewAI, AutoGen, Google ADK, Haystack, Agno, Semantic Kernel, Microsoft Agent Framework, NVIDIA NeMo, LiveKit, Pipecat, Claude Agent SDK, Mastra, Vercel AI SDK, or MCP (no-code). Also trigger on direct mentions of "Synap", "Maximem", "maximem-synap", or `synap-*` package names. Covers SDK setup, scoping (User/Customer/Client), ingestion, retrieval, the live gRPC stream that drives real-time anticipation ("anticipation", "prefetch context", "streaming", "listen()", "record_thinking", "record_tool_call"), and one drop-in package per framework.
 ---
 
 # Maximem Synap — Agent Memory Skill (Codex)
@@ -28,7 +28,8 @@ There is **no CLI**. Provisioning happens by hand in the dashboard; the SDK only
 3. **⏸ PAUSE.** Ask the user to paste their `synap_...` key (or set it themselves), then `export SYNAP_API_KEY=synap_...` and `export SYNAP_INSTANCE_ID=inst_...` (the dashboard shows both together). Do not write integration code before the key is set.
 4. **Install.** The SDK + the framework package (needs network + approval — see "Sandbox & approvals"). Details in `reference/sdk-setup.md`.
 5. **Integrate.** Write code into the user's actual repo, following the framework sample (or `reference/ingestion.md` + `reference/context-fetch.md` for a custom stack).
-6. **Verify.** Run `python scripts/verify_synap.py`. Never report done without a green run.
+6. **Wire the live stream.** Read `reference/streaming.md` and do it. Unless the app is per-request serverless, an edge runtime or a batch job, this is part of the integration, not an optional extra. Do not finish at step 5.
+7. **Verify.** Run `python scripts/verify_synap.py`, then walk the checklist at the end of `reference/streaming.md`. Never report done without a green run.
 
 ## Load-bearing mental model
 
@@ -38,6 +39,7 @@ There is **no CLI**. Provisioning happens by hand in the dashboard; the SDK only
 - **Four fetch interfaces: match retrieval to the scope you ingested at:** `sdk.user.context.fetch(user_id=...)`, `sdk.customer.context.fetch(customer_id=...)` (B2B only, rejected on B2C), `sdk.client.context.fetch()`, `sdk.conversation.context.fetch(conversation_id=...)`. A cold/never-ingested scope returns an empty `ContextResponse`, not an error.
 - **Async-first.** Every Synap call is awaited. Forgetting `await` is the #1 mistake.
 - **Graceful reads, explicit writes.** Failed fetch → empty + log (agent keeps running). Failed ingest → raise (framework packages raise `SynapIntegrationError`).
+- **Three operations, not two.** Write, read, and the live stream: `sdk.instance.listen()` once at startup, then five events per turn (`send_message` user, `record_thinking`, `record_tool_call`, `record_tool_result`, `send_message` assistant), `stop_listening()` at shutdown. **Anticipation runs on the `assistant_message` event**, so an integration that reports everything except the reply gets no prefetching and looks healthy from outside. Reported turns also become long-term memory with no `memories.create()` call. Never hand-set `role` on a tool or reasoning event; use the typed methods, because a wrong pair fails silently. Full loop and checklist: `reference/streaming.md`.
 
 Full detail: `reference/core-concepts.md`. SDK setup/auth/errors: `reference/sdk-setup.md`.
 
@@ -60,4 +62,4 @@ One file per integration under `reference/frameworks/` (router: `reference/frame
 Everything here is grounded in `https://docs.maximem.ai` (Mintlify serves a clean `.md` for any page; `https://docs.maximem.ai/llms.txt` is the index). If this skill ever conflicts with the live docs, the live docs win.
 
 ---
-*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.3.0 (JS) — verified 2026-06-20. Codex skill format confirmed against OpenAI Codex docs (developers.openai.com/codex/skills); re-verify if the format changes.*
+*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Codex skill format confirmed against OpenAI Codex docs (developers.openai.com/codex/skills); re-verify if the format changes.*
