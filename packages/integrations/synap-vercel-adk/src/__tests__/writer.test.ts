@@ -62,7 +62,7 @@ describe('writeMemory', () => {
 
   // ── Happy path ──────────────────────────────────────────────────────────────
 
-  it('POSTs to /v1/memories/ingest on success', async () => {
+  it('POSTs to /api/v1/memories/create on success', async () => {
     const mockF = mockOkFetch();
     global.fetch = mockF as unknown as typeof fetch;
 
@@ -76,7 +76,7 @@ describe('writeMemory', () => {
 
     expect(mockF).toHaveBeenCalledOnce();
     const [url] = mockF.mock.calls[0];
-    expect(url).toBe('https://synap.test/v1/memories/ingest');
+    expect(url).toBe('https://synap.test/api/v1/memories/create');
   });
 
   it('sends POST method', async () => {
@@ -161,9 +161,11 @@ describe('writeMemory', () => {
 
     const [, init] = mockF.mock.calls[0];
     const body = JSON.parse((init as RequestInit).body as string);
-    expect(body.messages).toHaveLength(2);
-    expect(body.messages[0]).toEqual({ role: 'user', content: 'Hello' });
-    expect(body.messages[1]).toEqual({ role: 'assistant', content: 'World' });
+    // One rendered document, the shape /api/v1/memories/create accepts. The
+    // `messages` array this used to assert was aimed at /v1/memories/ingest,
+    // which is not a route — so the assertion passed and the write 404'd.
+    expect(body.document).toBe('user: Hello\nassistant: World');
+    expect(body.document_type).toBe('ai-chat-conversation');
   });
 
   it('sends userId, customerId, conversationId in body', async () => {
@@ -182,7 +184,7 @@ describe('writeMemory', () => {
     const body = JSON.parse((init as RequestInit).body as string);
     expect(body.user_id).toBe('u99');
     expect(body.customer_id).toBe('cust-99');
-    expect(body.conversation_id).toBe('conv-99');
+    expect(body.metadata.conversation_id).toBe('conv-99');
   });
 
   it('sends source = "vercel_ai_sdk" in body', async () => {
@@ -199,7 +201,7 @@ describe('writeMemory', () => {
 
     const [, init] = mockF.mock.calls[0];
     const body = JSON.parse((init as RequestInit).body as string);
-    expect(body.source).toBe('vercel_ai_sdk');
+    expect(body.metadata.source).toBe('vercel_ai_sdk');
   });
 
   it('uses the default base URL when baseUrl is not specified', async () => {
@@ -215,7 +217,7 @@ describe('writeMemory', () => {
 
     const [url] = mockF.mock.calls[0];
     expect(url).toContain('synap-cloud-prod.maximem.ai');
-    expect(url).toContain('/v1/memories/ingest');
+    expect(url).toContain('/api/v1/memories/create');
   });
 
   // ── No-op conditions ──────────────────────────────────────────────────────
@@ -302,6 +304,6 @@ describe('writeMemory', () => {
     const [, init] = mockF.mock.calls[0];
     const body = JSON.parse((init as RequestInit).body as string);
     expect(body.user_id).toBe('u-only');
-    expect(body.conversation_id).toBe('');
+    expect(body.metadata.conversation_id).toBe('');
   });
 });
