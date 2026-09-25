@@ -1,6 +1,6 @@
 # NVIDIA NeMo Agent Toolkit (NAT)
 
-`pip install synap-nemo-agent-toolkit`
+`pip install maximem-synap-nemo-agent-toolkit`
 
 | Export | Purpose |
 | --- | --- |

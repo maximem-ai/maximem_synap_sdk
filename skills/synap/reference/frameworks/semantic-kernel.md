@@ -1,6 +1,6 @@
 # Semantic Kernel
 
-`pip install synap-semantic-kernel`
+`pip install maximem-synap-semantic-kernel`
 
 For Microsoft Semantic Kernel.
 

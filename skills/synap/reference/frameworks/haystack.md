@@ -1,6 +1,6 @@
 # Haystack
 
-`pip install synap-haystack`
+`pip install maximem-synap-haystack`
 
 | Class | Purpose |
 | --- | --- |

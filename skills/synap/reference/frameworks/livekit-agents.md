@@ -1,6 +1,6 @@
 # LiveKit Agents (voice)
 
-`pip install synap-livekit-agents`
+`pip install maximem-synap-livekit-agents`
 
 For LiveKit's voice agent framework. Memory in voice contexts has special needs — preload at session start (no time for tool calls mid-utterance) and record turns as they commit.
 

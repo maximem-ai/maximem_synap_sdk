@@ -2,7 +2,8 @@
 """Maximem Synap smoke test.
 
 Run this as the LAST step of any Synap integration. It proves the SDK can
-authenticate, resolve its instance from the API key, and shut down cleanly.
+authenticate, resolve its instance from the API key, open the live gRPC stream,
+and shut down cleanly.
 
     export SYNAP_API_KEY=synap_...
     export SYNAP_INSTANCE_ID=inst_...      # optional; shown with the key in the dashboard
@@ -22,6 +23,11 @@ also needs a customer id, because a user_id on its own is an error there:
     SYNAP_VERIFY_CUSTOMER_ID=acme SYNAP_VERIFY_ROUNDTRIP=1 python scripts/verify_synap.py
 
 Leave it unset on B2C (equals_customer): a customer_id is rejected there with HTTP 400.
+
+The stream check opens `sdk.instance.listen()` and closes it again. It sends
+nothing and stores nothing. A failure there is a warning, not an error: a
+sandbox with no gRPC egress cannot open a stream and that is not a problem with
+the integration. Skip it with SYNAP_VERIFY_SKIP_STREAM=1.
 """
 
 import asyncio
@@ -45,6 +51,9 @@ async def verify() -> None:
 
         if os.environ.get("SYNAP_VERIFY_ROUNDTRIP"):
             await _roundtrip(sdk)
+
+        if not os.environ.get("SYNAP_VERIFY_SKIP_STREAM"):
+            await _stream(sdk)
 
         await sdk.shutdown()
         print("[OK] SDK shut down cleanly")
@@ -84,6 +93,28 @@ async def _roundtrip(sdk: MaximemSynapSDK) -> None:
     ctx = await sdk.user.context.fetch(search_query=["favorite color"], **scope)
     total = len(ctx.facts) + len(ctx.preferences)
     print(f"[OK] Fetched user context ({total} items; may be 0 on a cold pipeline)")
+
+
+async def _stream(sdk: MaximemSynapSDK) -> None:
+    """Open the live stream and close it. Sends nothing, stores nothing.
+
+    Checked because the stream is the operation integrations skip, and because
+    when it fails it fails quietly: fetch() still works, it is just cold every
+    time, and no turn ever becomes memory on its own.
+    """
+    try:
+        await sdk.instance.listen()
+    except Exception as e:  # noqa: BLE001 - a closed network is not a code bug
+        print(f"[WARN] Could not open the live stream: {type(e).__name__}: {e}")
+        print("       Anticipation needs it. If this host has gRPC egress on 443,")
+        print("       fix this before shipping; see reference/streaming.md.")
+        return
+
+    if sdk.instance.is_listening:
+        print("[OK] Live stream opened (anticipation available)")
+    else:
+        print("[WARN] listen() returned but the stream is not connected.")
+    await sdk.instance.stop_listening()
 
 
 if __name__ == "__main__":

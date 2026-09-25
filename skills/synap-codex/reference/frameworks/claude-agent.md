@@ -4,7 +4,7 @@ Available in **Python and TypeScript**.
 
 ```bash
 # Python
-pip install synap-claude-agent
+pip install maximem-synap-claude-agent
 
 # TypeScript
 npm install @maximem/synap-claude-agent @anthropic-ai/claude-agent-sdk zod
@@ -135,6 +135,39 @@ import { buildSynapTools } from "@maximem/synap-claude-agent";
 const tools = buildSynapTools({ sdk, userId: "alice", customerId: "acme" });  // customerId: B2B only
 // [synapSearchTool, synapRememberTool] — raw Anthropic tool definitions
 ```
+
+## The live stream — wire this too
+
+`create_synap_hooks` already injects context and records prompts. With a stream
+open it also reports the run to Synap, so the next turn is anticipated rather
+than fetched cold.
+
+```python
+from synap_claude_agent import create_synap_hooks, report_assistant_turn
+
+await sdk.instance.listen()                       # once, at startup
+
+options = ClaudeAgentOptions(
+    hooks=create_synap_hooks(sdk, user_id="alice", customer_id="acme",
+                             conversation_id=conv_id),
+)
+
+# ... run the agent ...
+
+# no hook carries the final assistant text, so report the reply yourself
+await report_assistant_turn(sdk, reply_text, conversation_id=conv_id,
+                            user_id="alice", customer_id="acme")
+
+await sdk.instance.stop_listening()               # once, at shutdown
+```
+
+The hooks report the user's turn (`UserPromptSubmit`), tool calls
+(`PreToolUse`), tool results (`PostToolUse`) and the session end (`Stop`). The
+reply is the one thing left to you, and it is the event anticipation runs on, so
+do not skip `report_assistant_turn`.
+
+Everything is a no-op until `listen()` is running. Full picture:
+`reference/streaming.md`.
 
 ## Live doc
 
