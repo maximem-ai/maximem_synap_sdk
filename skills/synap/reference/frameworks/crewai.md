@@ -1,6 +1,6 @@
 # CrewAI
 
-`pip install synap-crewai`
+`pip install maximem-synap-crewai`
 
 Backs CrewAI's unified `Memory` system with Synap. Single class to swap in.
 

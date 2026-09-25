@@ -1,6 +1,6 @@
 # AutoGen
 
-`pip install synap-autogen`
+`pip install maximem-synap-autogen`
 
 For Microsoft AutoGen — `autogen-agentchat` / `autogen-core`.
 

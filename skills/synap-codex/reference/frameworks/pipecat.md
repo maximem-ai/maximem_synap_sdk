@@ -1,6 +1,6 @@
 # Pipecat (voice)
 
-`pip install synap-pipecat`
+`pip install maximem-synap-pipecat`
 
 For Pipecat's frame-processor voice pipeline. Two processors slot into the pipeline, before LLM and after response.
 

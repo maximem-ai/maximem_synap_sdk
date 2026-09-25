@@ -1,6 +1,6 @@
 # Microsoft Agent Framework (MAF)
 
-`pip install synap-microsoft-agent`
+`pip install maximem-synap-microsoft-agent`
 
 For Microsoft Agent Framework / Azure AI Agents.
 
