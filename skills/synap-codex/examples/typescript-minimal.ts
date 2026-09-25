@@ -88,4 +88,12 @@ main().catch((e) => {
 // integrations (@maximem/synap-mastra, @maximem/synap-claude-agent) consume.
 // ---------------------------------------------------------------------------
 //
+// ── What this example deliberately leaves out ───────────────────────────────
+// The live stream. This script runs once and exits, so there is nothing for a
+// stream to observe. A real agent is a long-lived process, and there the stream
+// is the third operation, not an extra: sdk.instance.listen() at startup, five
+// events per turn, sdk.instance.stop_listening() at shutdown. Without it every
+// fetch is a cold retrieval and no turn becomes memory on its own.
+// See reference/streaming.md. Note: the stream needs Node, not Edge.
+//
 // Accurate as of @maximem/synap-js-sdk 0.3.0 — verified 2026-06-20. Docs: https://docs.maximem.ai

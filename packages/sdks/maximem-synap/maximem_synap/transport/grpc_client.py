@@ -3,7 +3,8 @@
 import asyncio
 import logging
 import random
-from collections import deque
+import uuid
+from collections import deque, OrderedDict
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 from datetime import datetime, timezone, timedelta
 from enum import Enum
@@ -17,12 +18,127 @@ from ..models.errors import (
     NetworkTimeoutError,
     ServiceUnavailableError,
     AuthenticationError,
+    InsufficientCreditsError,
+    RateLimitError,
+    SynapError,
 )
 from ..auth.models import AuthContext
 from ..utils.correlation import generate_correlation_id
 
 
 logger = logging.getLogger("synap.sdk.transport.grpc")
+
+
+# The credit gate refuses a call with RESOURCE_EXHAUSTED, these details, and
+# the balance and reason in trailing metadata. See
+# synap/cloud/application/credits/grpc_gate.py.
+CREDIT_ABORT_DETAILS = "insufficient_credits"
+
+REASON_OVERAGES_DISABLED = "overages_disabled"
+REASON_TRIAL_LIMIT_REACHED = "trial_limit_reached"
+REASON_SUBSCRIPTION_INACTIVE = "subscription_inactive"
+
+# Reasons that end the stream. A reconnect re-runs the same gate with the same
+# balance, so retrying only delays the answer the caller needs.
+CREDIT_STOP_REASONS = frozenset(
+    {REASON_OVERAGES_DISABLED, REASON_TRIAL_LIMIT_REACHED, REASON_SUBSCRIPTION_INACTIVE}
+)
+
+
+def _trailing_metadata(error: Any) -> Dict[str, str]:
+    """Trailing metadata as a lowercased dict, for sync and aio errors alike."""
+    getter = getattr(error, "trailing_metadata", None)
+    metadata = getter() if callable(getter) else None
+    out: Dict[str, str] = {}
+    if not metadata:
+        return out
+    for entry in metadata:
+        key = getattr(entry, "key", None)
+        value = getattr(entry, "value", None)
+        if key is None:
+            try:
+                key, value = entry
+            except (TypeError, ValueError):
+                continue
+        if isinstance(key, bytes):
+            key = key.decode("utf-8", errors="replace")
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        out[str(key).lower()] = value
+    return out
+
+
+def _float_or_none(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def credit_error_from_rpc(
+    error: Any, correlation_id: Optional[str] = None
+) -> Optional[SynapError]:
+    """Translate a credit refusal into the same error HTTP would have raised.
+
+    The gate aborts with ``RESOURCE_EXHAUSTED``, which on its own is
+    indistinguishable from server overload, so this keys on ``credit-reason``
+    in the trailing metadata:
+
+    - ``overages_disabled`` -> :class:`InsufficientCreditsError` (permanent):
+      a paid plan at zero that has not allowed usage past zero.
+    - ``trial_limit_reached`` / ``subscription_inactive`` ->
+      :class:`RateLimitError`: the Trial cap, or a lapsed subscription.
+
+    Returns ``None`` for anything else, including a ``RESOURCE_EXHAUSTED``
+    that is not a credit refusal and a credit reason this SDK does not know:
+    the caller then keeps its existing behaviour of treating the abort as
+    transient.
+    """
+    code = getattr(error, "code", None)
+    if not callable(code) or code() is not grpc.StatusCode.RESOURCE_EXHAUSTED:
+        return None
+
+    metadata = _trailing_metadata(error)
+    reason = metadata.get("credit-reason")
+    if reason not in CREDIT_STOP_REASONS:
+        return None
+
+    details = getattr(error, "details", None)
+    details = details() if callable(details) else None
+    if not isinstance(details, str) or not details:
+        details = CREDIT_ABORT_DETAILS
+
+    request_id = metadata.get("request-id") or correlation_id
+    manage_url = metadata.get("credit-manage-url")
+
+    if reason == REASON_OVERAGES_DISABLED:
+        return InsufficientCreditsError(
+            details,
+            balance_credits=_float_or_none(metadata.get("credit-balance")),
+            minimum_required_credits=_float_or_none(
+                metadata.get("credit-minimum-required")
+            ),
+            recovery_url=metadata.get("credit-recovery-url"),
+            redeem_url=metadata.get("credit-redeem-url"),
+            correlation_id=request_id,
+            reason=reason,
+            manage_url=manage_url,
+        )
+
+    return RateLimitError(
+        details,
+        correlation_id=request_id,
+        reason=reason,
+        upgrade_url=metadata.get("credit-upgrade-url"),
+        manage_url=manage_url,
+    )
+
+
+def is_credit_stop(error: Any) -> bool:
+    """True for an error this module raised from a credit refusal."""
+    return isinstance(
+        error, (InsufficientCreditsError, RateLimitError)
+    ) and getattr(error, "reason", None) in CREDIT_STOP_REASONS
 
 
 class StreamState(str, Enum):
@@ -97,6 +213,9 @@ class GRPCTransport:
         self._reconnect_attempts = 0
         self._last_pong_time: float = 0.0
         self._shutdown_event = asyncio.Event()
+        # Why the stream stopped, when it stopped for a reason the caller can
+        # act on (today: a credit refusal). Read via `last_error`.
+        self._last_error: Optional[SynapError] = None
         # Serializes ALL writes to the bidi stream. grpc.aio forbids concurrent
         # write() on one call: a 2nd outstanding SEND_MESSAGE terminates the RPC
         # (AioRpcError), after which every write raises InvalidStateError
@@ -112,6 +231,15 @@ class GRPCTransport:
         # (timestamp_queued, payload_dict).
         self._send_queue: Deque[Tuple[datetime, Dict[str, Any]]] = deque()
         self._send_queue_lock = asyncio.Lock()
+        # Written to a live stream, not yet acknowledged by the server.
+        #
+        # The send queue above covers "the stream was down when we tried". This
+        # covers the other half, which is the one that actually loses sessions:
+        # the write succeeded, the stream broke before the server processed it,
+        # and nobody knows. Held until an EventAck names the id, replayed on
+        # reconnect. The server dedupes on that id, so a replay the server DID
+        # process is dropped there rather than doubling the turn.
+        self._unacked: "OrderedDict[str, Tuple[datetime, Dict[str, Any]]]" = OrderedDict()
 
     @property
     def state(self) -> StreamState:
@@ -123,6 +251,16 @@ class GRPCTransport:
         """Check if stream is connected."""
         return self._state == StreamState.CONNECTED
 
+    @property
+    def last_error(self) -> Optional[SynapError]:
+        """The error that ended the stream, if one did.
+
+        Set when the server refused the stream for credits, so an
+        ``on_disconnect`` handler can read the balance, the reason and the
+        URL to fix it. ``None`` for an ordinary disconnect.
+        """
+        return self._last_error
+
     async def connect(self, auth_context: AuthContext) -> None:
         """Establish gRPC connection.
 
@@ -131,6 +269,7 @@ class GRPCTransport:
         """
         self._auth_context = auth_context
         self._shutdown_event.clear()
+        self._last_error = None
 
         await self._establish_connection()
 
@@ -169,6 +308,39 @@ class GRPCTransport:
             self._stub = self._create_stub(self._channel)
             self._stream = await self._open_stream()
 
+            # ⚠ The stream is NOT usable yet, and this is where a turn used to
+            # disappear.
+            #
+            # `stub.Listen(...)` hands back a call object immediately. It does
+            # not wait for the server to accept the RPC: grpc.aio starts the
+            # call lazily. Setting CONNECTED here, as this used to, made
+            # `send()` believe it had a live stream, so every event went
+            # straight into grpc's outgoing buffer instead of the retry queue
+            # that exists precisely for "there is no stream yet". Close the SDK
+            # before that buffer drains and the events are gone, with every
+            # call having returned None.
+            #
+            # Measured against deployed staging: five events sent immediately
+            # after `listen()` returned, server-side `conversation_events=0`
+            # and the stream cancelled two seconds after opening. The same five
+            # with a three second pause: 5 of 5, twice. How many survived
+            # depended only on how long the caller happened to take before
+            # exiting, which is why it looked flaky rather than broken.
+            #
+            # `wait_for_connection()` resolves once the server has accepted the
+            # call. Until it does the state stays CONNECTING, so `send()` takes
+            # the queue branch and the reconnect drain replays it in order.
+            try:
+                await asyncio.wait_for(
+                    self._stream.wait_for_connection(),
+                    timeout=self.timeouts.connect,
+                )
+            except AttributeError:
+                # A stub double in tests will not have it. The real grpc.aio
+                # call always does; do not let a test shim change production
+                # behaviour by silently skipping the wait.
+                pass
+
             self._state = StreamState.CONNECTED
             self._reconnect_attempts = 0
             self._last_pong_time = asyncio.get_event_loop().time()
@@ -184,6 +356,11 @@ class GRPCTransport:
             self._state = StreamState.DISCONNECTED
             if e.code() == grpc.StatusCode.UNAUTHENTICATED:
                 raise AuthenticationError(f"gRPC authentication failed: {e.details()}")
+            credit_error = credit_error_from_rpc(
+                e, self._auth_context.correlation_id if self._auth_context else None
+            )
+            if credit_error is not None:
+                raise credit_error
             raise ServiceUnavailableError(f"gRPC connection failed: {e.details()}")
 
     def _create_stub(self, channel):
@@ -224,6 +401,10 @@ class GRPCTransport:
                     self._last_pong_time = asyncio.get_event_loop().time()
                     continue
 
+                if payload_type == "event_ack":
+                    self._handle_event_ack(message.event_ack)
+                    continue
+
                 if payload_type == "signal":
                     self._handle_signal(message.signal)
                     continue
@@ -243,6 +424,12 @@ class GRPCTransport:
                             logger.error(f"Message handler error: {e}")
 
             except grpc.RpcError as e:
+                credit_error = credit_error_from_rpc(
+                    e, self._auth_context.correlation_id if self._auth_context else None
+                )
+                if credit_error is not None:
+                    await self._handle_credit_stop(credit_error)
+                    break
                 logger.warning(f"gRPC stream error: {e}")
                 await self._handle_disconnect(f"grpc_error:{e.code()}")
 
@@ -295,6 +482,29 @@ class GRPCTransport:
         async with self._write_lock:
             await self._stream.write(ping)
 
+    async def _handle_credit_stop(self, error: SynapError) -> None:
+        """End the stream because the server refused it for credits.
+
+        Reconnecting cannot clear a credit refusal, so the stream closes and
+        the typed error is kept on :attr:`last_error` for the application to
+        read. ``on_disconnect`` receives ``credit_stop:<reason>``.
+        """
+        self._last_error = error
+        reason = f"credit_stop:{getattr(error, 'reason', None) or 'unknown'}"
+
+        if self._channel:
+            await self._channel.close()
+            self._channel = None
+        self._stream = None
+        self._state = StreamState.DISCONNECTED
+        self._shutdown_event.set()
+
+        logger.error("gRPC stream stopped, %s: %s", reason, error)
+        self._emit_telemetry("listen_disconnect", reason=reason)
+
+        if self.on_disconnect:
+            self.on_disconnect(reason)
+
     async def _handle_disconnect(self, reason: str) -> None:
         """Handle disconnection and attempt reconnect."""
         if self._state in (StreamState.CLOSED, StreamState.RECONNECTING):
@@ -339,6 +549,11 @@ class GRPCTransport:
                 # never sees a window where the SDK is "connected" but
                 # queued turns are still pending.
                 try:
+                    # Unacknowledged first, then queued: that is the order the
+                    # events happened in. An unacked event was written to the
+                    # previous stream, so it is older than anything that piled
+                    # up while there was no stream at all.
+                    await self._replay_unacked()
                     await self._drain_send_queue()
                 except Exception as e:
                     logger.warning("Send-queue drain failed: %s", e)
@@ -349,6 +564,9 @@ class GRPCTransport:
                 return  # Success
 
             except Exception as e:
+                if is_credit_stop(e):
+                    await self._handle_credit_stop(e)
+                    return
                 logger.warning(f"Reconnection failed: {e}")
 
         # Max retries exceeded
@@ -372,12 +590,21 @@ class GRPCTransport:
         Args:
             message: Dict with event_type, content, role, conversation_id, etc.
         """
+        # Minted here rather than at the call site so every path gets one, and
+        # only once: a replay has to carry the SAME id or the server's dedupe
+        # has nothing to match and the retry doubles the turn.
+        if not message.get("event_id"):
+            message["event_id"] = str(uuid.uuid4())
+        if not message.get("sent_at_ms"):
+            message["sent_at_ms"] = int(datetime.now(timezone.utc).timestamp() * 1000)
+
         if self._state != StreamState.CONNECTED:
             await self._enqueue_for_retry(message)
             return
 
         try:
             await self._write_conversation_event(message)
+            self._track_unacked(message)
         except Exception as e:
             # Stream broke mid-write; queue the message for the reconnect
             # loop to replay, and let the listen loop handle the error.
@@ -401,12 +628,144 @@ class GRPCTransport:
             timestamp_ms=message.get("timestamp_ms", now_ms),
             tool_name=message.get("tool_name", ""),
             tool_args_json=message.get("tool_args_json", ""),
+            tool_result_json=message.get("tool_result_json", ""),
+            tool_call_id=message.get("tool_call_id", ""),
+            event_id=message.get("event_id", ""),
+            sent_at_ms=int(message.get("sent_at_ms", 0) or 0),
             search_queries=message.get("search_queries") or [],
             context_types=message.get("context_types") or [],
         )
         event = synap_service_pb2.StreamEvent(conversation_event=conv_event)
         async with self._write_lock:
             await self._stream.write(event)
+
+    async def send_session_control(
+        self,
+        *,
+        action: str,
+        session_id: str = "",
+        conversation_id: str = "",
+        user_id: str = "",
+        customer_id: str = "",
+    ) -> bool:
+        """Open or close a session on the stream. Returns whether it was sent.
+
+        Not queued for replay, unlike a conversation event. A session_start is
+        a statement about the stream that is carrying it, and replaying one
+        onto a different stream after a reconnect tells the server a session
+        began that it has already seen begin. The caller keeps the bookkeeping
+        instead: a False here means "not opened", so the next event opens it.
+
+        The server answers a refusal with an error signal rather than closing
+        the stream, so a rejected start is visible to the caller through the
+        usual disconnect/error path.
+        """
+        if self._state != StreamState.CONNECTED:
+            return False
+        from .proto import synap_service_pb2
+
+        control = synap_service_pb2.SessionControl(
+            action=action,
+            session_id=session_id,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            customer_id=customer_id,
+        )
+        event = synap_service_pb2.StreamEvent(session_control=control)
+        try:
+            async with self._write_lock:
+                await self._stream.write(event)
+            return True
+        except Exception as e:  # noqa: BLE001 — never break the caller's turn
+            logger.warning("session_control(%s) failed: %s", action, e)
+            return False
+
+    def _track_unacked(self, message: Dict[str, Any]) -> None:
+        """Hold a written event until the server says it has it.
+
+        Bounded the same way the send queue is, and for the same reason: an
+        outage must not be able to grow this without limit. The oldest goes
+        first, with a WARN, because losing the oldest event of a long outage is
+        the least bad of the available losses and it must not be silent.
+        """
+        event_id = message.get("event_id")
+        if not event_id:
+            return
+        cutoff = datetime.now(timezone.utc) - self.SEND_QUEUE_MAX_AGE
+        while self._unacked:
+            oldest_id, (queued_at, payload) = next(iter(self._unacked.items()))
+            if queued_at >= cutoff and len(self._unacked) < self.SEND_QUEUE_MAX_DEPTH:
+                break
+            self._unacked.pop(oldest_id, None)
+            logger.warning(
+                "Unacknowledged event dropped (queued_at=%s, event_type=%s, "
+                "conversation_id=%s): the server never confirmed it",
+                queued_at.isoformat(),
+                payload.get("event_type"),
+                payload.get("conversation_id"),
+            )
+        self._unacked[event_id] = (datetime.now(timezone.utc), dict(message))
+
+    def _handle_event_ack(self, ack) -> None:
+        """The server has taken responsibility for these events."""
+        for event_id in ack.event_ids:
+            self._unacked.pop(event_id, None)
+        logger.debug(
+            "Acked %d event(s); %d still unacknowledged",
+            len(ack.event_ids), len(self._unacked),
+        )
+
+    async def _replay_unacked(self) -> int:
+        """Re-send everything the server never confirmed. Called on reconnect.
+
+        Safe to repeat: every event carries the id it was first sent with, and
+        the server drops a second sighting of that id before dispatch. An event
+        it DID process is deduplicated there rather than doubling the turn
+        here.
+        """
+        if not self._unacked:
+            return 0
+        pending = list(self._unacked.values())
+        replayed = 0
+        for _queued_at, payload in pending:
+            try:
+                await self._write_conversation_event(payload)
+                replayed += 1
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Replay write failed (kept for next reconnect): %s", e)
+                break
+        if replayed:
+            logger.info("Replayed %d unacknowledged event(s) after reconnect", replayed)
+        return replayed
+
+    # How long close() will wait for the buffer to go out. Short: a shutdown
+    # path that blocks is worse than a lost event, and the caller is usually a
+    # process that is already on its way out.
+    CLOSE_FLUSH_TIMEOUT = 2.0
+
+    async def _flush_before_close(self) -> None:
+        """Best effort: write what is buffered before the stream goes away."""
+        if self._state != StreamState.CONNECTED:
+            if self._send_queue or self._unacked:
+                logger.warning(
+                    "Closing with %d queued and %d unacknowledged event(s) and "
+                    "no stream to send them on; they are lost",
+                    len(self._send_queue), len(self._unacked),
+                )
+            return
+        if not self._send_queue:
+            return
+        try:
+            await asyncio.wait_for(
+                self._drain_send_queue(), timeout=self.CLOSE_FLUSH_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Close flush timed out after %ss with %d event(s) still queued",
+                self.CLOSE_FLUSH_TIMEOUT, len(self._send_queue),
+            )
+        except Exception as e:  # noqa: BLE001 — never fail a teardown
+            logger.warning("Close flush failed: %s", e)
 
     async def _enqueue_for_retry(self, message: Dict[str, Any]) -> None:
         """Buffer a payload for replay after reconnect.
@@ -692,27 +1051,123 @@ class GRPCTransport:
         }
 
     async def close(self) -> None:
-        """Gracefully close the connection."""
+        """Gracefully close the connection.
+
+        Anything still buffered goes out first, with a short deadline. A
+        process shutting down is the moment a queued turn is most likely to be
+        lost forever: the queue lives in memory, so whatever is still in it
+        when this returns is gone. The deadline is there because a close that
+        hangs on a dead network is its own kind of broken.
+        """
+        # Stop the heartbeat FIRST. It writes to the stream, and a write after
+        # the half-close below raises.
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+
+        await self._flush_before_close()
+
+        # ⚠ Half-close the write side before anything is torn down.
+        #
+        # Without this the SDK never told the server it had finished writing.
+        # It cancelled the background tasks and dropped the channel, which
+        # grpc reports to the server as a client CANCEL, and a cancelled
+        # bidi stream discards whatever the server has not already read. The
+        # staging logs said it plainly every time: "Listen stream cancelled",
+        # never a clean end, with `conversation_events=0` on a turn that sent
+        # five.
+        #
+        # `done_writing()` ends the request half cleanly, so the server's read
+        # loop drains what is queued and finishes on its own terms. This is the
+        # third of the three things that had to be true for a turn to survive,
+        # alongside not claiming CONNECTED early and closing with a grace
+        # period. Any one of them missing loses the turn.
+        if self._stream is not None:
+            try:
+                async with self._write_lock:
+                    await asyncio.wait_for(
+                        self._stream.done_writing(), timeout=self.CLOSE_GRACE)
+            except AttributeError:
+                pass  # a test double without the method
+            except Exception as e:  # noqa: BLE001 — never fail a teardown
+                logger.debug("done_writing on close failed: %s", e)
+
         logger.info("Closing gRPC stream")
         self._state = StreamState.CLOSED
         self._shutdown_event.set()
 
-        # Cancel background tasks
-        for task in [self._listen_task, self._heartbeat_task]:
-            if task and not task.done():
-                task.cancel()
+        # ⚠ Do NOT cancel the listen task here. This was the bug.
+        #
+        # The listen task sits in `await self._stream.read()`. Cancelling a
+        # task blocked on a bidi read cancels the whole RPC, and a cancelled
+        # RPC throws away every message the server has not yet read. The five
+        # events of a turn were written, the client held them as
+        # unacknowledged, and the server's read loop counted zero. Measured on
+        # staging: `undelivered() == {'queued': 0, 'unacknowledged': 5}` on the
+        # client, `conversation_events=0` on the server, every time.
+        #
+        # After `done_writing()` above, the server drains what is queued and
+        # closes its side, which ends the read naturally. So wait for that
+        # instead, and only cancel if the server does not finish in time. The
+        # wait is bounded for the same reason the grace period is: a shutdown
+        # that hangs on a dead network is its own kind of broken.
+        if self._listen_task and not self._listen_task.done():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._listen_task), timeout=self.CLOSE_GRACE)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+            except Exception:  # noqa: BLE001 — never fail a teardown
+                pass
+            if not self._listen_task.done():
+                logger.warning(
+                    "Listen loop did not finish within %ss of the half-close; "
+                    "cancelling, which may discard events the server had not "
+                    "read yet (%s)", self.CLOSE_GRACE, self.undelivered())
+                self._listen_task.cancel()
                 try:
-                    await task
+                    await self._listen_task
                 except asyncio.CancelledError:
                     pass
 
-        # Close channel
+        # Close channel.
+        #
+        # ⚠ `close()` with no grace period cancels every in-flight RPC at once,
+        # including writes grpc has accepted but not yet put on the wire. That
+        # is the second half of the lost-turn bug: the events were written, the
+        # call returned, and the channel was torn down underneath them. The
+        # grace period lets what is already written reach the server. It is
+        # short, because a close that hangs on a dead network is its own kind
+        # of broken, and whatever misses it is reported below rather than
+        # vanishing quietly.
         if self._channel:
-            await self._channel.close()
+            try:
+                await self._channel.close(grace=self.CLOSE_GRACE)
+            except TypeError:
+                # Older grpc.aio, or a test double, without the argument.
+                await self._channel.close()
             self._channel = None
 
         self._stream = None
         logger.info("gRPC stream closed")
+
+    # How long the channel may spend draining writes it has already accepted.
+    CLOSE_GRACE = 2.0
+
+    def undelivered(self) -> Dict[str, int]:
+        """What this transport could not get to the server.
+
+        Exists because every send path returns None. A caller had no way to
+        tell a delivered turn from a lost one, which is how five events could
+        go out, one arrive, and the SDK report success five times.
+        """
+        return {
+            "queued": len(self._send_queue),
+            "unacknowledged": len(self._unacked),
+        }
 
     def _emit_telemetry(self, event_type: str, **kwargs) -> None:
         """Emit telemetry event."""

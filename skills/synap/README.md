@@ -11,7 +11,7 @@ The repo serves as a single source of truth for three distribution targets:
 ## Repository layout
 
 ```
-synap-skill/
+skills/synap/
 ├── SKILL.md                    # Claude skill entry point — triggers + 2-min orientation
 ├── AGENTS.md                   # Single-file version for non-Claude agents
 ├── README.md                   # This file
@@ -21,6 +21,7 @@ synap-skill/
 │   ├── sdk-setup.md            # Install, init, lifecycle, errors
 │   ├── ingestion.md            # sdk.memories.create() reference
 │   ├── context-fetch.md        # sdk.conversation.context.fetch() reference
+│   ├── streaming.md            # The live gRPC stream — the third operation, and the one integrations skip
 │   ├── production.md           # Pre-prod checklist
 │   ├── dashboard-setup.md      # Manual provisioning steps (no CLI) + the API-key PAUSE
 │   ├── use-case-markdown.md    # Instance use-case .md template (seeds the MACA)
@@ -59,21 +60,21 @@ User-level (always loaded):
 
 ```bash
 mkdir -p ~/.claude/skills/synap
-cp -r synap-skill/* ~/.claude/skills/synap/
+cp -r skills/synap/* ~/.claude/skills/synap/
 ```
 
 Project-level (per-repo):
 
 ```bash
 mkdir -p .claude/skills/synap
-cp -r synap-skill/* .claude/skills/synap/
+cp -r skills/synap/* .claude/skills/synap/
 ```
 
 Claude Code auto-discovers skills under `~/.claude/skills/<name>/SKILL.md` and `<repo>/.claude/skills/<name>/SKILL.md`.
 
 ## Installing — Claude Cowork (desktop)
 
-Cowork installs skills via plugins. To package this as a plugin: bundle the `synap-skill/` directory inside a Claude Code plugin manifest, then publish to a marketplace or distribute the `.plugin` archive directly.
+Cowork installs skills via plugins. To package this as a plugin: bundle the `skills/synap/` directory inside a Claude Code plugin manifest, then publish to a marketplace or distribute the `.plugin` archive directly.
 
 For a personal install today, drop the folder into your Cowork plugin cache:
 
@@ -88,7 +89,7 @@ Run `/skill list` in Cowork to verify it's registered.
 Codex reads project-level `AGENTS.md` automatically:
 
 ```bash
-cp synap-skill/AGENTS.md /path/to/your/project/AGENTS.md
+cp skills/synap/AGENTS.md /path/to/your/project/AGENTS.md
 ```
 
 Or append the contents to an existing `AGENTS.md`. Codex loads this on every session.
@@ -99,7 +100,7 @@ Save as a Cursor rule under `.cursor/rules/synap.mdc`:
 
 ```bash
 mkdir -p .cursor/rules
-cp synap-skill/AGENTS.md .cursor/rules/synap.mdc
+cp skills/synap/AGENTS.md .cursor/rules/synap.mdc
 ```
 
 Optionally add the Cursor frontmatter at the top:
@@ -117,7 +118,7 @@ alwaysApply: false
 Aider auto-loads `CONVENTIONS.md` from the working directory:
 
 ```bash
-cp synap-skill/AGENTS.md CONVENTIONS.md
+cp skills/synap/AGENTS.md CONVENTIONS.md
 ```
 
 Or merge into an existing one.
@@ -125,7 +126,7 @@ Or merge into an existing one.
 ## Installing — Cline
 
 ```bash
-cp synap-skill/AGENTS.md .clinerules
+cp skills/synap/AGENTS.md .clinerules
 ```
 
 ## Installing — Continue / Windsurf / Zed
