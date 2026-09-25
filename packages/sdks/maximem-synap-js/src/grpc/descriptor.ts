@@ -3,7 +3,7 @@
  *
  * Source:    synap/proto/synap_service.proto
  * Generator: synap/sdk/scripts/gen_proto_descriptor.mjs
- * Proto SHA: a58c9b031b41530d
+ * Proto SHA: c1d834043608ad4f
  *
  * The proto is inlined as a JSON descriptor rather than loaded from disk so
  * that bundlers and Vercel file tracing cannot lose it. Regenerate with
@@ -11,7 +11,7 @@
  */
 
 /** sha256 (first 16 hex chars) of the proto this descriptor was built from. */
-export const PROTO_SHA = 'a58c9b031b41530d';
+export const PROTO_SHA = 'c1d834043608ad4f';
 
 export const SYNAP_PROTO_DESCRIPTOR = {
   "nested": {
@@ -215,6 +215,14 @@ export const SYNAP_PROTO_DESCRIPTOR = {
                   "type": "string",
                   "id": 11
                 },
+                "tool_result_json": {
+                  "type": "string",
+                  "id": 15
+                },
+                "tool_call_id": {
+                  "type": "string",
+                  "id": 16
+                },
                 "search_queries": {
                   "rule": "repeated",
                   "type": "string",
@@ -229,6 +237,14 @@ export const SYNAP_PROTO_DESCRIPTOR = {
                   "keyType": "string",
                   "type": "string",
                   "id": 14
+                },
+                "event_id": {
+                  "type": "string",
+                  "id": 17
+                },
+                "sent_at_ms": {
+                  "type": "int64",
+                  "id": 18
                 }
               }
             },
@@ -270,7 +286,8 @@ export const SYNAP_PROTO_DESCRIPTOR = {
                   "oneof": [
                     "context_bundle",
                     "heartbeat_pong",
-                    "signal"
+                    "signal",
+                    "event_ack"
                   ]
                 }
               },
@@ -286,6 +303,23 @@ export const SYNAP_PROTO_DESCRIPTOR = {
                 "signal": {
                   "type": "StreamSignal",
                   "id": 3
+                },
+                "event_ack": {
+                  "type": "EventAck",
+                  "id": 4
+                }
+              }
+            },
+            "EventAck": {
+              "fields": {
+                "event_ids": {
+                  "rule": "repeated",
+                  "type": "string",
+                  "id": 1
+                },
+                "timestamp_ms": {
+                  "type": "int64",
+                  "id": 2
                 }
               }
             },
