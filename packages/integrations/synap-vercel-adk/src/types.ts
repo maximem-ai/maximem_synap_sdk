@@ -146,6 +146,14 @@ export interface ConversationEventMsg {
   timestamp_ms: number;
   search_queries: string[];
   context_types: string[];
+  /** proto: ConversationEvent.tool_name */
+  tool_name?: string;
+  /** proto: ConversationEvent.tool_args_json */
+  tool_args_json?: string;
+  /** proto: ConversationEvent.tool_result_json. A result is not a message. */
+  tool_result_json?: string;
+  /** proto: ConversationEvent.tool_call_id. Ties a result to its call. */
+  tool_call_id?: string;
 }
 
 export interface ContextBundleMsg {

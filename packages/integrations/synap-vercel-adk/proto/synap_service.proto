@@ -102,6 +102,27 @@ message ConversationEvent {
   string tool_name = 10;
   string tool_args_json = 11;
 
+  // tool_result fields.
+  //
+  // A result had no field at all. `content` was the only slot, which is why
+  // `tool_result` is documented nowhere and why the server's own adapter read a
+  // key the converter never set: there was nothing for it to read. A result is
+  // not a message, and putting it in the field that carries a person's words is
+  // what made it invisible to every reader that filters on the message types.
+  //
+  // `tool_call_id` is what ties a result to the call that asked for it. Without
+  // it the anticipation agent sees a call and a result and cannot say they are
+  // the same exchange, which is exactly the inference it needs in a turn with
+  // three tools in flight. Optional: a client that does not track ids sends
+  // none, and the pair is then read positionally as it is today.
+  //
+  // Both are read by `conversation_event_from_proto`, by the anticipation
+  // adapter and by the listening graph's signal extractor before this file was
+  // changed, per the parity rule: a field nothing downstream reads is worse
+  // than no field at all, because the client believes they sent something.
+  string tool_result_json = 15;
+  string tool_call_id = 16;
+
   // context_request fields
   repeated string search_queries = 12;
   repeated string context_types = 13;
@@ -119,6 +140,26 @@ message ConversationEvent {
   // overwrites one, so a client can put it on the first event or on all of
   // them.
   map<string, string> scope = 14;
+
+  // Delivery.
+  //
+  // A send was fire and forget: no id on the event and no ack on the wire, so
+  // "sent" meant "written to a socket" and nothing downstream could tell a
+  // replay from a new event. That is why the SDK could not safely retry, and a
+  // transport that cannot retry cannot promise anything about a reconnect.
+  //
+  // `event_id` is minted by the SDK and is the dedupe key: the server records
+  // (instance_id, event_id) and drops a second sighting before dispatch, so
+  // replaying after a reconnect is safe rather than duplicating a turn.
+  //
+  // `sent_at_ms` is when the SDK first tried to send it, which is NOT
+  // `timestamp_ms` once a queued event is replayed minutes later. Both are
+  // kept: one is when the thing happened, the other is how late we heard.
+  //
+  // Optional. An event without an id is dispatched as before and never
+  // acknowledged, which is exactly how every client behaves today.
+  string event_id = 17;
+  int64 sent_at_ms = 18;
 }
 
 message HeartbeatPing {
@@ -142,7 +183,22 @@ message StreamResponse {
     ContextBundleProto context_bundle = 1;
     HeartbeatPong heartbeat_pong = 2;
     StreamSignal signal = 3;
+    EventAck event_ack = 4;
   }
+}
+
+// The server has taken responsibility for these events.
+//
+// "Accepted" means recorded for dedupe and queued for processing, and for
+// message types also handed to the conversation writer. It does NOT mean a
+// memory exists: extraction is asynchronous and downstream of this.
+//
+// Batched rather than one per event: a turn is several events in a burst, and
+// one ack per event doubles the messages on a stream whose whole point is to
+// stay quiet between turns.
+message EventAck {
+  repeated string event_ids = 1;
+  int64 timestamp_ms = 2;
 }
 
 message HeartbeatPong {
@@ -193,6 +249,20 @@ message ContextBundleProto {
   int32 ttl_hint_seconds = 23;           // Server-suggested time-to-live for
                                           // this bundle. SDK enforces a floor;
                                           // 0 = use SDK default.
+
+  // The scope rung this bundle was retrieved at, written the way a caller
+  // names one: "key=value|key=value", sorted by key. Empty means the request
+  // that produced it named no rung, which is every request on a client without
+  // nested scoping switched on.
+  //
+  // Node ids are deliberately NOT what travels. They are registry surrogates
+  // and mean nothing to an SDK in a client's process; a caller names a rung
+  // with level keys and its own external ids, so that is what it is compared
+  // against. Both SDK anticipation caches read this and refuse to serve a
+  // bundle across a rung boundary, which is why it is a field rather than a
+  // note: it is consumed, and the parity rule for this file is that a field
+  // nothing downstream reads is worse than no field at all.
+  string anticipation_scope_rung = 24;
 }
 
 // Current session context from compaction + raw buffer.
