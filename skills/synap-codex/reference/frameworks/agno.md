@@ -1,6 +1,6 @@
 # Agno
 
-`pip install synap-agno`
+`pip install maximem-synap-agno`
 
 For agno-agi/agno. A drop-in `InMemoryDb` subclass — minimum-friction install.
 

@@ -1,6 +1,6 @@
 # LangGraph
 
-`pip install synap-langgraph`
+`pip install maximem-synap-langgraph`
 
 Two pieces: a checkpointer for thread-level state and a `BaseStore` for cross-thread long-term memory. Use either or both depending on what your graph needs.
 

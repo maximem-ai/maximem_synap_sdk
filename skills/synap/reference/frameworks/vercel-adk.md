@@ -88,18 +88,35 @@ async function handleChat(userId: string, message: string) {
 }
 ```
 
-## Anticipation stream (advanced)
+## The live stream — wire this, it is not advanced
 
-`synap.listen()` opens a gRPC stream that pre-fetches context speculatively before the user's request arrives. Reduces perceived latency in long-lived server processes where you can predict who's about to send a message:
+`synap.listen()` opens the gRPC stream. Once it is open the middleware reports
+turns, tool calls and reasoning for you, and Synap pushes predicted context
+back before the next request arrives, so the fetch resolves from memory instead
+of over the network. Reported turns also become long-term memory on their own.
 
 ```typescript
-const stop = synap.listen();   // no args — speculatively pre-fetches for active sessions
+export const synap = await createSynap({ apiKey: process.env.SYNAP_API_KEY! });
 
-// later:
-stop();
+await synap.listen();          // once, at startup. Returns Promise<void>.
+
+// on shutdown
+await synap.stopListening();
+// synap.isListening → boolean
 ```
 
-Most users don't need this. Reach for it only when you can demonstrably predict the next sender and the read latency is the bottleneck.
+`listen()` does not return a stop function; `stopListening()` is a separate
+method. It is Node-only and silently no-ops in Edge Runtime and on serverless,
+where nothing can hold a connection, and the provider falls back to HTTP
+context fetching. That is the one case where skipping it is correct.
+
+In a long-lived Node server, call it. Without it every request pays the full
+HTTP context fetch (roughly 50-200ms) instead of a cache hit (under 1ms), and
+nothing becomes memory unless you write it yourself.
+
+This package is the most complete of the five: the middleware reports turns,
+tool calls and reasoning, so nothing is left for you beyond opening the stream.
+See `reference/streaming.md`.
 
 ## Live doc
 

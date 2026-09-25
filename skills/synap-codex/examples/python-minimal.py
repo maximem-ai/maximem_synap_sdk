@@ -75,4 +75,11 @@ async def main():
 if __name__ == "__main__":
     asyncio.run(main())
 
+# ── What this example deliberately leaves out ───────────────────────────────
+# The live stream. This script runs once and exits, so there is nothing for a
+# stream to observe. A real agent is a long-lived process, and there the stream
+# is the third operation, not an extra: sdk.instance.listen() at startup, five
+# events per turn, stop_listening() at shutdown. Without it every fetch() is a
+# cold retrieval and no turn becomes memory on its own. See reference/streaming.md.
+#
 # Accurate as of maximem-synap 0.2.6 — verified 2026-06-17. Docs: https://docs.maximem.ai

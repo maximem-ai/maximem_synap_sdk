@@ -66,13 +66,28 @@ class TestProcessing:
         sdk = _fake_sdk(formatted="User is VIP.")
         ctx = LLMContext(messages=[])
         proc = SynapShortTermProcessor(sdk, conversation_id="conv_abc", context=ctx)
-        # Properly start the processor to satisfy FrameProcessor's lifecycle
-        from pipecat.frames.frames import StartFrame
-        await proc.queue_frame(StartFrame(), FrameDirection.DOWNSTREAM)
-        # In Pipecat, process_frame is called by the pipeline runner; we call
-        # it directly here with a "started" StartFrame so push_frame doesn't error.
-        # The simpler path: just exercise _refresh_st directly.
-        await proc._refresh_st()
+
+        # This used to hand a bare StartFrame to `queue_frame` and then call
+        # `_refresh_st()` directly, which is not what the name promises: no
+        # transcription was ever sent, so the frame handler the processor
+        # exists for went untested. It also stopped working, because from
+        # pipecat 1.x `queue_frame` needs a TaskManager that only the pipeline
+        # lifecycle installs, so the line raised before the real assertions
+        # could run.
+        #
+        # `run_test` is pipecat's own harness: it builds a pipeline around the
+        # processor, does the start/stop properly, and sends the frames. Now a
+        # real TranscriptionFrame goes in, and the frame is asserted to pass
+        # through unchanged as the module docstring promises.
+        from pipecat.tests.utils import run_test
+
+        received_down, _ = await run_test(
+            proc,
+            frames_to_send=[_transcription("hello")],
+            expected_down_frames=[TranscriptionFrame],
+            start_timeout=10.0,
+        )
+        assert received_down[0].text == "hello"
 
         st_msgs = _system_st_messages(ctx)
         assert len(st_msgs) == 1

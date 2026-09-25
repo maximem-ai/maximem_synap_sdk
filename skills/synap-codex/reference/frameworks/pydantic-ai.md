@@ -1,6 +1,6 @@
 # Pydantic AI
 
-`pip install synap-pydantic-ai`
+`pip install maximem-synap-pydantic-ai`
 
 | Export | Purpose |
 | --- | --- |

@@ -1,6 +1,6 @@
 # LlamaIndex
 
-`pip install synap-llamaindex`
+`pip install maximem-synap-llamaindex`
 
 | Class | Purpose |
 | --- | --- |

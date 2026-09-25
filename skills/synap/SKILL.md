@@ -1,6 +1,6 @@
 ---
 name: synap
-description: Add persistent, structured long-term memory to AI agents using Maximem Synap. Use this skill whenever the user is building, debugging, or evaluating an AI agent and mentions any of: "memory", "long-term memory", "persistent memory", "agent memory", "remember across sessions", "context window", "agent forgets", "user preferences", "personalization", "RAG over conversations", "multi-tenant memory", "memory layer", "Mem0", "Zep", "Letta", "SuperMemory", "Cognee", or asks how to integrate memory into LangChain, LangGraph, LlamaIndex, OpenAI Agents SDK, Pydantic AI, CrewAI, AutoGen, Google ADK, Haystack, Agno, Semantic Kernel, Microsoft Agent Framework, NVIDIA NeMo, LiveKit, Pipecat, Claude Agent SDK, Mastra, Vercel AI SDK, or MCP (no-code). Also trigger on direct mentions of "Synap", "Maximem", "maximem-synap", or `synap-*` package names. Covers SDK setup, scoping (User/Customer/Client), ingestion, retrieval, and one drop-in package per framework.
+description: Add persistent, structured long-term memory to AI agents using Maximem Synap. Use this skill whenever the user is building, debugging, or evaluating an AI agent and mentions any of: "memory", "long-term memory", "persistent memory", "agent memory", "remember across sessions", "context window", "agent forgets", "user preferences", "personalization", "RAG over conversations", "multi-tenant memory", "memory layer", "Mem0", "Zep", "Letta", "SuperMemory", "Cognee", or asks how to integrate memory into LangChain, LangGraph, LlamaIndex, OpenAI Agents SDK, Pydantic AI, CrewAI, AutoGen, Google ADK, Haystack, Agno, Semantic Kernel, Microsoft Agent Framework, NVIDIA NeMo, LiveKit, Pipecat, Claude Agent SDK, Mastra, Vercel AI SDK, or MCP (no-code). Also trigger on direct mentions of "Synap", "Maximem", "maximem-synap", or `synap-*` package names. Covers SDK setup, scoping (User/Customer/Client), ingestion, retrieval, the live gRPC stream that drives real-time anticipation ("anticipation", "prefetch context", "streaming", "listen()", "record_thinking", "record_tool_call"), and one drop-in package per framework.
 allowed-tools: Read, Write, Edit, Bash
 ---
 
@@ -32,7 +32,8 @@ that already exists. Follow these steps and **do not skip the PAUSE**.
 3. **⏸ PAUSE.** Ask the user to paste their `synap_...` key (or set it themselves), then `export SYNAP_API_KEY=synap_...` and `export SYNAP_INSTANCE_ID=inst_...` (the dashboard shows both together). Do not write integration code before the key is set.
 4. **Install.** The SDK + the framework package — see `reference/sdk-setup.md` and the chosen framework file. (Sandboxed agents need network + file-write approval for this.)
 5. **Integrate.** Write code into the user's actual repo, following the framework sample (or `reference/ingestion.md` + `reference/context-fetch.md` for a custom stack).
-6. **Verify.** Run `python scripts/verify_synap.py`. Never report done without a green run.
+6. **Wire the live stream.** Read `reference/streaming.md` and do it. Unless the user's app is per-request serverless, this step is part of the integration, not an optional extra — without it there is no anticipation, every retrieval is cold, and nothing becomes memory unless the user calls `memories.create()` by hand. Do not finish at step 5.
+7. **Verify.** Run `python scripts/verify_synap.py`, and walk the checklist at the end of `reference/streaming.md`. Never report done without a green run.
 
 ## Progressive disclosure — what to load when
 
@@ -43,6 +44,7 @@ Do **not** read every reference file. Pick what the situation requires.
 | User is comparing memory vendors / asking "should I use Synap?" | `reference/discovery.md` |
 | User has decided on Synap and is starting fresh | `reference/sdk-setup.md` then the relevant `reference/frameworks/*.md` |
 | User is using one of the 19 supported frameworks | `reference/sdk-setup.md` + `reference/frameworks/<framework>.md` |
+| **Any agent integration in a long-lived process** (server, worker, voice) | `reference/streaming.md` — **always**, alongside whatever else you read |
 | User wants memory in an MCP client (no code) | `reference/frameworks/mcp.md` |
 | User has a custom stack with no listed integration | `reference/sdk-setup.md` + `reference/ingestion.md` + `reference/context-fetch.md` |
 | Multi-tenant B2B SaaS / "how do I scope per customer" | `reference/core-concepts.md` (scopes section) |
@@ -61,7 +63,7 @@ You will need this to follow any of the framework guides.
 - `api_key` — looks like `synap_...`. Generated per instance, shown once.
 - A `client_id` (`cli_...`) at the org level, but the SDK does not need it directly.
 
-**Two operations — every integration is a thin wrapper around these:**
+**Three operations — every integration is a thin wrapper around these:**
 
 ```python
 # Write side: ingest a conversation or document
@@ -84,7 +86,28 @@ context = await sdk.user.context.fetch(
     max_results=10,
     mode="fast",                 # "fast" (~50-100ms) or "accurate" (~200-500ms)
 )
+
+# Stream side: report the turn as it happens, so Synap can predict the next one
+# and so turns become memory without an explicit write. One long-lived stream
+# per process. Full loop and the five events: reference/streaming.md
+await sdk.instance.listen()                     # once, at startup
+await sdk.instance.send_message(
+    content="I prefer dark mode.", role="user", event_type="user_message",
+    conversation_id=conv_id, user_id="alice", customer_id="acme",
+)
+# ... record_thinking / record_tool_call / record_tool_result ...
+await sdk.instance.send_message(
+    content="Noted.", role="assistant", event_type="assistant_message",
+    conversation_id=conv_id, user_id="alice", customer_id="acme",
+)
+await sdk.instance.stop_listening()             # once, at shutdown
 ```
+
+The stream is the operation most integrations skip, and skipping it is why a
+working integration can still deliver nothing: **anticipation runs on the
+`assistant_message` event**, so an agent that never reports the reply gets no
+prefetching at all and looks healthy from outside. Read `reference/streaming.md`
+before you finish.
 
 **Two instance modes. Find out which one you are on before writing a single call:**
 
@@ -147,22 +170,22 @@ The Python SDK is a **singleton per API key** — constructing twice with the sa
 
 | Framework | Package | Language | Style |
 | --- | --- | --- | --- |
-| LangChain | `synap-langchain` | Python | History + callback + retriever + tools |
-| LangGraph | `synap-langgraph` | Python | Checkpointer + cross-thread Store |
-| LlamaIndex | `synap-llamaindex` | Python | `BaseMemory` + retriever |
-| OpenAI Agents SDK | `synap-openai-agents` | Python | Function tools |
-| Pydantic AI | `synap-pydantic-ai` | Python | Deps + auto-registered tools |
-| CrewAI | `synap-crewai` | Python | `StorageBackend` |
-| AutoGen | `synap-autogen` | Python | `BaseTool` |
-| Google ADK | `synap-google-adk` | Python | `FunctionTool` factory |
-| Haystack | `synap-haystack` | Python | Pipeline components |
-| Agno | `synap-agno` | Python | `InMemoryDb` subclass |
-| Semantic Kernel | `synap-semantic-kernel` | Python | Kernel plugin |
-| Microsoft Agent Framework | `synap-microsoft-agent` | Python | Context + history providers |
-| NVIDIA NeMo Agent Toolkit | `synap-nemo-agent-toolkit` | Python | `MemoryEditor` |
-| LiveKit Agents | `synap-livekit-agents` | Python | Preload + recording + tools |
-| Pipecat | `synap-pipecat` | Python | Frame processors |
-| Claude Agent SDK | `synap-claude-agent` / `@maximem/synap-claude-agent` | Py + TS | Hooks + MCP server |
+| LangChain | `maximem-synap-langchain` | Python | History + callback + retriever + tools |
+| LangGraph | `maximem-synap-langgraph` | Python | Checkpointer + cross-thread Store |
+| LlamaIndex | `maximem-synap-llamaindex` | Python | `BaseMemory` + retriever |
+| OpenAI Agents SDK | `maximem-synap-openai-agents` | Python | Function tools |
+| Pydantic AI | `maximem-synap-pydantic-ai` | Python | Deps + auto-registered tools |
+| CrewAI | `maximem-synap-crewai` | Python | `StorageBackend` |
+| AutoGen | `maximem-synap-autogen` | Python | `BaseTool` |
+| Google ADK | `maximem-synap-google-adk` | Python | `FunctionTool` factory |
+| Haystack | `maximem-synap-haystack` | Python | Pipeline components |
+| Agno | `maximem-synap-agno` | Python | `InMemoryDb` subclass |
+| Semantic Kernel | `maximem-synap-semantic-kernel` | Python | Kernel plugin |
+| Microsoft Agent Framework | `maximem-synap-microsoft-agent` | Python | Context + history providers |
+| NVIDIA NeMo Agent Toolkit | `maximem-synap-nemo-agent-toolkit` | Python | `MemoryEditor` |
+| LiveKit Agents | `maximem-synap-livekit-agents` | Python | Preload + recording + tools |
+| Pipecat | `maximem-synap-pipecat` | Python | Frame processors |
+| Claude Agent SDK | `maximem-synap-claude-agent` / `@maximem/synap-claude-agent` | Py + TS | Hooks + MCP server |
 | Mastra | `@maximem/synap-mastra` | TypeScript | `SynapMemory` + tools |
 | Vercel AI SDK | `@maximem/synap-vercel-adk` | TypeScript | Model middleware |
 
@@ -172,9 +195,11 @@ For any of these, jump to `reference/frameworks/<name>.md`. They share a contrac
 - **Write failures surface explicitly** — ingestion errors raise `SynapIntegrationError` (or framework equivalent).
 - **Same scoping model**: every helper accepts `user_id`, `customer_id` (B2B only, and required there), optional `conversation_id`.
 
+Five of them also drive the live stream from the framework's own hooks: OpenAI Agents, Google ADK, the Claude Agent SDK, the Vercel AI SDK and Strands Agents. Each is silent until `listen()` is running, and none of them covers every event on its own — see the table in `reference/streaming.md` for what is left for you in each case.
+
 ## Custom stack (no integration package)
 
-If the user's framework isn't in the list (rare), they wire `sdk.memories.create()` and `sdk.conversation.context.fetch()` directly. See `reference/ingestion.md` and `reference/context-fetch.md`.
+If the user's framework isn't in the list (rare), they wire `sdk.memories.create()` and `sdk.conversation.context.fetch()` directly. See `reference/ingestion.md` and `reference/context-fetch.md`. The live stream is plain SDK calls and works with any framework or none — `reference/streaming.md` still applies.
 
 ## Defaults to use unless told otherwise
 
@@ -185,6 +210,7 @@ When generating code, default to:
 - Retrieval `mode="fast"`, `max_results=10`.
 - Always pass `user_id`. Add `customer_id` only on a B2B instance, where it is required. Confirm the mode with `GET /api/v1/auth/whoami` (`user_context_isolation`); on B2C a `customer_id` is rejected with HTTP 400.
 - `conversation_id` must be a valid UUID — if the user passes a session string, wrap it: `str(uuid5(NAMESPACE_URL, session_str))`.
+- Open the live stream. In a long-lived process this is a default, not a question to ask: `listen()` at startup, the five events per turn, `stop_listening()` at shutdown. Skip it only for per-request serverless, edge runtimes and batch jobs, and say why when you do.
 
 ## What this skill does NOT do
 

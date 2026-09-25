@@ -1,6 +1,6 @@
 # LangChain
 
-`pip install synap-langchain`
+`pip install maximem-synap-langchain`
 
 Four drop-in components that together cover most LangChain memory needs. Pick the ones you actually need; you don't have to use all four.
 
