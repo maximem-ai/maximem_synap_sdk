@@ -1,5 +1,7 @@
 # synap-mcp-server
 
+[![Maximem Synap MCP connector – tool definition quality and endpoint health on Glama](https://glama.ai/mcp/connectors/ai.maximem/synap/badges/score.svg)](https://glama.ai/mcp/connectors/ai.maximem/synap)
+
 Hosted remote **MCP server** (Streamable HTTP) that re-fronts the existing Synap public
 REST operations as MCP tools, so no-code platforms (Gumloop, n8n) can give their agents
 persistent memory with nothing but a pasted **MCP URL** and a **Bearer token**.

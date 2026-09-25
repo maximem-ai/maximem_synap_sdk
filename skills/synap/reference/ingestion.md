@@ -74,7 +74,7 @@ You can re-ingest later in `long-range` by resubmitting with the same `document_
 For backfills, migrations, or bulk imports:
 
 ```python
-from synap.types import CreateMemoryRequest
+from maximem_synap import CreateMemoryRequest
 
 documents = [
     CreateMemoryRequest(
@@ -144,4 +144,4 @@ await sdk.memories.delete(memory_id=memory_id)
 `https://docs.maximem.ai/sdk/ingestion`
 
 ---
-*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.3.0 (JS) — verified 2026-06-20. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
