@@ -30,12 +30,13 @@ Use either or both. Typical wiring::
         print(message)
 """
 
-from synap_claude_agent.hooks import create_synap_hooks
+from synap_claude_agent.hooks import create_synap_hooks, report_assistant_turn
 from synap_claude_agent.mcp_server import create_synap_mcp_server
 from synap_claude_agent.short_term import create_synap_st_hook
 
 __all__ = [
     "create_synap_hooks",
+    "report_assistant_turn",
     "create_synap_mcp_server",
     "create_synap_st_hook",
 ]
