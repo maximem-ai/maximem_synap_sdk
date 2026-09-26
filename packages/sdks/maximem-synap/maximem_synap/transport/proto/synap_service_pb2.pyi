@@ -73,8 +73,15 @@ class ContextAssembledEvent(_message.Message):
     def __init__(self, correlation_id: _Optional[str] = ..., conversation_id: _Optional[str] = ..., user_id: _Optional[str] = ..., customer_id: _Optional[str] = ..., final_item_ids: _Optional[_Iterable[str]] = ..., final_total_tokens: _Optional[int] = ..., compaction_id: _Optional[str] = ..., recent_turn_count: _Optional[int] = ..., compaction_end_timestamp: _Optional[str] = ..., assembly_source: _Optional[str] = ..., assembly_duration_ms: _Optional[int] = ..., cache_hit: bool = ..., timestamp_ms: _Optional[int] = ..., sdk_version: _Optional[str] = ...) -> None: ...
 
 class ConversationEvent(_message.Message):
-    __slots__ = ("event_type", "conversation_id", "user_id", "role", "content", "customer_id", "session_id", "metadata", "timestamp_ms", "tool_name", "tool_args_json", "search_queries", "context_types")
+    __slots__ = ("event_type", "conversation_id", "user_id", "role", "content", "customer_id", "session_id", "metadata", "timestamp_ms", "tool_name", "tool_args_json", "tool_result_json", "tool_call_id", "search_queries", "context_types", "scope", "event_id", "sent_at_ms")
     class MetadataEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: str
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+    class ScopeEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
         VALUE_FIELD_NUMBER: _ClassVar[int]
@@ -92,8 +99,13 @@ class ConversationEvent(_message.Message):
     TIMESTAMP_MS_FIELD_NUMBER: _ClassVar[int]
     TOOL_NAME_FIELD_NUMBER: _ClassVar[int]
     TOOL_ARGS_JSON_FIELD_NUMBER: _ClassVar[int]
+    TOOL_RESULT_JSON_FIELD_NUMBER: _ClassVar[int]
+    TOOL_CALL_ID_FIELD_NUMBER: _ClassVar[int]
     SEARCH_QUERIES_FIELD_NUMBER: _ClassVar[int]
     CONTEXT_TYPES_FIELD_NUMBER: _ClassVar[int]
+    SCOPE_FIELD_NUMBER: _ClassVar[int]
+    EVENT_ID_FIELD_NUMBER: _ClassVar[int]
+    SENT_AT_MS_FIELD_NUMBER: _ClassVar[int]
     event_type: str
     conversation_id: str
     user_id: str
@@ -105,9 +117,14 @@ class ConversationEvent(_message.Message):
     timestamp_ms: int
     tool_name: str
     tool_args_json: str
+    tool_result_json: str
+    tool_call_id: str
     search_queries: _containers.RepeatedScalarFieldContainer[str]
     context_types: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, event_type: _Optional[str] = ..., conversation_id: _Optional[str] = ..., user_id: _Optional[str] = ..., role: _Optional[str] = ..., content: _Optional[str] = ..., customer_id: _Optional[str] = ..., session_id: _Optional[str] = ..., metadata: _Optional[_Mapping[str, str]] = ..., timestamp_ms: _Optional[int] = ..., tool_name: _Optional[str] = ..., tool_args_json: _Optional[str] = ..., search_queries: _Optional[_Iterable[str]] = ..., context_types: _Optional[_Iterable[str]] = ...) -> None: ...
+    scope: _containers.ScalarMap[str, str]
+    event_id: str
+    sent_at_ms: int
+    def __init__(self, event_type: _Optional[str] = ..., conversation_id: _Optional[str] = ..., user_id: _Optional[str] = ..., role: _Optional[str] = ..., content: _Optional[str] = ..., customer_id: _Optional[str] = ..., session_id: _Optional[str] = ..., metadata: _Optional[_Mapping[str, str]] = ..., timestamp_ms: _Optional[int] = ..., tool_name: _Optional[str] = ..., tool_args_json: _Optional[str] = ..., tool_result_json: _Optional[str] = ..., tool_call_id: _Optional[str] = ..., search_queries: _Optional[_Iterable[str]] = ..., context_types: _Optional[_Iterable[str]] = ..., scope: _Optional[_Mapping[str, str]] = ..., event_id: _Optional[str] = ..., sent_at_ms: _Optional[int] = ...) -> None: ...
 
 class HeartbeatPing(_message.Message):
     __slots__ = ("timestamp_ms",)
@@ -130,14 +147,24 @@ class SessionControl(_message.Message):
     def __init__(self, action: _Optional[str] = ..., session_id: _Optional[str] = ..., conversation_id: _Optional[str] = ..., user_id: _Optional[str] = ..., customer_id: _Optional[str] = ...) -> None: ...
 
 class StreamResponse(_message.Message):
-    __slots__ = ("context_bundle", "heartbeat_pong", "signal")
+    __slots__ = ("context_bundle", "heartbeat_pong", "signal", "event_ack")
     CONTEXT_BUNDLE_FIELD_NUMBER: _ClassVar[int]
     HEARTBEAT_PONG_FIELD_NUMBER: _ClassVar[int]
     SIGNAL_FIELD_NUMBER: _ClassVar[int]
+    EVENT_ACK_FIELD_NUMBER: _ClassVar[int]
     context_bundle: ContextBundleProto
     heartbeat_pong: HeartbeatPong
     signal: StreamSignal
-    def __init__(self, context_bundle: _Optional[_Union[ContextBundleProto, _Mapping]] = ..., heartbeat_pong: _Optional[_Union[HeartbeatPong, _Mapping]] = ..., signal: _Optional[_Union[StreamSignal, _Mapping]] = ...) -> None: ...
+    event_ack: EventAck
+    def __init__(self, context_bundle: _Optional[_Union[ContextBundleProto, _Mapping]] = ..., heartbeat_pong: _Optional[_Union[HeartbeatPong, _Mapping]] = ..., signal: _Optional[_Union[StreamSignal, _Mapping]] = ..., event_ack: _Optional[_Union[EventAck, _Mapping]] = ...) -> None: ...
+
+class EventAck(_message.Message):
+    __slots__ = ("event_ids", "timestamp_ms")
+    EVENT_IDS_FIELD_NUMBER: _ClassVar[int]
+    TIMESTAMP_MS_FIELD_NUMBER: _ClassVar[int]
+    event_ids: _containers.RepeatedScalarFieldContainer[str]
+    timestamp_ms: int
+    def __init__(self, event_ids: _Optional[_Iterable[str]] = ..., timestamp_ms: _Optional[int] = ...) -> None: ...
 
 class HeartbeatPong(_message.Message):
     __slots__ = ("timestamp_ms",)
