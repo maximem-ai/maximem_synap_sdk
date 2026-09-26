@@ -120,16 +120,40 @@ export class NetworkTimeoutError extends SynapTransientError {
   static override readonly errorCode: SynapErrorCode = 'network_timeout';
 }
 
+/**
+ * Rate limit exceeded (HTTP 429, gRPC RESOURCE_EXHAUSTED).
+ *
+ * Also carries the two credit stops the server reports as 429, because both
+ * recover with time or a plan change rather than with a retry of this request:
+ * `reason: 'trial_limit_reached'` (the Trial cap is spent, see `upgradeUrl`)
+ * and `reason: 'subscription_inactive'` (a paid plan whose subscription is past
+ * due, unpaid or cancelled, see `manageUrl`). `reason` is null for an ordinary
+ * rate limit and against a server too old to send one.
+ */
 export class RateLimitError extends SynapTransientError {
   static override readonly errorCode: SynapErrorCode = 'rate_limit';
   readonly retryAfterSeconds: number | null;
+  /** Machine-readable cause, when the stop was a credit stop. */
+  readonly reason: string | null;
+  /** Where a Trial customer upgrades. Python calls this `upgrade_url`. */
+  readonly upgradeUrl: string | null;
+  /** Where billing is managed. Python calls this `manage_url`. */
+  readonly manageUrl: string | null;
 
   constructor(
     message: string,
-    options: SynapErrorOptions & { retryAfterSeconds?: number | null } = {},
+    options: SynapErrorOptions & {
+      retryAfterSeconds?: number | null;
+      reason?: string | null;
+      upgradeUrl?: string | null;
+      manageUrl?: string | null;
+    } = {},
   ) {
     super(message, options);
     this.retryAfterSeconds = options.retryAfterSeconds ?? null;
+    this.reason = options.reason ?? null;
+    this.upgradeUrl = options.upgradeUrl ?? null;
+    this.manageUrl = options.manageUrl ?? null;
   }
 }
 
@@ -162,6 +186,15 @@ export class InsufficientCreditsError extends SynapPermanentError {
   readonly recoveryUrl: string | null;
   /** Where a redeem code can be entered. Python calls this `redeem_url`. */
   readonly redeemUrl: string | null;
+  /**
+   * Machine-readable cause. `'overages_disabled'` means the plan is paid and
+   * the balance is spent, but the account has not allowed usage past zero, so
+   * the work stops until someone allows overages or adds credits. Null when an
+   * older server did not send one.
+   */
+  readonly reason: string | null;
+  /** Where that setting and billing are managed. Python calls this `manage_url`. */
+  readonly manageUrl: string | null;
 
   constructor(
     message: string,
@@ -170,6 +203,8 @@ export class InsufficientCreditsError extends SynapPermanentError {
       requiredCredits?: number | null;
       recoveryUrl?: string | null;
       redeemUrl?: string | null;
+      reason?: string | null;
+      manageUrl?: string | null;
     } = {},
   ) {
     super(message, options);
@@ -177,6 +212,8 @@ export class InsufficientCreditsError extends SynapPermanentError {
     this.requiredCredits = options.requiredCredits ?? null;
     this.recoveryUrl = options.recoveryUrl ?? null;
     this.redeemUrl = options.redeemUrl ?? null;
+    this.reason = options.reason ?? null;
+    this.manageUrl = options.manageUrl ?? null;
   }
 }
 

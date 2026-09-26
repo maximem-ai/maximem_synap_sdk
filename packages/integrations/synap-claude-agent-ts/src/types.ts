@@ -34,7 +34,11 @@ export interface SynapFetchArgs {
   conversation_id?: string | null;
   user_id: string;
   customer_id?: string | null;
-  search_query?: string[] | null;
+  // Not `| null`. The two call sites (hooks.ts, mcp-server.ts) always pass an
+  // array, and the SDK has no null handling for it the way it does for the
+  // ids, so widening it here only promised something nobody needs and the SDK
+  // would not honour.
+  search_query?: string[];
   max_results?: number;
   mode?: string;
   include_conversation_context?: boolean;

@@ -30,16 +30,27 @@ export async function writeMemory(params: MemoryWriteParams): Promise<void> {
 
   const correlationId = newCorrelationId();
 
+  // ⚠ This posted to `/v1/memories/ingest`, which is not a route. Memories are
+  // served under `/api/v1/memories`, the prefix split is deployed routing
+  // rather than a typo, and `fetch` does not throw on a 404 — so every memory
+  // write from this middleware 404'd and the result was never looked at. The
+  // gRPC events worked, which is why it went unnoticed: context kept flowing
+  // and nothing was ever written.
   const body: Record<string, unknown> = {
-    messages: turn,
+    document: turn.map((m) => `${m.role}: ${m.content}`).join('\n'),
+    document_type: 'ai-chat-conversation',
     user_id: modelOptions.userId ?? '',
-    customer_id: modelOptions.customerId ?? '',
-    conversation_id: modelOptions.conversationId ?? '',
-    source: 'vercel_ai_sdk',
+    metadata: {
+      source: 'vercel_ai_sdk',
+      conversation_id: modelOptions.conversationId ?? '',
+    },
   };
+  // Omitted rather than sent empty: a B2C instance refuses a call that carries
+  // a customer_id at all.
+  if (modelOptions.customerId) body['customer_id'] = modelOptions.customerId;
 
   try {
-    await fetch(`${baseUrl}/v1/memories/ingest`, {
+    const response = await fetch(`${baseUrl}/api/v1/memories/create`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${credentials.api_key}`,
@@ -50,7 +61,15 @@ export async function writeMemory(params: MemoryWriteParams): Promise<void> {
       },
       body: JSON.stringify(body),
     });
-  } catch {
-    // Non-fatal — memory write failure should never break the LLM response
+    // Checked, because not checking is what hid this for as long as it hid.
+    // Still non-fatal: a failed write must not break the caller's response.
+    if (!response.ok) {
+      console.warn(
+        `[synap] memory write failed: ${response.status} ${response.statusText} `
+        + `(correlation ${correlationId})`,
+      );
+    }
+  } catch (err: unknown) {
+    console.warn('[synap] memory write failed:', err);
   }
 }

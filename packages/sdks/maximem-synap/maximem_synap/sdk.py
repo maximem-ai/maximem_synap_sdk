@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import threading
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Union
 
@@ -49,6 +50,22 @@ from .facade.conversation import ConversationController
 
 
 logger = logging.getLogger("synap.sdk")
+
+# Event types the server has a reader for. `send_message` refuses anything
+# else rather than sending it: an unknown type falls through every classifier
+# on the server into UNKNOWN, where it is recorded and acted on by nothing, so
+# a typo used to cost the signal and say nothing about it.
+KNOWN_EVENT_TYPES = frozenset({
+    "user_message",
+    "assistant_message",
+    "tool_call",
+    "tool_result",
+    "agent_thinking",
+    "context_request",
+    "context_fetch",
+    "session_start",
+    "session_end",
+})
 
 
 def _build_anticipation_response(
@@ -3538,6 +3555,10 @@ class InstanceInterface:
             transport_factory=self._create_transport,
             auth_provider=self._sdk._get_auth_context,
         )
+        # conversation_id -> session_id, for conversations this stream has
+        # already opened a session for. Cleared on reconnect: the session
+        # belonged to the stream that carried it.
+        self._open_sessions: Dict[str, str] = {}
 
     def _create_transport(self, **kwargs) -> GRPCTransport:
         """Factory that creates a GRPCTransport with SDK configuration."""
@@ -3551,6 +3572,9 @@ class InstanceInterface:
             use_tls=True if cfg_tls is None else cfg_tls,
             timeouts=self._sdk._config.timeouts,
             telemetry_callback=self._sdk._on_telemetry_event,
+            # Where the outbox journal lives, so buffered events survive a
+            # restart. Same root the cache uses; None means ~/.synap.
+            storage_path=self._sdk._config.storage_path,
             **kwargs,
         )
         self._sdk._grpc_transport = transport
@@ -3577,9 +3601,25 @@ class InstanceInterface:
         """
         self._sdk._ensure_initialized()
         self._on_context_callback = on_context
+        self._open_sessions.clear()
+
+        def _forget_sessions_then(callback, arg):
+            # A session belongs to the stream that opened it. After a
+            # reconnect the server has a new stream with no memory of it, so
+            # the next event on each conversation opens a fresh one. Without
+            # this the client believes a session is open on a stream that
+            # never saw it, and the warm-up never runs again for the rest of
+            # the process.
+            self._open_sessions.clear()
+            if callback:
+                try:
+                    callback(arg)
+                except Exception as e:  # noqa: BLE001 — caller's callback
+                    logger.warning("listen callback error: %s", e)
+
         await self._controller.listen(
-            on_reconnect=on_reconnect,
-            on_disconnect=on_disconnect,
+            on_reconnect=lambda attempt: _forget_sessions_then(on_reconnect, attempt),
+            on_disconnect=lambda reason: _forget_sessions_then(on_disconnect, reason),
             on_message=self._handle_anticipated_bundle,
         )
 
@@ -3641,9 +3681,88 @@ class InstanceInterface:
                 logger.warning(f"on_context callback error: {e}")
 
     async def stop_listening(self) -> None:
-        """Stop listening to agent activity."""
+        """Stop listening to agent activity.
+
+        Closes any session this stream opened first. A session that is never
+        closed leaves the turn it was in the middle of uncommitted on the
+        server: the telemetry row for a turn is written when the NEXT user
+        message arrives, and for the last turn of a conversation there is no
+        next one. ``session_end`` is what writes it.
+        """
+        for conversation_id in list(self._open_sessions):
+            await self.end_session(conversation_id)
         await self._controller.stop()
         self._sdk._grpc_transport = None
+
+    async def _ensure_session(
+        self,
+        conversation_id: str,
+        user_id: str,
+        customer_id: str,
+    ) -> None:
+        """Open a session for this conversation if the stream has not yet.
+
+        The developer never calls this. ``session_start`` is what makes the
+        server run its warm-up prefetch before the first message arrives, and
+        asking every caller to remember a lifecycle call is how the first turn
+        of every conversation stayed a cold fetch: neither SDK sent one, ever.
+
+        Best effort by design. A session that cannot be opened must not stop
+        the event that triggered it from being sent, so a failure here leaves
+        the conversation unmarked and the next event tries again.
+        """
+        # Both ids, or no session. The server refuses a session_start with no
+        # user_id, and `send_session_control` reports whether the message was
+        # WRITTEN, not whether it was accepted — so opening one on an event
+        # that has no user_id marked the conversation as open, never retried,
+        # and left `session_end` referring to a session the server never had.
+        # An event without the ids simply goes out on its own; the next one
+        # that has them opens the session.
+        if not conversation_id or not user_id:
+            return
+        if conversation_id in self._open_sessions:
+            return
+        session_id = str(uuid.uuid4())
+        transport = getattr(self._controller, "_transport", None)
+        if transport is None:
+            return
+        try:
+            sent = await transport.send_session_control(
+                action="start",
+                session_id=session_id,
+                conversation_id=conversation_id,
+                user_id=user_id or "",
+                customer_id=customer_id or "",
+            )
+        except Exception as e:  # noqa: BLE001 — never break the caller's turn
+            logger.warning("session_start failed (non-fatal): %s", e)
+            return
+        if sent:
+            self._open_sessions[conversation_id] = session_id
+
+    async def end_session(self, conversation_id: str) -> None:
+        """Close the session for one conversation.
+
+        Called for you on ``stop_listening``. Call it yourself when you know a
+        conversation has ended and the process keeps running — the end of a
+        voice call, a chat window closing — so the server can finalize the
+        turn and release the conversation's state rather than waiting for it
+        to expire.
+        """
+        session_id = self._open_sessions.pop(conversation_id, None)
+        if session_id is None:
+            return
+        transport = getattr(self._controller, "_transport", None)
+        if transport is None:
+            return
+        try:
+            await transport.send_session_control(
+                action="end",
+                session_id=session_id,
+                conversation_id=conversation_id,
+            )
+        except Exception as e:  # noqa: BLE001 — never break a teardown path
+            logger.warning("session_end failed (non-fatal): %s", e)
 
     async def send_message(
         self,
@@ -3657,6 +3776,8 @@ class InstanceInterface:
         metadata: Optional[Dict[str, str]] = None,
         tool_name: Optional[str] = None,
         tool_args: Optional[Dict[str, Any]] = None,
+        tool_result: Optional[Any] = None,
+        tool_call_id: Optional[str] = None,
         search_queries: Optional[List[str]] = None,
         context_types: Optional[List[str]] = None,
     ) -> None:
@@ -3688,8 +3809,27 @@ class InstanceInterface:
         self._sdk._check_customer_id(customer_id, where="InstanceInterface.send_message")
         from .models.errors import ListeningNotActiveError
 
-        if not self.is_listening:
+        # A transport that exists but is mid-reconnect is not "not listening":
+        # it buffers and replays. Raising there put OUR reconnect inside the
+        # customer's agent loop, so a blip in our stream became an exception in
+        # their turn unless they had wrapped every call. Only a stream that was
+        # never started, or has been stopped, raises.
+        transport = getattr(self._controller, "_transport", None)
+        if transport is None:
             raise ListeningNotActiveError()
+
+        if event_type not in KNOWN_EVENT_TYPES:
+            # An unknown event_type used to travel to the server, where it fell
+            # through every classifier into UNKNOWN and was silently ignored: a
+            # typo cost the whole signal and nothing said so.
+            raise ValueError(
+                f"unknown event_type {event_type!r}. Expected one of: "
+                + ", ".join(sorted(KNOWN_EVENT_TYPES))
+            )
+
+        await self._ensure_session(
+            conversation_id or "", user_id or "", customer_id or "",
+        )
 
         payload = {
             "event_type": event_type,
@@ -3698,19 +3838,30 @@ class InstanceInterface:
             "conversation_id": conversation_id or "",
             "user_id": user_id or "",
             "customer_id": customer_id or "",
-            "session_id": session_id or "",
+            "session_id": session_id or self._open_sessions.get(
+                conversation_id or "", ""
+            ),
             "metadata": metadata or {},
         }
         if tool_name:
             payload["tool_name"] = tool_name
         if tool_args is not None:
             payload["tool_args_json"] = json.dumps(tool_args)
+        if tool_result is not None:
+            # A string result travels as itself. json.dumps would wrap a tool's
+            # plain-text answer in quotes and the agent would read the quotes
+            # as part of the result.
+            payload["tool_result_json"] = (
+                tool_result if isinstance(tool_result, str) else json.dumps(tool_result)
+            )
+        if tool_call_id:
+            payload["tool_call_id"] = tool_call_id
         if search_queries:
             payload["search_queries"] = list(search_queries)
         if context_types:
             payload["context_types"] = list(context_types)
 
-        await self._controller._transport.send(payload)
+        await transport.send(payload)
 
         # Mirror the turn into the local ST store (read-your-writes). gRPC send
         # is fire-and-forget (no ack), so we treat the successful write to the
@@ -3731,6 +3882,96 @@ class InstanceInterface:
                 )
             except Exception as e:
                 logger.warning("Failed to append gRPC turn to ST store: %s", e)
+
+    async def record_tool_call(
+        self,
+        tool_name: str,
+        tool_args: Optional[Dict[str, Any]] = None,
+        *,
+        tool_call_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        customer_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """Report a tool your agent is about to call.
+
+        Prefer this over ``send_message(event_type="tool_call", ...)``. The
+        event carries both an ``event_type`` and a ``role``, and the two have
+        to agree; getting the role wrong was silent, and our own published
+        example got it wrong. Here you cannot: the method sets both.
+
+        Args:
+            tool_name: The tool being invoked.
+            tool_args: JSON-encodable arguments.
+            tool_call_id: Your id for this call, if your framework has one.
+                Pass the same id to ``record_tool_result`` and the two are
+                read as one exchange, which is what lets the anticipation
+                agent follow a turn with several tools in flight.
+        """
+        self._sdk._check_customer_id(
+            customer_id, where="InstanceInterface.record_tool_call",
+        )
+        await self.send_message(
+            content="",
+            role="assistant",
+            event_type="tool_call",
+            tool_name=tool_name,
+            tool_args=tool_args,
+            tool_call_id=tool_call_id,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            customer_id=customer_id,
+            session_id=session_id,
+            metadata=metadata,
+        )
+
+    async def record_tool_result(
+        self,
+        result: Any,
+        *,
+        tool_name: Optional[str] = None,
+        tool_call_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        customer_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """Report what a tool returned.
+
+        The result travels in its own field rather than in ``content``. It is
+        not something a person said, and the field that carries what people say
+        is read by everything that filters on messages.
+
+        ⚠ A tool result is usually your customer's data: an order, an account,
+        a record. It is used as an anticipation hint and is not written into
+        long-term memory, but it does reach us. Send what the agent needs to be
+        understood, not the whole row.
+
+        Args:
+            result: JSON-encodable, or a plain string. A string is sent as
+                itself rather than as a quoted JSON string.
+            tool_name: The tool that produced it.
+            tool_call_id: The id you passed to ``record_tool_call``.
+        """
+        self._sdk._check_customer_id(
+            customer_id, where="InstanceInterface.record_tool_result",
+        )
+        await self.send_message(
+            content="",
+            role="tool",
+            event_type="tool_result",
+            tool_result=result,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            customer_id=customer_id,
+            session_id=session_id,
+            metadata=metadata,
+        )
 
     async def record_thinking(
         self,
@@ -3774,15 +4015,27 @@ class InstanceInterface:
             ListeningNotActiveError: If ``listen()`` has not been called.
         """
         self._sdk._check_customer_id(customer_id, where="InstanceInterface.record_thinking")
+        # A caller's own entry of the same name wins. JS has always behaved
+        # this way and the published changelog says so ("A caller-supplied
+        # metadata entry of the same name is not overwritten"); Python
+        # overwrote it, so the two SDKs disagreed on documented behaviour and
+        # the docs described only one of them.
         md: Dict[str, str] = dict(metadata or {})
-        if step_index is not None:
+        if step_index is not None and "step_index" not in md:
             md["step_index"] = str(step_index)
-        if thought_type:
+        if thought_type and "thought_type" not in md:
             md["thought_type"] = thought_type
 
         await self.send_message(
             content=content,
-            role="assistant",
+            # Deliberately no role. A thought is not the assistant's reply to
+            # the user, and this went out as role="assistant" from the day it
+            # shipped: the server checked role before event_type, so every
+            # reasoning step any client ever sent was filed as the final
+            # answer and the reasoning path never ran once. The server now
+            # checks the type first, and sending no role is correct against
+            # both the fixed server and one that has not been updated yet.
+            role="",
             conversation_id=conversation_id,
             user_id=user_id,
             customer_id=customer_id,
