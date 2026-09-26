@@ -152,11 +152,20 @@ export interface ConfigureOptions {
   logger?: SynapLogger | undefined;
 }
 
-/** Options for the cross-scope `fetch()`. Snake_case, matching Python's kwargs. */
+/** Options for the cross-scope `fetch()`. Snake_case, matching Python's kwargs.
+ *
+ * The three identifiers accept `null` as well as `undefined`, because that is
+ * what callers actually pass: `conversation_id: convId || null` is the normal
+ * way to say "there is no conversation here", and `validateConversationId`
+ * has always treated `null` as absent. The declared type said otherwise, so
+ * the `SynapClient`-to-`SynapSdkLike` assignability test in
+ * `synap-claude-agent` (TS) could not typecheck, and the scope guards below
+ * did not agree with the validator either. See the guards for that half.
+ */
 export interface UnifiedFetchOptions {
-  conversation_id?: string;
-  user_id?: string;
-  customer_id?: string;
+  conversation_id?: string | null;
+  user_id?: string | null;
+  customer_id?: string | null;
   search_query?: string[];
   max_results?: number;
   types?: string[];
@@ -630,14 +639,24 @@ export class SynapClient {
     const labels: string[] = [];
     const tasks: Array<Promise<RawContext>> = [];
 
-    if (conversationId !== undefined && conversationId !== '' && wants('conversation')) {
+    // `null` means absent, exactly as `validateConversationId` already reads
+    // it. The guards below used to test only `!== undefined && !== ''`, so a
+    // caller writing `conversation_id: convId || null` -- which is what the
+    // Claude Agent (TS) integration writes, and the obvious way to spell "no
+    // conversation" -- sailed past them and fired a conversation-scope fetch
+    // carrying `conversation_id: null`. The validator waved it through and the
+    // scope was queried for a conversation that does not exist.
+    const present = (v: string | null | undefined): v is string =>
+      v !== undefined && v !== null && v !== '';
+
+    if (present(conversationId) && wants('conversation')) {
       labels.push('conversation');
       tasks.push(this.conversation.context.fetch({
         conversation_id: conversationId, ...shared,
         user_id: userId, customer_id: customerId,
       } as FetchOptions));
     }
-    if (userId !== undefined && userId !== '' && wants('user')) {
+    if (present(userId) && wants('user')) {
       labels.push('user');
       tasks.push(this.user.context.fetch({
         user_id: userId, conversation_id: conversationId, ...shared,
@@ -647,7 +666,7 @@ export class SynapClient {
         last_n_conversations: lastNConversations,
       } as FetchOptions));
     }
-    if (customerId !== undefined && customerId !== '' && wants('customer')) {
+    if (present(customerId) && wants('customer')) {
       labels.push('customer');
       tasks.push(this.customer.context.fetch({
         customer_id: customerId, conversation_id: conversationId, ...shared,
@@ -688,7 +707,7 @@ export class SynapClient {
       overlayLocalRecentTurns(response, this.#shortTerm, conversationId, this.#stVerbatimOverlay);
     }
 
-    if (includeConversationContext && conversationId !== undefined && conversationId !== '') {
+    if (includeConversationContext && present(conversationId)) {
       try {
         merged.conversation_context = (await this.conversation.context.get_context_for_prompt({
           conversation_id: conversationId,

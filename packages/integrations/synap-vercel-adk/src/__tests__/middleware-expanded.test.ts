@@ -252,7 +252,11 @@ describe('createSynapMiddleware.transformParams', () => {
     // We allow time for the fire-and-forget
     await new Promise(r => setTimeout(r, 10));
     expect(mockF).toHaveBeenCalledWith(
-      expect.stringContaining('/v1/memories/ingest'),
+      // ⚠ This asserted `/v1/memories/ingest`, which is not a route: memories
+      // are served under `/api/v1/memories`, and `fetch` does not throw on a
+      // 404. So the test passed, the write 404'd, and nothing was stored. A
+      // test that pins the wrong URL is how a silent failure stays silent.
+      expect.stringContaining('/api/v1/memories/create'),
       expect.anything(),
     );
   });
@@ -309,7 +313,7 @@ describe('createSynapMiddleware.wrapGenerate', () => {
     // Only the context fetch would have been called (if cache miss), but NOT the memory write
     // Wait briefly for any fire-and-forget
     await new Promise(r => setTimeout(r, 10));
-    const ingestCalls = mockF.mock.calls.filter(([url]) => String(url).includes('memories/ingest'));
+    const ingestCalls = mockF.mock.calls.filter(([url]) => String(url).includes('memories/create'));
     expect(ingestCalls).toHaveLength(0);
   });
 
@@ -427,11 +431,13 @@ describe('createSynapMiddleware.wrapStream', () => {
     // Allow fire-and-forget
     await new Promise(r => setTimeout(r, 20));
 
-    const ingestCalls = mockF.mock.calls.filter(([url]) => String(url).includes('memories/ingest'));
+    const ingestCalls = mockF.mock.calls.filter(([url]) => String(url).includes('memories/create'));
     expect(ingestCalls.length).toBeGreaterThanOrEqual(1);
     const body = JSON.parse((ingestCalls[0][1] as RequestInit).body as string);
-    const assistantMsg = body.messages.find((m: { role: string }) => m.role === 'assistant');
-    expect(assistantMsg?.content).toBe('Hello, world!');
+    // The turn travels as one rendered document, which is what
+    // /api/v1/memories/create takes. It used to be a `messages` array, aimed
+    // at a route that does not exist.
+    expect(body.document).toContain('assistant: Hello, world!');
   });
 
   it('does not write memory when accumulated text is empty', async () => {
@@ -450,7 +456,7 @@ describe('createSynapMiddleware.wrapStream', () => {
     await collectStream(stream);
     await new Promise(r => setTimeout(r, 20));
 
-    const ingestCalls = mockF.mock.calls.filter(([url]) => String(url).includes('memories/ingest'));
+    const ingestCalls = mockF.mock.calls.filter(([url]) => String(url).includes('memories/create'));
     expect(ingestCalls).toHaveLength(0);
   });
 

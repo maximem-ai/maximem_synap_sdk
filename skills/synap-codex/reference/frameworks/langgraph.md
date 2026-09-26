@@ -1,6 +1,6 @@
 # LangGraph
 
-`pip install synap-langgraph`
+`pip install maximem-synap-langgraph`
 
 Two pieces: a checkpointer for thread-level state and a `BaseStore` for cross-thread long-term memory. Use either or both depending on what your graph needs.
 
@@ -84,4 +84,4 @@ async for event in app.astream({"messages": [HumanMessage("Hi")]}, config=config
 `https://docs.maximem.ai/integrations/langgraph`
 
 ---
-*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.3.0 (JS) — verified 2026-06-20. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
