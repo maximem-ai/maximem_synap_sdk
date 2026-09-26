@@ -35,6 +35,7 @@ import logging
 from typing import Any, Optional
 
 from strands.hooks import (
+    AfterToolCallEvent,
     BeforeToolCallEvent,
     HookProvider,
     HookRegistry,
@@ -43,9 +44,30 @@ from strands.hooks import (
 
 from maximem_synap import MaximemSynapSDK
 
+from synap_integrations_common.stream_events import (
+    report_tool_call,
+    report_tool_result,
+)
+
 from synap_strands_agents._util import message_text
 
 logger = logging.getLogger(__name__)
+
+
+def _tool_use_id(tool_use: Any) -> str:
+    """Strands' id for one tool invocation.
+
+    Bedrock spells it `toolUseId`; other providers have used `tool_use_id` and
+    plain `id`. Checked in that order rather than assuming one, because an
+    empty id silently unlinks a call from its result and nothing complains.
+    """
+    if not isinstance(tool_use, dict):
+        return ""
+    for key in ("toolUseId", "tool_use_id", "id"):
+        value = tool_use.get(key)
+        if value:
+            return str(value)
+    return ""
 
 
 class SynapStreamHook(HookProvider):
@@ -87,6 +109,11 @@ class SynapStreamHook(HookProvider):
     def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
         registry.add_callback(MessageAddedEvent, self._on_message)
         registry.add_callback(BeforeToolCallEvent, self._on_tool_call)
+        # ⚠ The result was never reported. Strands fires this and nothing
+        # listened, so anticipation saw every tool call go out and no answer
+        # come back: it knew the agent had asked something and never what it
+        # learned, which is the half that says what to prefetch next.
+        registry.add_callback(AfterToolCallEvent, self._on_tool_result)
 
     async def _on_message(self, event: MessageAddedEvent) -> None:
         try:
@@ -121,20 +148,61 @@ class SynapStreamHook(HookProvider):
             if not tool_name:
                 return
             tool_args = tool_use.get("input") if isinstance(tool_use, dict) else None
-            await self._sdk.instance.send_message(
-                content=tool_name,
-                role="assistant",
-                event_type="tool_call",
+            # `toolUseId` is Strands' own id for this invocation and the same
+            # value arrives on AfterToolCallEvent, so it ties the call to its
+            # result. Without it the anticipation agent sees a call and a
+            # result and cannot tell they are the same thing.
+            #
+            # Through the typed helper rather than a hand-rolled
+            # `send_message(event_type="tool_call", role="assistant")`: the
+            # role on a tool event is a thing the server reads, and getting it
+            # wrong fails silently.
+            await report_tool_call(
+                self._sdk,
                 tool_name=tool_name,
                 tool_args=tool_args,
+                tool_call_id=str(_tool_use_id(tool_use)),
                 conversation_id=self._conversation_id,
                 user_id=self._user_id,
-                customer_id=self._customer_id or None,
-                session_id=self._session_id or None,
+                customer_id=self._customer_id or "",
             )
         except Exception as exc:  # noqa: BLE001 — stream feed must never abort the turn
             logger.warning(
                 "SynapStreamHook: tool-call feed failed: %s", exc, exc_info=True
+            )
+
+    async def _on_tool_result(self, event: AfterToolCallEvent) -> None:
+        """What the tool returned, tied to the call by its id.
+
+        Reports the failure too. A tool that raised is a fact about the turn:
+        the agent is about to apologise or retry, and either is worth
+        anticipating. `exception` is preferred over `result` when both are
+        present, because a partial result beside an exception is not an answer.
+        """
+        try:
+            if not self._sdk.instance.is_listening:
+                return
+            tool_use = event.tool_use or {}
+            tool_name = tool_use.get("name", "") if isinstance(tool_use, dict) else ""
+            exception = getattr(event, "exception", None)
+            result = (
+                {"error": str(exception)} if exception is not None
+                else getattr(event, "result", None)
+            )
+            if result is None:
+                return
+            await report_tool_result(
+                self._sdk,
+                result=result,
+                tool_name=tool_name,
+                tool_call_id=_tool_use_id(tool_use),
+                conversation_id=self._conversation_id,
+                user_id=self._user_id,
+                customer_id=self._customer_id or "",
+            )
+        except Exception as exc:  # noqa: BLE001 — stream feed must never abort the turn
+            logger.warning(
+                "SynapStreamHook: tool-result feed failed: %s", exc, exc_info=True
             )
 
 
