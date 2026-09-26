@@ -99,6 +99,10 @@ describe('gRPC anticipation stream over a real server', () => {
   async function connected(cache: AnticipationCache, options = {}) {
     const server = await startServer();
     const client = new GrpcStreamClient(CREDS, cache, {
+      // outboxPath: '' so the journal never touches ~/.synap. These files
+      // share one instance id, so a real journal replays one test's events
+      // into the next and `received[0]` stops being what the test sent.
+      outboxPath: '',
       host: '127.0.0.1', port: server.port, useTls: false, ...options,
     });
     cleanup.push(async () => { await client.disconnect(); await server.stop(); });
@@ -237,7 +241,7 @@ describe('gRPC anticipation stream over a real server', () => {
 
   it('drops writes silently when disconnected', async () => {
     const cache = new AnticipationCache();
-    const client = new GrpcStreamClient(CREDS, cache, { host: '127.0.0.1', port: 1, useTls: false });
+    const client = new GrpcStreamClient(CREDS, cache, { host: '127.0.0.1', port: 1, useTls: false, outboxPath: '' });
     // Never connected: a fire-and-forget event must not throw on the caller.
     expect(() => client.sendConversationEvent({ event_type: 'user_message' })).not.toThrow();
   });
@@ -292,6 +296,10 @@ describe('connect() failure semantics', () => {
     // like it has no memory rather than like it has a connection problem.
     const cache = new AnticipationCache();
     const client = new GrpcStreamClient(CREDS, cache, {
+      // outboxPath: '' so the journal never touches ~/.synap. These files
+      // share one instance id, so a real journal replays one test's events
+      // into the next and `received[0]` stops being what the test sent.
+      outboxPath: '',
       host: '127.0.0.1',
       port: 1, // nothing listens here
       useTls: false,

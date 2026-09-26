@@ -97,9 +97,18 @@ def test_create_synap_st_hook_signature():
 
 
 def test_no_unexpected_public_names_in_all():
-    """__all__ contains exactly the three documented public functions."""
+    """__all__ contains exactly the documented public functions.
+
+    `report_assistant_turn` joined them when the hooks started reporting runs
+    on the Synap stream. It is public deliberately and cannot be a hook: the
+    Claude Agent SDK's hook inputs never carry the final assistant text, and
+    that is the one event anticipation acts on.
+    """
     import synap_claude_agent
-    expected = {"create_synap_hooks", "create_synap_mcp_server", "create_synap_st_hook"}
+    expected = {
+        "create_synap_hooks", "create_synap_mcp_server", "create_synap_st_hook",
+        "report_assistant_turn",
+    }
     assert set(synap_claude_agent.__all__) == expected
 
 
