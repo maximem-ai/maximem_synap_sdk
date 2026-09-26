@@ -14,8 +14,10 @@ differ only in the thin wrapper.
 | `SKILL.md` | **wrapper — differs** | Codex manifest: `name` + `description` only (no `allowed-tools`), plus a Sandbox & approvals section |
 | `AGENTS.md` | **wrapper — differs** | short repo-level steering that points Codex at the skill |
 
-Do not fork the shared content. When the SDK is bumped, regenerate `../synap/` and re-copy
-`reference/`, `scripts/`, and `examples/` here (see "Keeping in sync").
+Do not fork the shared content, and do not edit it here. In the private monorepo
+(`maximem-ai/maximem_synap`) this directory holds only the three wrapper files;
+`reference/`, `scripts/` and `examples/` are copied in from `../synap/` by
+`scripts/sync_to_public.sh` at publish time. Edit them in `../synap/`.
 
 ## Codex skill format used
 
@@ -44,13 +46,16 @@ cp ./AGENTS.md /path/to/your/project/AGENTS.md
 
 ## Keeping in sync
 
+Nothing to do by hand any more. The monorepo stores one copy of the shared
+content, under `public_sdk/skills/synap/`, and `scripts/sync_to_public.sh`
+copies it into both skill folders when it publishes them here. Two stored
+copies is what let these drift for months, so there is now only one.
+
+To check a published pair:
+
 ```bash
-# from the skills/ directory
-cp -R synap/reference synap-codex/reference
-cp -R synap/scripts   synap-codex/scripts
-cp -R synap/examples  synap-codex/examples
-diff -rq synap/reference synap-codex/reference   # expect no output
+diff -rq skills/synap/reference skills/synap-codex/reference   # expect no output
 ```
 
 ---
-*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.3.0 (JS) — verified 2026-06-20. Source of truth: https://docs.maximem.ai*
+*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai*

@@ -31,6 +31,47 @@ from ..utils.correlation import generate_correlation_id
 logger = logging.getLogger("synap.sdk.transport.http")
 
 
+# Values the credit gate sends as the body's "error" field. Only these are
+# read as a reason, so an unrelated 429 carrying some other "error" string
+# is not mistaken for a credit stop.
+_CREDIT_ERRORS = frozenset({"insufficient_credits", "trial_limit_reached"})
+
+
+def _credit_payload(error_body: Any) -> Dict[str, Any]:
+    """The credit gate's structured body, however the server nested it.
+
+    FastAPI wraps a raised HTTPException's payload in ``detail``; the gate's
+    middleware path returns the same fields at the top level.
+    """
+    if not isinstance(error_body, dict):
+        return {}
+    detail = error_body.get("detail")
+    return detail if isinstance(detail, dict) else error_body
+
+
+def _credit_reason(payload: Dict[str, Any]) -> Optional[str]:
+    """Why the request was refused, or None if this was not a credit stop."""
+    reason = payload.get("reason")
+    if isinstance(reason, str) and reason:
+        return reason
+    error = payload.get("error")
+    return error if error in _CREDIT_ERRORS else None
+
+
+def _credit_message(payload: Dict[str, Any], error_message: Any, fallback: str) -> str:
+    """The server's sentence for a human, not the raw body dict.
+
+    ``error_message`` is the whole ``detail``, which for these responses is a
+    dict, so without this the message was always the generic fallback.
+    """
+    message = payload.get("message")
+    if isinstance(message, str) and message:
+        return message
+    if isinstance(error_message, str) and error_message:
+        return error_message
+    return fallback
+
+
 class HTTPTransport:
     """HTTP transport with retries, timeouts, and telemetry.
 
@@ -341,21 +382,21 @@ class HTTPTransport:
 
         if response.status_code == 402:
             # Credit gate rejection. Server returns a structured detail
-            # body ({balance_credits, minimum_required_credits, ...})
-            # so callers can render a useful recovery prompt.
-            payload = {}
-            if isinstance(error_body, dict):
-                detail = error_body.get("detail")
-                payload = detail if isinstance(detail, dict) else error_body
+            # body ({balance_credits, minimum_required_credits, reason,
+            # manage_url, ...}) so callers can say why the request stopped
+            # and where to fix it.
+            payload = _credit_payload(error_body)
             balance = payload.get("balance_credits")
             min_req = payload.get("minimum_required_credits")
             raise InsufficientCreditsError(
-                error_message if isinstance(error_message, str) else "Insufficient credits",
+                _credit_message(payload, error_message, "Insufficient credits"),
                 balance_credits=float(balance) if balance is not None else None,
                 minimum_required_credits=float(min_req) if min_req is not None else None,
                 recovery_url=payload.get("recovery_url"),
                 redeem_url=payload.get("redeem_url"),
                 correlation_id=correlation_id,
+                reason=_credit_reason(payload),
+                manage_url=payload.get("manage_url"),
             )
 
         if response.status_code == 400:
@@ -391,11 +432,20 @@ class HTTPTransport:
             raise InvalidInputError(error_message, correlation_id=correlation_id)
 
         if response.status_code == 429:
+            # A 429 is either an ordinary rate limit or a credit stop that
+            # time or a plan change clears: the spent Trial cap
+            # (reason="trial_limit_reached") and a paid plan whose
+            # subscription lapsed (reason="subscription_inactive"). The
+            # credit fields are absent on the plain rate limit.
             retry_after = response.headers.get("Retry-After")
+            payload = _credit_payload(error_body)
             raise RateLimitError(
-                error_message,
+                _credit_message(payload, error_message, "Rate limit exceeded"),
                 retry_after_seconds=int(retry_after) if retry_after else None,
                 correlation_id=correlation_id,
+                reason=_credit_reason(payload),
+                upgrade_url=payload.get("upgrade_url"),
+                manage_url=payload.get("manage_url"),
             )
 
         if response.status_code >= 500:

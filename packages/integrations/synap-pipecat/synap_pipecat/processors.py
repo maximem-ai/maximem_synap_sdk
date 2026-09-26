@@ -35,7 +35,10 @@ from maximem_synap import MaximemSynapSDK
 from pipecat.frames.frames import (
     ErrorFrame,
     Frame,
+    FunctionCallInProgressFrame,
+    FunctionCallResultFrame,
     LLMFullResponseEndFrame,
+    LLMThoughtTextFrame,
     LLMTextFrame,
     TranscriptionFrame,
     TTSTextFrame,
@@ -46,6 +49,12 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from synap_integrations_common import (
     SynapIntegrationError,
     wrap_sdk_errors_async,
+)
+from synap_integrations_common.stream_events import (
+    report_reasoning,
+    report_tool_call,
+    report_tool_result,
+    report_turn,
 )
 
 logger = logging.getLogger(__name__)
@@ -252,6 +261,38 @@ class SynapRecorder(FrameProcessor):
             self._assistant_tts_parts.append(frame.text)
         elif isinstance(frame, LLMTextFrame) and frame.text:
             self._assistant_parts.append(frame.text)
+        elif isinstance(frame, FunctionCallInProgressFrame):
+            # ⚠ Voice is where this matters most. A tool call on a phone call
+            # is dead air for the caller, and it is the clearest signal of
+            # what the agent is about to need. Pipecat carries `tool_call_id`
+            # on both frames, so the call and its result tie themselves
+            # together without us inventing an id.
+            await report_tool_call(
+                self.sdk,
+                tool_name=getattr(frame, "function_name", "") or "tool",
+                tool_args=getattr(frame, "arguments", None),
+                tool_call_id=str(getattr(frame, "tool_call_id", "") or ""),
+                conversation_id=self.conversation_id,
+                user_id=self.user_id, customer_id=self.customer_id,
+            )
+        elif isinstance(frame, FunctionCallResultFrame):
+            await report_tool_result(
+                self.sdk,
+                result=getattr(frame, "result", None),
+                tool_name=getattr(frame, "function_name", "") or "",
+                tool_call_id=str(getattr(frame, "tool_call_id", "") or ""),
+                conversation_id=self.conversation_id,
+                user_id=self.user_id, customer_id=self.customer_id,
+            )
+        elif isinstance(frame, LLMThoughtTextFrame) and getattr(frame, "text", ""):
+            # Only reasoning models emit these, so most pipelines will never
+            # see one. That is fine: reporting nothing is correct when the
+            # model thought nothing out loud.
+            await report_reasoning(
+                self.sdk, content=frame.text,
+                conversation_id=self.conversation_id,
+                user_id=self.user_id, customer_id=self.customer_id,
+            )
         elif isinstance(frame, LLMFullResponseEndFrame):
             await self._flush()
 
@@ -300,6 +341,29 @@ class SynapRecorder(FrameProcessor):
         self._assistant_parts = []
         self._assistant_tts_parts = []
 
+        if not user_text and not assistant_text:
+            return
+
+        # Stream first, REST only for what the stream did not take.
+        #
+        # ⚠ Never both. The server persists `user_message` and
+        # `assistant_message` from the stream itself, so reporting a turn AND
+        # calling `record_message` stores it twice and extracts it twice.
+        # `report_turn` returns whether it actually went out, which is what
+        # makes this decidable rather than guessed. Each half is decided
+        # separately because a stream can come up between the two.
+        if user_text and await report_turn(
+            self.sdk, role="user", content=user_text,
+            conversation_id=self.conversation_id,
+            user_id=self.user_id, customer_id=self.customer_id,
+        ):
+            user_text = None
+        if assistant_text and await report_turn(
+            self.sdk, role="assistant", content=assistant_text,
+            conversation_id=self.conversation_id,
+            user_id=self.user_id, customer_id=self.customer_id,
+        ):
+            assistant_text = ""
         if not user_text and not assistant_text:
             return
 
