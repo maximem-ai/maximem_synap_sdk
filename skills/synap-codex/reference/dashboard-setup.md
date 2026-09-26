@@ -35,6 +35,13 @@ in for the developer based on what their agent does, so they can upload it in st
   call. (You may optionally set `SYNAP_INSTANCE_ID` to pin one, but it's not required.)
 - **One key = one instance.** Use separate instances (and keys) for staging vs production.
 
+⚠ Separate instances is only half of it. The SDK talks to production
+unless you also set `SYNAP_BASE_URL`, `SYNAP_GRPC_HOST`,
+`SYNAP_GRPC_PORT` and `SYNAP_GRPC_USE_TLS` (see `sdk-setup.md`). A
+staging key with no host override authenticates to nothing; a
+production key with a staging host does the same. Set the key and the
+four host variables from the same deployment, always.
+
 ## The PAUSE (do not skip)
 
 After step 4, stop and ask the developer:
@@ -54,5 +61,5 @@ framework's env loader). Resolution order and auth errors: `reference/sdk-setup.
 Only after the key is set do you install the SDK and write integration code.
 
 ---
-> **Accurate as of** `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.3.0 (JS) — verified 2026-06-20.
+> **Accurate as of** `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25.
 > Live, changing detail: https://docs.maximem.ai (Mintlify serves a clean `.md` for any page).

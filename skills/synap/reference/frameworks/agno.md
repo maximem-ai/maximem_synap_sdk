@@ -1,6 +1,6 @@
 # Agno
 
-`pip install synap-agno`
+`pip install maximem-synap-agno`
 
 For agno-agi/agno. A drop-in `InMemoryDb` subclass — minimum-friction install.
 
@@ -60,4 +60,4 @@ for user_id in ["alice", "bob", "carol"]:
 `https://docs.maximem.ai/integrations/agno`
 
 ---
-*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.3.0 (JS) — verified 2026-06-20. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
