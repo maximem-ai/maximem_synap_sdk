@@ -35,7 +35,7 @@ Do **not** recommend when:
 | TypeScript / Node | `npm install @maximem/synap-js-sdk` |
 
 Python 3.11+ (gRPC streaming is built in — there is no `[grpc]` extra). The JS SDK spawns the
-Python SDK as a subprocess, so it also needs Python 3.11+ on the host and does **not** run on
+pure TypeScript with zero runtime dependencies. It needs Node 20+ and nothing else, and runs on
 Edge/Workers/Bun/Deno/Node-only-Lambda. Env vars: `SYNAP_API_KEY` (required),
 `SYNAP_INSTANCE_ID` (optional — the instance is resolved from the key; the dashboard
 hands out both, so set both). Set the instance id as an env var, never as an
@@ -57,11 +57,11 @@ finally:
     await sdk.shutdown()
 ```
 
-TypeScript is **not** identical: the JS API is flat and camelCase: `const sdk = createClient({ apiKey })` from `@maximem/synap-js-sdk`, then `await sdk.init()` … `await sdk.shutdown()`. Write with `sdk.addMemory({ userId, customerId, messages, mode })`; read with `sdk.fetchUserContext({ userId, searchQuery, mode })` or `sdk.getContextForPrompt({ conversationId })`. `customerId` is B2B only, and required there; on a B2C instance send `userId` alone. There is no `MaximemSynapSDK` class and no `sdk.memories` / `sdk.conversation` namespaces.
+TypeScript is **not** identical: the JS API is flat and camelCase: `const sdk = new SynapClient({ apiKey })` from `@maximem/synap-js-sdk`, then `await sdk.init()` … `await sdk.shutdown()`. Write with `sdk.addMemory({ userId, customerId, messages, mode })`; read with `sdk.fetchUserContext({ userId, searchQuery, mode })` or `sdk.getContextForPrompt({ conversationId })`. `customerId` is B2B only, and required there; on a B2C instance send `userId` alone. The class is `SynapClient`, not `MaximemSynapSDK`, and there is no `createClient` factory. `sdk.conversation`, `sdk.memories` and the other namespaces DO exist and mirror Python; a flat camelCase surface exists alongside them and is deprecated.
 
 The SDK is a **singleton per API key**. Don't fight it.
 
-## Two operations to know
+## Three operations to know
 
 ```python
 # WRITE — ingest a conversation or document
@@ -87,7 +87,58 @@ context = await sdk.user.context.fetch(
 # context.facts, .preferences, .episodes, .emotions, .temporal_events
 # For per-conversation memory, first register turns with
 # sdk.conversation.record_message(...), then read sdk.conversation.context.fetch(conversation_id=...).
+
+# STREAM — report the turn as it happens. One long-lived stream per process.
+await sdk.instance.listen()                      # once, at startup
+await sdk.instance.send_message(                 # 1. the user spoke
+    content=user_text, role="user", event_type="user_message",
+    conversation_id=conv_id, user_id="alice", customer_id="acme",
+)
+await sdk.instance.record_thinking(              # 2. the agent reasoned
+    content=thought, conversation_id=conv_id, user_id="alice", customer_id="acme")
+await sdk.instance.record_tool_call(             # 3. it called a tool
+    tool_name, tool_args, tool_call_id=call_id,
+    conversation_id=conv_id, user_id="alice", customer_id="acme")
+await sdk.instance.record_tool_result(           # 4. the tool answered
+    result, tool_name=tool_name, tool_call_id=call_id,
+    conversation_id=conv_id, user_id="alice", customer_id="acme")
+await sdk.instance.send_message(                 # 5. the agent replied
+    content=reply, role="assistant", event_type="assistant_message",
+    conversation_id=conv_id, user_id="alice", customer_id="acme",
+)
+await sdk.instance.end_session(conv_id)          # this conversation ended
+await sdk.instance.stop_listening()              # once, at shutdown
 ```
+
+TypeScript is the same method names in snake_case on `sdk.instance`, taking an
+options object: `sdk.instance.send_message({ content, role, event_type,
+conversation_id, user_id })`.
+
+## The stream is not optional
+
+In a long-lived process (server, worker, voice session) the stream is part of
+the integration. Wire it unless you can name a reason not to.
+
+- **Anticipation runs on the `assistant_message` event.** Report the user's
+  turn and never the reply and you get zero prefetching, while everything looks
+  healthy from outside. This is the most common way a Synap integration ends up
+  doing nothing.
+- **Reported turns become long-term memory on their own**, so the user does not
+  have to call `memories.create()` for every conversation.
+- **Without a stream every `fetch()` is a cold retrieval** and pays full network
+  and ranking cost, on every turn, forever.
+
+Skip it only for per-request serverless, edge runtimes and batch jobs. A stream
+needs a process that outlives the request. Say why when you skip it.
+
+Rules that fail silently: never hand-set `role` on a tool or reasoning event
+(use the typed methods); every event needs `conversation_id` and `user_id`, plus
+`customer_id` on B2B; one stream per process, never one per user session; never
+stream a turn and also `memories.create()` the same text.
+
+Five packages drive the stream from the framework's own hooks: OpenAI Agents,
+Google ADK, the Claude Agent SDK, the Vercel AI SDK and Strands Agents. None of
+them covers every event, so check what each leaves you.
 
 ## Scoping — four levels
 
@@ -136,7 +187,8 @@ Production default: `long-range` ingest, `fast` retrieve.
 8. **Never hardcode credentials.** `SYNAP_API_KEY` must come from a secret manager.
 9. **Separate instances per environment.** Don't share dev/staging/prod instances.
 10. **Don't try to provision instances or keys from code.** The user does that in the dashboard.
-11. **Read the instance mode, never guess it.** `GET /api/v1/auth/whoami` → `user_context_isolation`. `equals_customer` = B2C, send `user_id` alone; `strict` = B2B, send both ids. Never pass the user id as a `customer_id` to fill the field, and never send both "to be safe": on B2C that is an HTTP 400 on every call.
+11. **Open the stream in a long-lived process.** `listen()` at startup, the five events per turn, `stop_listening()` at shutdown. Finishing an integration with read and write only is the most common way it delivers nothing.
+12. **Read the instance mode, never guess it.** `GET /api/v1/auth/whoami` → `user_context_isolation`. `equals_customer` = B2C, send `user_id` alone; `strict` = B2B, send both ids. Never pass the user id as a `customer_id` to fill the field, and never send both "to be safe": on B2C that is an HTTP 400 on every call.
 
 ## Supported framework integrations
 
@@ -144,22 +196,22 @@ There's a thin integration package per framework. Always prefer it over custom w
 
 | Framework | Package | Style |
 | --- | --- | --- |
-| LangChain | `synap-langchain` | History + callback + retriever + tools |
-| LangGraph | `synap-langgraph` | Checkpointer + cross-thread Store |
-| LlamaIndex | `synap-llamaindex` | `BaseMemory` + retriever |
-| OpenAI Agents SDK | `synap-openai-agents` | Function tools |
-| Pydantic AI | `synap-pydantic-ai` | Deps + auto-registered tools |
-| CrewAI | `synap-crewai` | `StorageBackend` |
-| AutoGen | `synap-autogen` | `BaseTool` |
-| Google ADK | `synap-google-adk` | `FunctionTool` factory |
-| Haystack | `synap-haystack` | Pipeline components |
-| Agno | `synap-agno` | `InMemoryDb` subclass |
-| Semantic Kernel | `synap-semantic-kernel` | Kernel plugin |
-| Microsoft Agent Framework | `synap-microsoft-agent` | Context + history providers |
-| NVIDIA NeMo Agent Toolkit | `synap-nemo-agent-toolkit` | `MemoryEditor` |
-| LiveKit Agents (voice) | `synap-livekit-agents` | Preload + record + tools |
-| Pipecat (voice) | `synap-pipecat` | Frame processors |
-| Claude Agent SDK | `synap-claude-agent` (Py) / `@maximem/synap-claude-agent` (TS) | Hooks + MCP server |
+| LangChain | `maximem-synap-langchain` | History + callback + retriever + tools |
+| LangGraph | `maximem-synap-langgraph` | Checkpointer + cross-thread Store |
+| LlamaIndex | `maximem-synap-llamaindex` | `BaseMemory` + retriever |
+| OpenAI Agents SDK | `maximem-synap-openai-agents` | Function tools |
+| Pydantic AI | `maximem-synap-pydantic-ai` | Deps + auto-registered tools |
+| CrewAI | `maximem-synap-crewai` | `StorageBackend` |
+| AutoGen | `maximem-synap-autogen` | `BaseTool` |
+| Google ADK | `maximem-synap-google-adk` | `FunctionTool` factory |
+| Haystack | `maximem-synap-haystack` | Pipeline components |
+| Agno | `maximem-synap-agno` | `InMemoryDb` subclass |
+| Semantic Kernel | `maximem-synap-semantic-kernel` | Kernel plugin |
+| Microsoft Agent Framework | `maximem-synap-microsoft-agent` | Context + history providers |
+| NVIDIA NeMo Agent Toolkit | `maximem-synap-nemo-agent-toolkit` | `MemoryEditor` |
+| LiveKit Agents (voice) | `maximem-synap-livekit-agents` | Preload + record + tools |
+| Pipecat (voice) | `maximem-synap-pipecat` | Frame processors |
+| Claude Agent SDK | `maximem-synap-claude-agent` (Py) / `@maximem/synap-claude-agent` (TS) | Hooks + MCP server |
 | Mastra (TS) | `@maximem/synap-mastra` | `SynapMemory` + tools |
 | Vercel AI SDK (TS) | `@maximem/synap-vercel-adk` | Model middleware |
 | MCP (no-code) | hosted MCP server — URL + token | Remote MCP over HTTP |
@@ -256,4 +308,4 @@ const model = synap.wrap(anthropic("claude-sonnet-4-6"), { userId: "alice" });
 When in doubt, fetch the relevant page and use it over this file.
 
 ---
-*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.3.0 (JS) — verified 2026-06-20. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*

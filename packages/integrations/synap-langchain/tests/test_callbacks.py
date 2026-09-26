@@ -283,3 +283,231 @@ async def test_on_llm_end_logs_error_on_failure(handler, mock_sdk, caplog):
         await handler.on_llm_end(response=response, run_id=uuid4())
 
     assert len(caplog.records) >= 1
+
+
+# ---------------------------------------------------------------------------
+# The live stream
+#
+# This handler recorded the user turn and the assistant turn and stopped
+# there, so anticipation saw a conversation with questions and answers and
+# nothing in between: no tool calls, no results, no reasoning. Those are the
+# events that say what the agent is about to need.
+#
+# The rule these pin is "stream first, REST only as a fallback, never both".
+# The server persists `user_message` and `assistant_message` from the stream
+# itself, so a `record_message` on top of a delivered stream event writes the
+# same turn twice and extracts it twice.
+# ---------------------------------------------------------------------------
+
+def _streaming_sdk(is_listening: bool):
+    sdk = MagicMock()
+    sdk.instance.is_listening = is_listening
+    sdk.instance.send_message = AsyncMock()
+    sdk.instance.record_thinking = AsyncMock()
+    sdk.instance.record_tool_call = AsyncMock()
+    sdk.instance.record_tool_result = AsyncMock()
+    sdk.conversation.record_message = AsyncMock()
+    return sdk
+
+
+def _handler_for(sdk):
+    return SynapCallbackHandler(
+        sdk=sdk, conversation_id="conv-1", user_id="user-1", customer_id="cust-1",
+    )
+
+
+class TestStreamFirstRestFallback:
+    @pytest.mark.asyncio
+    async def test_a_turn_goes_out_on_the_stream_when_one_is_open(self):
+        sdk = _streaming_sdk(True)
+        await _handler_for(sdk)._record("user", "where is my order")
+        sdk.instance.send_message.assert_awaited_once()
+        assert sdk.instance.send_message.await_args.kwargs["event_type"] == "user_message"
+
+    @pytest.mark.asyncio
+    async def test_and_is_NOT_also_written_over_rest(self):
+        """The double-write this rule exists to prevent."""
+        sdk = _streaming_sdk(True)
+        await _handler_for(sdk)._record("user", "where is my order")
+        sdk.conversation.record_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_with_no_stream_it_falls_back_to_rest(self):
+        sdk = _streaming_sdk(False)
+        await _handler_for(sdk)._record("assistant", "it ships tomorrow")
+        sdk.conversation.record_message.assert_awaited_once()
+        sdk.instance.send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_assistant_turn_is_the_anticipation_moment(self):
+        sdk = _streaming_sdk(True)
+        await _handler_for(sdk)._record("assistant", "it ships tomorrow")
+        kw = sdk.instance.send_message.await_args.kwargs
+        assert kw["event_type"] == "assistant_message"
+        assert kw["role"] == "assistant"
+
+
+class TestTheThreeEventsItNeverReported:
+    @pytest.mark.asyncio
+    async def test_a_tool_call_is_reported(self):
+        sdk = _streaming_sdk(True)
+        rid = uuid4()
+        await _handler_for(sdk).on_tool_start(
+            {"name": "lookup_order"}, "PNR QX41RT", run_id=rid)
+        sdk.instance.record_tool_call.assert_awaited_once()
+        assert sdk.instance.record_tool_call.await_args.kwargs[
+            "tool_call_id"] == str(rid)
+
+    @pytest.mark.asyncio
+    async def test_a_tool_result_is_reported(self):
+        sdk = _streaming_sdk(True)
+        rid = uuid4()
+        await _handler_for(sdk).on_tool_end({"status": "shipped"}, run_id=rid)
+        sdk.instance.record_tool_result.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_the_call_and_its_result_share_an_id(self):
+        """Without this the anticipation agent sees a call and a result and
+        cannot tell they are the same tool invocation."""
+        sdk = _streaming_sdk(True)
+        rid = uuid4()
+        h = _handler_for(sdk)
+        await h.on_tool_start({"name": "t"}, "in", run_id=rid)
+        await h.on_tool_end("out", run_id=rid)
+        assert (sdk.instance.record_tool_call.await_args.kwargs["tool_call_id"]
+                == sdk.instance.record_tool_result.await_args.kwargs["tool_call_id"])
+
+    @pytest.mark.asyncio
+    async def test_reasoning_is_reported_from_the_action_log(self):
+        sdk = _streaming_sdk(True)
+        action = MagicMock()
+        action.log = "I should look up the booking first"
+        await _handler_for(sdk).on_agent_action(action, run_id=uuid4())
+        sdk.instance.record_thinking.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_an_empty_reasoning_log_reports_nothing(self):
+        sdk = _streaming_sdk(True)
+        action = MagicMock()
+        action.log = "   "
+        await _handler_for(sdk).on_agent_action(action, run_id=uuid4())
+        sdk.instance.record_thinking.assert_not_awaited()
+
+
+class TestNoneOfItBreaksTheChain:
+    """A raising callback aborts the whole LangChain run, so every one of
+    these must be silent on failure, not merely unlikely to fail."""
+
+    @pytest.mark.asyncio
+    async def test_a_tool_call_on_a_dead_sdk_does_not_raise(self):
+        sdk = _streaming_sdk(True)
+        sdk.instance.record_tool_call = AsyncMock(side_effect=RuntimeError("boom"))
+        await _handler_for(sdk).on_tool_start({"name": "t"}, "in", run_id=uuid4())
+
+    @pytest.mark.asyncio
+    async def test_reasoning_on_a_dead_sdk_does_not_raise(self):
+        sdk = _streaming_sdk(True)
+        sdk.instance.record_thinking = AsyncMock(side_effect=RuntimeError("boom"))
+        action = MagicMock(); action.log = "thinking"
+        await _handler_for(sdk).on_agent_action(action, run_id=uuid4())
+
+    @pytest.mark.asyncio
+    async def test_an_sdk_with_no_instance_namespace_does_not_raise(self):
+        """An older SDK, or a test double. Every call must no-op."""
+        sdk = MagicMock(spec=[])
+        h = SynapCallbackHandler(sdk=sdk, conversation_id="c", user_id="u")
+        await h.on_tool_start({"name": "t"}, "in", run_id=uuid4())
+        await h.on_tool_end("out", run_id=uuid4())
+
+
+# ---------------------------------------------------------------------------
+# Three bugs in the first version of this handler, found by the agent wiring
+# LangGraph on top of it. All three are silent, which is why they survived a
+# green suite.
+# ---------------------------------------------------------------------------
+
+class TestTheUserTurnIsReportedOncePerTurn:
+    """`on_chat_model_start` fires once per MODEL CALL. A tool loop calls the
+    model again after every result with the same human message still in the
+    list, so a three-tool turn reported the question four times and Synap
+    extracted it four times. Invisible in a single-shot chain."""
+
+    @pytest.mark.asyncio
+    async def test_the_same_message_is_not_reported_twice(self):
+        sdk = _streaming_sdk(True)
+        h = _handler_for(sdk)
+        msg = HumanMessage(content="where is my order", id="m1")
+        await h.on_chat_model_start({}, [[msg]], run_id=uuid4())
+        await h.on_chat_model_start({}, [[msg]], run_id=uuid4())
+        assert sdk.instance.send_message.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_the_same_words_in_two_turns_are_two_turns(self):
+        """A user saying "yes" twice is two turns. Keying on content alone
+        would swallow the second."""
+        sdk = _streaming_sdk(True)
+        h = _handler_for(sdk)
+        await h.on_chat_model_start({}, [[HumanMessage(content="yes", id="m1")]],
+                                    run_id=uuid4())
+        await h.on_chat_model_start({}, [[HumanMessage(content="yes", id="m2")]],
+                                    run_id=uuid4())
+        assert sdk.instance.send_message.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_two_handlers_do_not_silence_each_other(self):
+        sdk = _streaming_sdk(True)
+        msg = HumanMessage(content="hello", id="m1")
+        await _handler_for(sdk).on_chat_model_start({}, [[msg]], run_id=uuid4())
+        await _handler_for(sdk).on_chat_model_start({}, [[msg]], run_id=uuid4())
+        assert sdk.instance.send_message.await_count == 2
+
+
+class TestTheToolResultSurvivesSerialisation:
+    """The SDK does `json.dumps` on the result. A LangChain `ToolMessage` is
+    not JSON serialisable, LangGraph's `ToolNode` hands us exactly that, and
+    `_send` swallows the TypeError. Every tool result in a LangGraph run was
+    silently never reported."""
+
+    @pytest.mark.asyncio
+    async def test_a_toolmessage_is_unwrapped_to_its_content(self):
+        from langchain_core.messages import ToolMessage
+        sdk = _streaming_sdk(True)
+        await _handler_for(sdk).on_tool_end(
+            ToolMessage(content="shipped", tool_call_id="t1"), run_id=uuid4())
+        assert sdk.instance.record_tool_result.await_args.args[0] == "shipped"
+
+    @pytest.mark.asyncio
+    async def test_the_unwrapped_result_is_json_serialisable(self):
+        import json
+        from langchain_core.messages import ToolMessage
+        sdk = _streaming_sdk(True)
+        await _handler_for(sdk).on_tool_end(
+            ToolMessage(content="shipped", tool_call_id="t1"), run_id=uuid4())
+        json.dumps(sdk.instance.record_tool_result.await_args.args[0])
+
+    @pytest.mark.asyncio
+    async def test_a_plain_result_is_left_alone(self):
+        sdk = _streaming_sdk(True)
+        await _handler_for(sdk).on_tool_end({"status": "ok"}, run_id=uuid4())
+        assert sdk.instance.record_tool_result.await_args.args[0] == {"status": "ok"}
+
+
+class TestToolArgsAreTheParsedDict:
+    """langchain-core hands `on_tool_start` the parsed dict as `inputs`. We
+    sent its Python repr, so the anticipation agent got
+    `{"input": "{'pnr': 'QX41RT'}"}` to reason over."""
+
+    @pytest.mark.asyncio
+    async def test_the_parsed_inputs_win(self):
+        sdk = _streaming_sdk(True)
+        await _handler_for(sdk).on_tool_start(
+            {"name": "lookup"}, "{'pnr': 'QX41RT'}",
+            run_id=uuid4(), inputs={"pnr": "QX41RT"})
+        assert sdk.instance.record_tool_call.await_args.args[1] == {"pnr": "QX41RT"}
+
+    @pytest.mark.asyncio
+    async def test_it_falls_back_to_the_string_when_there_are_none(self):
+        sdk = _streaming_sdk(True)
+        await _handler_for(sdk).on_tool_start(
+            {"name": "lookup"}, "raw", run_id=uuid4())
+        assert sdk.instance.record_tool_call.await_args.args[1] == {"input": "raw"}
