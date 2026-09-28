@@ -44,15 +44,49 @@ agent.invoke({"messages": [{"role": "user", "content": "What do I prefer?"}]})
 > memory API, and the agent would lose its working tree. The constructor cannot
 > stop you.
 
-## The three surfaces
+## The four surfaces
 
 | Surface | Class | Use when |
 |---|---|---|
 | Backend | `SynapBackend` | You want memory to reach the agent through its own `read_file` / `grep` / `write_file` tools |
 | Middleware | `SynapMemoryMiddleware` | You want recall scoped to the user's actual question |
 | Tools | `SynapSearchTool`, `SynapStoreTool` | You want the model to reach for memory deliberately |
+| Stream | `SynapStreamMiddleware` | You want Synap to see the turn as it happens, not just answer questions about it |
 
-They compose. A common setup is the backend for automatic recall plus the tools for deliberate lookups.
+They compose. A common setup is the backend for automatic recall plus the tools for deliberate lookups, with the stream middleware alongside.
+
+## Reporting the run on Synap's live stream
+
+The first three surfaces read. `SynapStreamMiddleware` writes: it reports the five events Synap's anticipation agent watches for, on the gRPC stream `sdk.instance.listen()` opened.
+
+```python
+from deepagents import create_deep_agent
+from maximem_synap import MaximemSynapSDK
+from synap_deepagents import SynapMemoryMiddleware, SynapStreamMiddleware
+
+sdk = MaximemSynapSDK(api_key="sk-...")
+await sdk.instance.listen()
+
+agent = create_deep_agent(
+    model="anthropic:claude-sonnet-5",
+    middleware=[
+        SynapMemoryMiddleware(sdk=sdk, user_id="alice"),
+        SynapStreamMiddleware(sdk=sdk, conversation_id="conv-123", user_id="alice"),
+    ],
+)
+```
+
+| Event | Hook | Why that hook |
+|---|---|---|
+| user turn | `before_agent` | The entry node runs once per invocation. `before_model` runs once per lap of a tool loop, with the same question still in the list, so it would report and extract the question several times per turn |
+| reasoning | `after_model` | Each lap has its own reasoning; steps are numbered within the turn |
+| tool call | `wrap_tool_call` | Reported before the tool runs |
+| tool result | `wrap_tool_call` | Same hook, so the call and the result share `tool_call["id"]` by construction rather than by agreement |
+| assistant turn | `after_agent` | The exit node. `assistant_message` means a turn just ended, and the text the model produces alongside a tool call is not the answer to anything |
+
+Turn recording is **stream first, REST only as a fallback, never both** — the server persists `user_message` and `assistant_message` from the stream itself, so recording them again over REST writes and extracts the turn twice. Tool calls, results and reasoning have no REST equivalent: with no stream open they are simply not reported, and the middleware costs nothing.
+
+Nothing in it can raise into the graph, and one middleware covers one conversation (the de-duplication is per instance).
 
 ## `grep` is a semantic search
 

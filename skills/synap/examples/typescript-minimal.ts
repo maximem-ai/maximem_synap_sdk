@@ -1,9 +1,9 @@
 /**
  * Minimal Synap example — TypeScript, no framework.
  *
- * The JS SDK is a thin wrapper that spawns the Python SDK as a subprocess, so the
- * host needs Python 3.11+ on PATH in addition to Node 18+. It does NOT run on Edge
- * Runtime, Cloudflare Workers, Bun, Deno Deploy, or Node-only Lambda runtimes.
+ * The JS SDK is pure TypeScript: no Python, no subprocess, zero runtime
+ * dependencies, Node 20+. Importing it on Edge, Workers, Bun or Deno is safe;
+ * only the live stream needs a Node runtime.
  *
  * Run after:
  *   npm install @maximem/synap-js-sdk
@@ -13,13 +13,13 @@
  * The instance is resolved from the API key — no instance id needed.
  */
 
-import { createClient } from "@maximem/synap-js-sdk";
+import { SynapClient } from "@maximem/synap-js-sdk";
 import { v5 as uuidv5 } from "uuid";
 
 const NAMESPACE_URL = "6ba7b811-9dad-11d1-80b4-00c04fd430c8";
 
 async function main() {
-  const sdk = createClient({ apiKey: process.env.SYNAP_API_KEY! });
+  const sdk = new SynapClient({ apiKey: process.env.SYNAP_API_KEY! });
   await sdk.init(); // note: init(), not initialize()
 
   try {
@@ -72,7 +72,7 @@ main().catch((e) => {
 
 // ---------------------------------------------------------------------------
 // Namespaced API (mirrors the Python SDK 1:1), available from
-// @maximem/synap-js-sdk 0.3.0. The flat methods used above (addMemory,
+// @maximem/synap-js-sdk 0.5.1. The flat methods used above (addMemory,
 // fetchUserContext) still work; the namespaced surface is added alongside them
 // and accepts camelCase OR snake_case argument keys:
 //
@@ -88,4 +88,12 @@ main().catch((e) => {
 // integrations (@maximem/synap-mastra, @maximem/synap-claude-agent) consume.
 // ---------------------------------------------------------------------------
 //
-// Accurate as of @maximem/synap-js-sdk 0.3.0 — verified 2026-06-20. Docs: https://docs.maximem.ai
+// ── What this example deliberately leaves out ───────────────────────────────
+// The live stream. This script runs once and exits, so there is nothing for a
+// stream to observe. A real agent is a long-lived process, and there the stream
+// is the third operation, not an extra: sdk.instance.listen() at startup, five
+// events per turn, sdk.instance.stop_listening() at shutdown. Without it every
+// fetch is a cold retrieval and no turn becomes memory on its own.
+// See reference/streaming.md. Note: the stream needs Node, not Edge.
+//
+// Accurate as of @maximem/synap-js-sdk 0.5.1 — verified 2026-09-25. Docs: https://docs.maximem.ai

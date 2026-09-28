@@ -17,6 +17,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from pipecat.frames.frames import (
+    FunctionCallInProgressFrame,
+    FunctionCallResultFrame,
+    LLMThoughtTextFrame,
     ErrorFrame,
     LLMFullResponseEndFrame,
     LLMTextFrame,
@@ -661,3 +664,125 @@ class TestSynapRecorderFailurePaths:
         await rec._flush()
 
         assert any(isinstance(f, ErrorFrame) for f in pushed)
+
+
+# ---------------------------------------------------------------------------
+# The live stream
+#
+# SynapRecorder wrote the two ends of a turn over REST and reported nothing
+# to the stream, so anticipation saw a voice call as a question and an answer
+# with nothing in between. On a phone call the gap between them is dead air
+# for the caller, which is exactly when prefetching pays.
+#
+# Pipecat carries `tool_call_id` on both function-call frames, so the call and
+# its result tie themselves together with no id invented here.
+# ---------------------------------------------------------------------------
+
+def _streaming_sdk(is_listening: bool):
+    sdk = MagicMock()
+    sdk.instance.is_listening = is_listening
+    sdk.instance.send_message = AsyncMock()
+    sdk.instance.record_thinking = AsyncMock()
+    sdk.instance.record_tool_call = AsyncMock()
+    sdk.instance.record_tool_result = AsyncMock()
+    sdk.conversation.record_message = AsyncMock()
+    return sdk
+
+
+def _recorder(sdk):
+    return SynapRecorder(sdk, user_id="u1", conversation_id="conv-1")
+
+
+class TestPipecatStreamFirst:
+    @pytest.mark.asyncio
+    async def test_both_turns_go_out_on_the_stream(self):
+        sdk = _streaming_sdk(True)
+        rec = _recorder(sdk)
+        rec._user_buffer = "book me a flight"
+        rec._assistant_parts = ["Booked."]
+        await rec._flush()
+        kinds = [c.kwargs["event_type"]
+                 for c in sdk.instance.send_message.await_args_list]
+        assert kinds == ["user_message", "assistant_message"]
+
+    @pytest.mark.asyncio
+    async def test_and_neither_is_written_over_rest(self):
+        """The double write this rule exists to prevent."""
+        sdk = _streaming_sdk(True)
+        rec = _recorder(sdk)
+        rec._user_buffer = "book me a flight"
+        rec._assistant_parts = ["Booked."]
+        await rec._flush()
+        sdk.conversation.record_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_with_no_stream_both_fall_back_to_rest(self):
+        sdk = _streaming_sdk(False)
+        rec = _recorder(sdk)
+        rec._user_buffer = "book me a flight"
+        rec._assistant_parts = ["Booked."]
+        await rec._flush()
+        assert sdk.conversation.record_message.await_count == 2
+        sdk.instance.send_message.assert_not_awaited()
+
+
+class TestPipecatReportsTheMiddleOfTheTurn:
+    @pytest.mark.asyncio
+    async def test_a_function_call_is_reported(self):
+        sdk = _streaming_sdk(True)
+        frame = FunctionCallInProgressFrame(
+            function_name="lookup_flight", tool_call_id="call-7",
+            arguments={"pnr": "QX41RT"}, cancel_on_interruption=False,
+        )
+        await _recorder(sdk).process_frame(frame, FrameDirection.DOWNSTREAM)
+        sdk.instance.record_tool_call.assert_awaited_once()
+        assert sdk.instance.record_tool_call.await_args.kwargs[
+            "tool_call_id"] == "call-7"
+
+    @pytest.mark.asyncio
+    async def test_a_function_result_is_reported_with_the_same_id(self):
+        sdk = _streaming_sdk(True)
+        frame = FunctionCallResultFrame(
+            function_name="lookup_flight", tool_call_id="call-7",
+            arguments={}, result={"status": "cancelled"},
+        )
+        await _recorder(sdk).process_frame(frame, FrameDirection.DOWNSTREAM)
+        assert sdk.instance.record_tool_result.await_args.kwargs[
+            "tool_call_id"] == "call-7"
+
+    @pytest.mark.asyncio
+    async def test_a_thought_frame_is_reported_as_reasoning(self):
+        sdk = _streaming_sdk(True)
+        await _recorder(sdk).process_frame(
+            LLMThoughtTextFrame(text="check the booking first"),
+            FrameDirection.DOWNSTREAM)
+        sdk.instance.record_thinking.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_an_empty_thought_reports_nothing(self):
+        sdk = _streaming_sdk(True)
+        await _recorder(sdk).process_frame(
+            LLMThoughtTextFrame(text=""), FrameDirection.DOWNSTREAM)
+        sdk.instance.record_thinking.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_frame_still_passes_through(self):
+        """A processor that swallows frames breaks the pipeline behind it."""
+        sdk = _streaming_sdk(True)
+        rec = _recorder(sdk)
+        rec.push_frame = AsyncMock()
+        frame = FunctionCallResultFrame(
+            function_name="t", tool_call_id="c", arguments={}, result="ok")
+        await rec.process_frame(frame, FrameDirection.DOWNSTREAM)
+        rec.push_frame.assert_awaited()
+
+
+class TestPipecatNeverBreaksThePipeline:
+    @pytest.mark.asyncio
+    async def test_a_dead_sdk_does_not_raise_from_a_function_frame(self):
+        sdk = _streaming_sdk(True)
+        sdk.instance.record_tool_call = AsyncMock(side_effect=RuntimeError("boom"))
+        frame = FunctionCallInProgressFrame(
+            function_name="t", tool_call_id="c", arguments={},
+            cancel_on_interruption=False)
+        await _recorder(sdk).process_frame(frame, FrameDirection.DOWNSTREAM)

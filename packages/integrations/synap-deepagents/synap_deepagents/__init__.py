@@ -49,6 +49,19 @@ history, refreshed each turn.
 LangChain tools, for when you want the model to reach for memory deliberately
 rather than have it arrive automatically.
 
+**4. A stream.** Everything above reads. :class:`SynapStreamMiddleware` writes:
+it reports the question, the reasoning, each tool call, each tool result and the
+answer on the gRPC stream ``sdk.instance.listen()`` opened, which is what the
+anticipation agent watches. It is silent when no stream is running, so adding it
+costs nothing until you open one::
+
+    agent = create_deep_agent(
+        model="anthropic:claude-sonnet-5",
+        middleware=[SynapStreamMiddleware(
+            sdk=sdk, conversation_id="conv-123", user_id="alice",
+        )],
+    )
+
 Error policy: reads degrade — a Synap outage yields an empty memory block and a
 logged error, never a failed agent run. Writes raise ``SynapIntegrationError``.
 There is no ``delete``: ``memories.create`` returns an ingestion id rather than a
@@ -71,6 +84,7 @@ from synap_deepagents.short_term import (
     fetch_st_block,
     synap_st_instructions,
 )
+from synap_deepagents.stream import SynapStreamMiddleware
 from synap_deepagents.tools import SynapSearchTool, SynapStoreTool
 
 __all__ = [
@@ -82,6 +96,7 @@ __all__ = [
     "SynapSearchTool",
     "SynapShortTermMiddleware",
     "SynapStoreTool",
+    "SynapStreamMiddleware",
     "compose_system_prompt",
     "fetch_st_block",
     "synap_st_instructions",

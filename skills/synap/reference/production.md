@@ -32,6 +32,25 @@ Work through this before the user's first production deployment, and again befor
 - [ ] `max_results` set to what the prompt actually consumes. Don't fetch 50 if the prompt template only renders 5.
 - [ ] `types` filter set if only specific memory types are used downstream.
 
+## Stream path
+
+Skip this whole section only if the app is per-request serverless, an edge
+runtime or a batch job. Anywhere else, an unwired stream is the most common
+reason a Synap integration ships and delivers nothing.
+
+- [ ] `await sdk.instance.listen()` runs once at process start, and `stop_listening()` on graceful shutdown.
+- [ ] One stream per process, never one per user session. Stream quotas are per instance and per client.
+- [ ] Every turn reports a `user_message` **and** an `assistant_message`. Anticipation runs on the assistant event; without it there is no prefetching at all, and the integration looks healthy from outside.
+- [ ] Tool calls and tool results are reported and share a `tool_call_id`.
+- [ ] Reasoning is reported wherever the framework exposes it.
+- [ ] Every event carries `conversation_id` and `user_id` (plus `customer_id` on B2B). An event missing either is dropped server-side with no client-visible error.
+- [ ] No hand-set `role` on a tool or reasoning event — the typed methods (`record_tool_call`, `record_tool_result`, `record_thinking`) set it correctly and a mismatched pair fails silently.
+- [ ] `end_session(conversation_id)` is called when a conversation ends and the process keeps running (voice call hangs up, chat window closes).
+- [ ] No turn is both streamed and passed to `memories.create()`. That extracts it twice and costs twice.
+- [ ] Reconnects are expected and handled: the SDK reconnects on its own, and a session does not survive it, so do not cache a `session_id` across one.
+
+Full detail: `reference/streaming.md`.
+
 ## Write path
 
 - [ ] Write failures **surface explicitly** — log them, alert on rate. The agent shouldn't silently lose memory.
@@ -88,4 +107,4 @@ Work through this before the user's first production deployment, and again befor
 The canonical version of this checklist with rationale per item: `https://docs.maximem.ai/guides/production-checklist`
 
 ---
-*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.3.0 (JS) — verified 2026-06-20. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
