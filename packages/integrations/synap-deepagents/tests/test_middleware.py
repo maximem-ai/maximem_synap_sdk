@@ -367,3 +367,61 @@ def test_middlewares_are_agent_middleware(mock_sdk, cls, kwargs):
     from langchain.agents.middleware.types import AgentMiddleware
 
     assert isinstance(cls(sdk=mock_sdk, **kwargs), AgentMiddleware)
+
+
+# ---------------------------------------------------------------------------
+# before_agent is reachable the way the graph actually calls it
+# ---------------------------------------------------------------------------
+#
+# ⚠ A middleware hook is not called with the arguments its signature declares.
+# LangChain wraps it in a ``RunnableCallable``, which reads the signature and
+# injects only the parameters it recognises by name AND annotation. ``config``
+# annotated ``Any`` is not recognised: langgraph warns, skips it, and calls the
+# hook without it — so a required ``config`` parameter meant the entry node of
+# every deepagents run using these middlewares raised ``TypeError`` before the
+# model was ever called. Every unit test passed, because a unit test calls the
+# method directly and passes all three.
+
+
+def _as_graph_node(middleware):
+    """Wrap a middleware's ``before_agent`` exactly as LangChain's factory does."""
+    from langgraph._internal._runnable import RunnableCallable
+
+    return RunnableCallable(
+        middleware.before_agent, middleware.abefore_agent, trace=False
+    )
+
+
+def _node_config():
+    from langgraph._internal._constants import CONF, CONFIG_KEY_RUNTIME
+
+    return {CONF: {CONFIG_KEY_RUNTIME: MagicMock()}}
+
+
+@pytest.mark.parametrize(
+    ("cls", "kwargs"),
+    [
+        (SynapMemoryMiddleware, {"user_id": "alice"}),
+        (SynapShortTermMiddleware, {"conversation_id": "conv-1"}),
+    ],
+)
+def test_before_agent_runs_as_a_graph_node(mock_sdk, cls, kwargs):
+    node = _as_graph_node(cls(sdk=mock_sdk, **kwargs))
+    assert node.invoke({"messages": [HumanMessage("hello")]}, _node_config())
+
+
+@pytest.mark.parametrize(
+    ("cls", "kwargs"),
+    [
+        (SynapMemoryMiddleware, {"user_id": "alice"}),
+        (SynapShortTermMiddleware, {"conversation_id": "conv-1"}),
+    ],
+)
+def test_before_agent_is_offered_its_config(mock_sdk, cls, kwargs):
+    """The annotation is load-bearing: ``Any`` here means no config is passed."""
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        node = _as_graph_node(cls(sdk=mock_sdk, **kwargs))
+    assert "config" in node.func_accepts

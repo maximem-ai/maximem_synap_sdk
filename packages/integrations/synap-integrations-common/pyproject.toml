@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maximem-synap-integrations-common"
-version = "0.2.0"
+version = "0.2.1"
 description = "Shared utilities for Synap framework integrations"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,7 +15,7 @@ authors = [
 keywords = ["synap", "memory", "ai", "agents", "integrations"]
 
 dependencies = [
-    "maximem-synap>=0.2.0",
+    "maximem-synap>=0.5.3",
     "nest_asyncio>=1.5",
 ]
 

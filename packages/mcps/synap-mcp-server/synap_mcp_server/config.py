@@ -12,6 +12,22 @@ class Settings:
     recall_timeout_s: float = float(os.getenv("MCP_RECALL_TIMEOUT_S", "10"))
     ingest_timeout_s: float = float(os.getenv("MCP_INGEST_TIMEOUT_S", "8"))
     default_max_results: int = int(os.getenv("MCP_DEFAULT_MAX_RESULTS", "10"))
+    # Also report a logged exchange as a conversation turn on the anticipation
+    # path (POST /v1/events/batch), so the anticipation agent sees the turn and
+    # not only the extracted memory. See stream.py for what this costs.
+    #
+    # ⚠ OFF by default, deliberately. Turning it on adds a second backend call
+    # per log_exchange, writes the turn to conversation history in ADDITION to
+    # the long-range document, and runs the anticipation agent, which bills
+    # model calls. That is a behaviour and cost change for every no-code
+    # caller on this hosted server, so it is a deployment's decision and not a
+    # default. Nothing else about log_exchange changes either way.
+    stream_events: bool = os.getenv("MCP_STREAM_EVENTS", "false").lower() in (
+        "1", "true", "yes",
+    )
+    # Reporting the turn is best effort and sits on the write path, so it gets
+    # a tighter budget than the write it follows.
+    events_timeout_s: float = float(os.getenv("MCP_EVENTS_TIMEOUT_S", "4"))
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     environment: str = os.getenv("ENVIRONMENT", "production")
     # Browser origins allowed to call the MCP endpoint directly (the dashboard's

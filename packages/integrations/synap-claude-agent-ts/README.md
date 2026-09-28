@@ -40,6 +40,41 @@ for await (const message of query({
 }
 ```
 
+`createSynapHooks` installs six hooks, not one. Five of them only do anything
+while a Synap stream is open; see the next section.
+
+### 1b. The live stream — what the agent is doing, as it does it
+
+Synap's `Listen` stream carries five per-turn events. Open one and the hooks
+above report four of them with no further wiring:
+
+```ts
+await sdk.instance.listen();   // that is the whole opt-in
+```
+
+| Synap event | Hook | Persisted? |
+| --- | --- | --- |
+| `user_message` | `UserPromptSubmit` | yes, and feeds long-term extraction |
+| `tool_call` | `PreToolUse` | no, anticipation only |
+| `tool_result` | `PostToolUse`, `PostToolUseFailure` | no, anticipation only |
+| `assistant_message` | `Stop` | yes, and **this is the event that wakes the anticipation agent** |
+| end of session | `SessionEnd` | — |
+
+Two things worth knowing:
+
+- **`agent_thinking` is not reported**, because the Claude Agent SDK exposes no
+  hook carrying the model's reasoning text. Four of the five events is what the
+  framework makes available, and we would rather say so than invent a signal.
+- **Stream first, REST only as a fallback, never both.** The server persists a
+  turn it receives on the stream itself, so the hook skips
+  `sdk.conversation.record_message` when the stream accepted the turn and falls
+  back to it when there is no stream or the send failed.
+
+If you never call `listen()`, behaviour is exactly what it was before: the
+prompt is recorded over REST and nothing else is sent. `recordUserPrompts:
+false` turns off both halves of the conversation on both paths; it does not
+affect tool events, which are never persisted.
+
 ### 2. MCP tools — explicit read/write
 
 ```ts

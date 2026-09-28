@@ -7,6 +7,10 @@ Importing this module has the side effect of registering both:
 - :class:`SynapShortTermConfig` (YAML ``_type: synap_short_term``) — a
   workflow Function returning Synap short-term context for the
   current conversation.
+- :class:`SynapStreamExporterConfig` (YAML ``_type: synap_stream``) — a
+  telemetry exporter that reports the whole turn (user message, tool
+  calls, tool results, reasoning, assistant message) onto Synap's live
+  gRPC stream so the anticipation agent can see it.
 
 Wired via the ``nat.components`` entry-point in ``pyproject.toml`` so
 NAT picks it up automatically on workflow load.
@@ -17,3 +21,4 @@ NAT picks it up automatically on workflow load.
 
 from . import plugin  # noqa: F401 — registers @register_memory
 from . import short_term  # noqa: F401 — registers @register_function (synap_short_term)
+from . import stream  # noqa: F401 — registers @register_telemetry_exporter (synap_stream)

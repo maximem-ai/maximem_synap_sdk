@@ -262,6 +262,7 @@ agent = ReActAgent.from_tools(tools, memory=memory)
 | CAMEL-AI | [`maximem-synap-camel-ai`](packages/integrations/synap-camel-ai/) | `pip install maximem-synap-camel-ai` |
 | Smolagents | [`maximem-synap-smolagents`](packages/integrations/synap-smolagents/) | `pip install maximem-synap-smolagents` |
 | Deepagents | [`maximem-synap-deepagents`](packages/integrations/synap-deepagents/) | `pip install maximem-synap-deepagents` |
+| Remote MCP Server | [`maximem-synap-mcp-server`](packages/integrations/synap-mcp-server/) | `pip install maximem-synap-mcp-server` |
 
 <!-- END integrations -->
 

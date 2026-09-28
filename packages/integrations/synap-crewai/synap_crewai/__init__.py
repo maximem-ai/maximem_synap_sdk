@@ -14,5 +14,11 @@ Example:
 
 from synap_crewai.short_term import build_synap_st_backstory
 from synap_crewai.storage import SynapStorageBackend
+from synap_crewai.stream import SynapCrewAIListener, report_user_turn
 
-__all__ = ["SynapStorageBackend", "build_synap_st_backstory"]
+__all__ = [
+    "SynapStorageBackend",
+    "build_synap_st_backstory",
+    "SynapCrewAIListener",
+    "report_user_turn",
+]

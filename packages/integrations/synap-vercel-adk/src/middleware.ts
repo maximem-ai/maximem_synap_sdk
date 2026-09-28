@@ -58,6 +58,20 @@ export function createSynapMiddleware(opts: SynapMiddlewareOptions): LanguageMod
       const originalPrompt = promptStack.pop();
       const result = await doGenerate();
 
+      for (const call of result.toolCalls ?? []) {
+        emitToolCall(opts.grpcClient, opts, call)
+          .catch((err: unknown) => console.warn('[synap] tool call event failed:', err));
+      }
+      if (result.reasoning) {
+        const reasoningText = typeof result.reasoning === 'string'
+          ? result.reasoning
+          : (result.reasoning as Array<{ text?: string }>)
+            .map((r) => r.text ?? '').join('');
+        if (reasoningText) {
+          emitReasoning(opts.grpcClient, opts, reasoningText)
+            .catch((err: unknown) => console.warn('[synap] reasoning event failed:', err));
+        }
+      }
       if (result.text && originalPrompt) {
         const messages = promptToTranscript(originalPrompt);
         writeMemory({
@@ -80,6 +94,10 @@ export function createSynapMiddleware(opts: SynapMiddlewareOptions): LanguageMod
       const { stream, ...rest } = await doStream();
 
       let accumulated = '';
+      // Reasoning arrives in deltas like text does. Accumulated and sent once
+      // at the end rather than per delta: a thought is one step, and a stream
+      // event per token would be noise.
+      let reasoning = '';
 
       const wrappedStream = new ReadableStream<LanguageModelV1StreamPart>({
         start(controller) {
@@ -88,6 +106,10 @@ export function createSynapMiddleware(opts: SynapMiddlewareOptions): LanguageMod
           function pump(): void {
             reader.read().then(({ done, value }) => {
               if (done) {
+                if (reasoning) {
+                  emitReasoning(opts.grpcClient, opts, reasoning)
+                    .catch((err: unknown) => console.warn('[synap] reasoning event failed:', err));
+                }
                 if (accumulated && originalPrompt) {
                   const messages = promptToTranscript(originalPrompt);
                   writeMemory({
@@ -104,8 +126,17 @@ export function createSynapMiddleware(opts: SynapMiddlewareOptions): LanguageMod
                 return;
               }
 
+              // Only text-delta was read here, so a tool call and any
+              // reasoning the provider returned passed straight through and
+              // Synap never saw them: anticipation got the answer and none of
+              // the work that produced it.
               if (value.type === 'text-delta') {
                 accumulated += value.textDelta;
+              } else if (value.type === 'tool-call') {
+                emitToolCall(opts.grpcClient, opts, value)
+                  .catch((err: unknown) => console.warn('[synap] tool call event failed:', err));
+              } else if (value.type === 'reasoning') {
+                reasoning += value.textDelta ?? '';
               }
               controller.enqueue(value);
               pump();
@@ -207,6 +238,65 @@ async function resolveContext(
     console.warn('[synap] context fetch failed — proceeding without context:', err);
     return null;
   }
+}
+
+/**
+ * A tool the model asked for.
+ *
+ * `role: 'assistant'` and `event_type: 'tool_call'` together: the server reads
+ * the type first, and the pair has to agree or the call is filed as an
+ * ordinary assistant reply.
+ */
+async function emitToolCall(
+  grpcClient: GrpcStreamClient | null,
+  opts: SynapModelOptions,
+  call: { toolName?: string; toolCallId?: string; args?: unknown },
+): Promise<void> {
+  if (!grpcClient?.isConnected) return;
+  await grpcClient.sendConversationEvent({
+    ...baseEvent(opts),
+    event_type: 'tool_call',
+    role: 'assistant',
+    content: '',
+    tool_name: call.toolName ?? '',
+    tool_call_id: call.toolCallId ?? '',
+    tool_args_json: call.args === undefined ? '' : JSON.stringify(call.args),
+    timestamp_ms: Date.now(),
+  });
+}
+
+/**
+ * What the model was thinking, when the provider returned any.
+ *
+ * No role. A thought is not the assistant's reply, and a role of 'assistant'
+ * is what made the server file every reasoning step as the final answer.
+ */
+async function emitReasoning(
+  grpcClient: GrpcStreamClient | null,
+  opts: SynapModelOptions,
+  content: string,
+): Promise<void> {
+  if (!grpcClient?.isConnected || !content) return;
+  await grpcClient.sendConversationEvent({
+    ...baseEvent(opts),
+    event_type: 'agent_thinking',
+    role: '',
+    content,
+    metadata: { thought_type: 'model_reasoning' },
+    timestamp_ms: Date.now(),
+  });
+}
+
+function baseEvent(opts: SynapModelOptions) {
+  return {
+    conversation_id: opts.conversationId ?? '',
+    user_id: opts.userId ?? '',
+    customer_id: opts.customerId ?? '',
+    session_id: '',
+    metadata: {} as Record<string, string>,
+    search_queries: [] as string[],
+    context_types: [] as string[],
+  };
 }
 
 async function emitConversationEvents(
