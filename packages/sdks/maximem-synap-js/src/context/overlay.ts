@@ -71,11 +71,12 @@ export function budgetRecentTurns(turns: readonly ShortTermTurn[]): ShortTermTur
 export function overlayLocalRecentTurns(
   response: RawContext,
   store: ShortTermStore,
-  conversationId: string | undefined,
+  /** `null` too: callers spell "no conversation" as `convId || null`. */
+  conversationId: string | null | undefined,
   /** `st_verbatim_overlay` from the client options. The env var still wins. */
   configured?: boolean,
 ): void {
-  if (conversationId === undefined || conversationId === '') return;
+  if (conversationId === undefined || conversationId === null || conversationId === '') return;
   try {
     const entry = store.get(conversationId);
     // Cold store: nothing locally, so leave the server's response untouched.

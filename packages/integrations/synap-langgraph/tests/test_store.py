@@ -86,6 +86,20 @@ def _make_sdk(fetch_items=None, create_raise=None, fetch_raise=None):
 
     sdk.conversation = MagicMock()
     sdk.conversation.record_message = AsyncMock(return_value={"message_id": "msg-1"})
+    # No live stream by default, so the REST path in arecord_message is
+    # exercised on purpose rather than by accident. A bare MagicMock answers
+    # ``is_listening`` with a truthy child mock, which would make every
+    # "it went out over REST" assertion below pass for the wrong reason.
+    sdk.instance = MagicMock()
+    sdk.instance.is_listening = False
+    sdk.instance.send_message = AsyncMock()
+    return sdk
+
+
+def _listening_sdk():
+    """An SDK with a live ``sdk.instance.listen()`` stream."""
+    sdk = _make_sdk()
+    sdk.instance.is_listening = True
     return sdk
 
 
@@ -661,6 +675,93 @@ class TestRecordMessage:
         store = SynapStore(sdk, user_id="u1", customer_id="c1")
         store.record_message("conv-1", "user", "hello")
         sdk.conversation.record_message.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Stream first, REST only as a fallback, never both
+#
+# The server persists ``user_message`` and ``assistant_message`` from the
+# stream itself (``grpc/servicer.py``), so a ``record_message`` on top of a
+# delivered stream event writes the same turn twice and extracts it twice.
+# ---------------------------------------------------------------------------
+
+
+class TestArecordMessageStreamFirst:
+    @pytest.mark.asyncio
+    async def test_the_turn_goes_out_on_the_stream_when_one_is_open(self):
+        sdk = _listening_sdk()
+        store = SynapStore(sdk, user_id="u1", customer_id="c1")
+        await store.arecord_message("conv-1", "user", "where is my order")
+        sdk.instance.send_message.assert_awaited_once()
+        kw = sdk.instance.send_message.await_args.kwargs
+        assert kw["event_type"] == "user_message"
+        assert kw["conversation_id"] == "conv-1"
+        assert kw["user_id"] == "u1"
+        assert kw["customer_id"] == "c1"
+
+    @pytest.mark.asyncio
+    async def test_and_is_NOT_also_written_over_rest(self):
+        """The double-write this rule exists to prevent."""
+        sdk = _listening_sdk()
+        store = SynapStore(sdk, user_id="u1", customer_id="c1")
+        await store.arecord_message("conv-1", "user", "where is my order")
+        sdk.conversation.record_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_assistant_turn_is_the_anticipation_moment(self):
+        sdk = _listening_sdk()
+        store = SynapStore(sdk, user_id="u1", customer_id="c1")
+        await store.arecord_message("conv-1", "assistant", "it ships tomorrow")
+        kw = sdk.instance.send_message.await_args.kwargs
+        assert kw["event_type"] == "assistant_message"
+        assert kw["role"] == "assistant"
+
+    @pytest.mark.asyncio
+    async def test_with_no_stream_it_falls_back_to_rest(self):
+        sdk = _make_sdk()  # is_listening False
+        store = SynapStore(sdk, user_id="u1", customer_id="c1")
+        await store.arecord_message("conv-1", "user", "hello")
+        sdk.conversation.record_message.assert_awaited_once()
+        sdk.instance.send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_stream_send_that_fails_still_reaches_rest(self):
+        """A dropped stream event must not lose the turn altogether."""
+        sdk = _listening_sdk()
+        sdk.instance.send_message = AsyncMock(side_effect=RuntimeError("stream boom"))
+        store = SynapStore(sdk, user_id="u1", customer_id="c1")
+        await store.arecord_message("conv-1", "user", "hello")
+        sdk.conversation.record_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_metadata_is_stringified_for_the_stream(self):
+        """Stream metadata is string key/value on the wire; a non-string
+        value must not fail the send and silently demote the turn to REST."""
+        sdk = _listening_sdk()
+        store = SynapStore(sdk, user_id="u1", customer_id="c1")
+        await store.arecord_message("conv-1", "user", "hi", metadata={"turn": 3})
+        assert sdk.instance.send_message.await_args.kwargs["metadata"] == {"turn": "3"}
+        sdk.conversation.record_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_store_with_no_customer_id_reports_nothing_anywhere(self):
+        sdk = _listening_sdk()
+        store = SynapStore(sdk, user_id="u1")  # no customer_id
+        await store.arecord_message("conv-1", "user", "hi")
+        sdk.instance.send_message.assert_not_awaited()
+        sdk.conversation.record_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_sdk_with_no_instance_namespace_falls_back_to_rest(self):
+        """An older SDK, or a test double, has no stream to report on."""
+        sdk = _make_sdk()
+        del sdk.instance
+        sdk.mock_add_spec(["conversation", "memories", "fetch"])
+        sdk.conversation = MagicMock()
+        sdk.conversation.record_message = AsyncMock(return_value={"message_id": "m"})
+        store = SynapStore(sdk, user_id="u1", customer_id="c1")
+        await store.arecord_message("conv-1", "user", "hi")
+        sdk.conversation.record_message.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

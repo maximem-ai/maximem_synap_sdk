@@ -303,6 +303,47 @@ describe('SynapClient', () => {
     });
   });
 
+  describe('unified fetch reads null as absent', () => {
+    // `conversation_id: convId || null` is how callers spell "there is no
+    // conversation" -- the Claude Agent (TS) integration writes exactly that.
+    // `validateConversationId` has always let null through as absent, but the
+    // scope guards only tested `!== undefined && !== ''`, so null sailed past
+    // them and fired a conversation-scope fetch carrying `conversation_id:
+    // null`. Python guards with a plain truthy check and never had this.
+    const calls = (urls: string[]) =>
+      (async (url: string) => { urls.push(String(url)); return json({}); }) as unknown as typeof fetch;
+
+    it('a null conversation_id does not query the conversation scope', async () => {
+      const urls: string[] = [];
+      await client(calls(urls)).fetch({ conversation_id: null, user_id: 'u' });
+      expect(urls.some((u) => u.includes('/conversation'))).toBe(false);
+      expect(urls.some((u) => u.includes('/user'))).toBe(true);
+    });
+
+    it('a null customer_id does not query the customer scope', async () => {
+      const urls: string[] = [];
+      await client(calls(urls)).fetch({ customer_id: null, user_id: 'u' });
+      expect(urls.some((u) => u.includes('/customer'))).toBe(false);
+    });
+
+    it('all-null identifiers query nothing at all', async () => {
+      const urls: string[] = [];
+      const out = await client(calls(urls)).fetch({
+        conversation_id: null, user_id: null, customer_id: null,
+      });
+      expect(urls).toEqual([]);
+      expect(out.scopes_queried).toEqual([]);
+    });
+
+    it('a real conversation_id is still queried', async () => {
+      const urls: string[] = [];
+      await client(calls(urls)).fetch({
+        conversation_id: '11111111-2222-4333-8444-555555555555', user_id: 'u',
+      });
+      expect(urls.some((u) => u.includes('/conversation'))).toBe(true);
+    });
+  });
+
   describe('lifecycle', () => {
     it('init() is a no-op that still resolves', async () => {
       await expect(client((async () => json({})) as unknown as typeof fetch).init()).resolves.toBeUndefined();

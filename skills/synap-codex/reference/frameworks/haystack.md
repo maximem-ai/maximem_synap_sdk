@@ -1,6 +1,6 @@
 # Haystack
 
-`pip install synap-haystack`
+`pip install maximem-synap-haystack`
 
 | Class | Purpose |
 | --- | --- |
@@ -103,4 +103,4 @@ result = pipeline.run({
 `https://docs.maximem.ai/integrations/haystack`
 
 ---
-*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.3.0 (JS) — verified 2026-06-20. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*

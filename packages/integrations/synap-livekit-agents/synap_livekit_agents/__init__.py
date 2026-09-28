@@ -6,9 +6,13 @@ Three plug-in points for a LiveKit Agent:
    on the agent's :class:`ChatContext` so long-term memory is in the prompt
    window from the very first turn.
 2. **Record** — before `session.start(...)`, call
-   :func:`attach_synap_recording` on the :class:`AgentSession`; it wires
-   `on("conversation_item_added", ...)` to
-   ``sdk.conversation.record_message`` for both user and assistant turns.
+   :func:`attach_synap_recording` on the :class:`AgentSession`. It reports
+   the whole turn, not just its two ends: the committed user and assistant
+   turns (`conversation_item_added`), the tool call at the moment it is
+   dispatched (`tool_execution_updated`), the tool result
+   (`function_tools_executed`), and the end of the call (`close`).
+   Turns go out on the Synap stream when one is open and fall back to
+   ``sdk.conversation.record_message`` when it is not — never both.
 3. **Tools** — register :func:`synap_search_tool` and/or
    :func:`synap_store_tool` on your :class:`Agent` so the LLM can
    retrieve or persist memory mid-call.

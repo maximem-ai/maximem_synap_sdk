@@ -27,16 +27,24 @@ Exposes:
 - :func:`create_synap_st_node` — same short-term context, exposed as a
   state-mutating node for custom ``StateGraph`` flows. Writes the ST string
   into ``state[state_key]`` for downstream LLM nodes to assemble.
+
+- :class:`SynapLangGraphCallbackHandler` — reports a run on Synap's live
+  gRPC stream so the anticipation agent sees the whole turn: the user turn,
+  the reasoning, every tool call and result, and the assistant turn. Pass it
+  in ``config={"callbacks": [...]}``. LangGraph runs on LangChain's callback
+  machinery, so this extends the LangChain handler rather than repeating it.
 """
 
 from synap_langgraph.store import SynapStore
 from synap_langgraph.checkpointer import SynapCheckpointSaver
+from synap_langgraph.callbacks import SynapLangGraphCallbackHandler
 from synap_langgraph.short_term import create_synap_st_node, synap_st_prompt
 from synap_langchain.graph import create_synap_node
 
 __all__ = [
     "SynapStore",
     "SynapCheckpointSaver",
+    "SynapLangGraphCallbackHandler",
     "create_synap_node",
     "create_synap_st_node",
     "synap_st_prompt",

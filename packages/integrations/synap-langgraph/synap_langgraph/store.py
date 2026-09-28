@@ -69,6 +69,7 @@ from langgraph.store.base import (
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
     SynapIntegrationError,
+    report_turn,
     run_async,
     wrap_sdk_errors_async,
 )
@@ -85,17 +86,6 @@ _KEY = "lg_store_key"
 def _ns_str(namespace: tuple[str, ...]) -> str:
     """Stringify a namespace tuple for metadata / search tokens."""
     return "/".join(namespace)
-
-
-def _matches_namespace_prefix(
-    item_ns: str,
-    prefix: tuple[str, ...],
-) -> bool:
-    """Return True iff ``item_ns`` sits at or below ``prefix``."""
-    if not prefix:
-        return True
-    pref_str = _ns_str(prefix)
-    return item_ns == pref_str or item_ns.startswith(pref_str + "/")
 
 
 def _matches_namespace_prefix(
@@ -367,12 +357,38 @@ class SynapStore(BaseStore):
         inside — the BaseStore contract; it lets a LangGraph node drive the
         conversation channel without reaching for the raw SDK. Best-effort: a
         failure here is logged and swallowed so it never breaks an agent turn.
+
+        Stream first, REST only as a fallback, never both. The server
+        persists ``user_message`` and ``assistant_message`` from the stream
+        itself (``grpc/servicer.py``), so a ``record_message`` on top of a
+        delivered stream event writes the turn twice and extracts it twice.
+        ``report_turn`` returns whether it actually went out, which is what
+        makes the choice decidable rather than guessed; it is silent and
+        returns False when no ``sdk.instance.listen()`` is running.
+
+        ⚠ ``session_id`` rides the REST path only. On the stream the SDK
+        opens and owns the session itself, and the shared ``report_turn``
+        helper has no field for one.
         """
         if not self.user_id or not self.customer_id:
             logger.warning(
                 "SynapStore.record_message needs both user_id and customer_id "
                 "(anticipation is user+customer scoped); skipping."
             )
+            return
+        # Stream metadata is string key/value on the wire; coerce rather than
+        # let a non-string value fail the send and silently demote the turn to
+        # the REST path.
+        stream_metadata = {str(k): str(v) for k, v in (metadata or {}).items()}
+        if await report_turn(
+            self.sdk,
+            role=role,
+            content=content,
+            conversation_id=conversation_id,
+            user_id=self.user_id,
+            customer_id=self.customer_id,
+            metadata=stream_metadata,
+        ):
             return
         try:
             await self.sdk.conversation.record_message(
