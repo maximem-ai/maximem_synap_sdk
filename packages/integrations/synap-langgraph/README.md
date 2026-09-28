@@ -15,7 +15,7 @@ Requires `langgraph>=1.0`, `maximem-synap>=0.2.0`.
 - **`SynapStore`** — implements LangGraph's `BaseStore` for cross-thread long-term memory. Semantic search via `store.search(namespace, query=...)` routes to `sdk.fetch(...)`, so your graph nodes get Synap-powered recall out of the box.
   - **User or customer scope.** Pass `user_id` for private per-user memory, or just a `customer_id` (no `user_id`) for a **customer-wide shared pool** visible to every user in the deployment.
   - **All memory types.** Reads surface facts *and* preferences (plus episodes / emotions / temporal events), so stated preferences aren't dropped.
-  - **Anticipation (optional).** Construct with `include_conversation_context=True` and feed turns via `store.record_message(conversation_id, role, content)` so just-stated context is in play on the next read. (This lives alongside the `BaseStore` API — anticipation has no key/value analogue.)
+  - **Anticipation (optional).** Construct with `include_conversation_context=True` and feed turns via `store.record_message(conversation_id, role, content)` so just-stated context is in play on the next read. The turn goes out on the live stream when one is open and over REST only when there is none, never both. (This lives alongside the `BaseStore` API — anticipation has no key/value analogue.)
 
 - **`SynapCheckpointSaver`** — implements `BaseCheckpointSaver` with **best-effort fuzzy retrieval**. Checkpoint writes succeed durably; reads use `sdk.fetch` which is semantic-search shaped rather than exact KV. Use for observability/audit and demo flows. For production checkpoint durability, pair with `SqliteSaver` / `PostgresSaver`.
 
@@ -24,6 +24,41 @@ Requires `langgraph>=1.0`, `maximem-synap>=0.2.0`.
 - **`synap_st_prompt`** — short-term conversation context as a `prompt` callable for `create_react_agent`. Prepends Synap's compacted summary + recent turns above your system prompt at every LLM step.
 
 - **`create_synap_st_node`** — same short-term context, exposed as a `StateGraph` node that writes the ST string into state for your LLM node to consume.
+
+- **`SynapLangGraphCallbackHandler`** — reports the whole turn on Synap's live gRPC stream so the anticipation agent can see it: the user turn, the reasoning, every tool call and result, and the assistant turn. Pass it like any LangChain callback.
+
+## Reporting a run on the live stream
+
+LangGraph runs on LangChain's callback machinery, so a Synap handler in the run config reaches the chat model and the tool nodes inside your compiled graph.
+
+```python
+from langchain_core.messages import HumanMessage
+from synap_langgraph import SynapLangGraphCallbackHandler
+
+handler = SynapLangGraphCallbackHandler(
+    sdk=sdk,
+    conversation_id="conv_abc123",
+    user_id="user_456",
+    customer_id="cust_789",
+)
+
+await app.ainvoke(
+    {"messages": [HumanMessage("where is my order QX41RT")]},
+    config={"callbacks": [handler]},
+)
+```
+
+Build one handler per conversation. What it reports:
+
+| Event | Where it comes from |
+|---|---|
+| user turn | `on_chat_model_start`, once per turn (a ReAct loop calls the model again after every tool result with the same human message still in the list) |
+| reasoning | the AIMessage's `reasoning` content blocks in `on_llm_end` — `on_agent_action` is an `AgentExecutor` callback and never fires in a graph |
+| tool call | `on_tool_start`, with the parsed argument dict |
+| tool result | `on_tool_end`, tied to the call by the shared `run_id` |
+| assistant turn | `on_llm_end` |
+
+**Stream first, REST only as a fallback, never both.** The server persists the user and assistant turns from the stream itself, so the handler falls back to `sdk.conversation.record_message` only when no `sdk.instance.listen()` is running. The same rule applies to `SynapStore.record_message`. Every one of these calls is silent when there is no stream and none of them can raise into your graph.
 
 ## Short-term context (compacted conversation, on every LLM step)
 

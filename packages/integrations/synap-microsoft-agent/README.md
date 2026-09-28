@@ -44,13 +44,40 @@ result = await agent.run("What's my trial expiring?", session=session)
 
 ## What each provider does
 
-- **`SynapContextProvider`** — on every turn, fetches Synap context (facts, preferences, episodes, emotions, temporal events) and appends it as instructions. After the turn, records the user + assistant messages back to Synap.
+- **`SynapContextProvider`** — on every turn, fetches Synap context (facts, preferences, episodes, emotions, temporal events) and appends it as instructions. Records the user + assistant messages back to Synap, and reports the whole turn on the live stream when one is open (see below). This is the provider that owns the turn lifecycle.
 
 - **`SynapHistoryProvider`** — persists the conversation message log. Loads prior turns on session resume. Subclass of MAF's `HistoryProvider`, so all its flags (`load_messages`, `store_inputs`, `store_outputs`, `store_context_messages`) work as documented.
 
 - **`SynapShortTermContextProvider`** — injects a compacted summary of the current conversation, refreshed each turn.
 
 You can use either or both; they coexist.
+
+## The live stream
+
+If you have `sdk.instance.listen()` running, this integration reports the whole
+turn on it, so Synap's anticipation agent sees more than a question and an
+answer:
+
+| what happened | event |
+| --- | --- |
+| the user spoke | `user_message`, from `before_run`, before the retrieval it causes |
+| the agent reasoned | `agent_thinking`, from the `text_reasoning` contents MAF leaves off `Message.text` |
+| the agent called a tool | `tool_call`, from function middleware added to the invocation |
+| the tool returned | `tool_result`, under the same `tool_call_id` as the call |
+| the agent answered | `assistant_message` |
+
+**Stream first, REST only as a fallback, never both.** The server writes the
+conversation row from the stream event itself, so reporting a turn *and*
+calling `record_message` would store it twice and extract it twice. Each turn
+goes out on the stream if one is open and over REST if it is not.
+
+None of this needs configuration and none of it changes what you see today: with
+no stream open, every writer behaves exactly as it did before. Every report is a
+no-op without a stream, and no report can raise into your agent run.
+
+A `system` message has no stream event and keeps the REST path: `report_turn`
+maps anything that is not `user` onto `assistant_message`, and a system prompt
+filed as something the assistant said is worse than a REST write.
 
 ## The Agent Harness
 
@@ -95,6 +122,7 @@ suite on each MAF minor.
 
 - **Read-side failures** (`fetch`, `get_context_for_prompt`) degrade gracefully — logged at `ERROR`, empty result returned. An outage never crashes an agent turn.
 - **Write-side failures** — `SynapContextProvider.after_run` logs and swallows (context providers must not raise per MAF's hook contract). `SynapHistoryProvider.save_messages` surfaces errors as `SynapIntegrationError` so explicit persistence failures are observable.
+- **Stream reports** never raise and never fall over into your agent run. A report that fails is a report that did not go out, so the turn takes the REST path instead. The one report that is logged at `WARNING` rather than debug is a refused tool-reporter install, because that costs every tool call and every tool result for the whole run.
 - **Harness stores** — same split. `get_index_text` degrades to pointer lines with no recall block, because it feeds the system prompt on every turn. `write_topic` and `file_memory_write` raise. A topic that is not held raises `FileNotFoundError`, which is MAF's own not-found contract.
 
 ## Tests

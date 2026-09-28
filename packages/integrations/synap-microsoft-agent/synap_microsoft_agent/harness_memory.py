@@ -36,6 +36,11 @@ from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import wrap_sdk_errors_async
 
 from synap_microsoft_agent._harness_compat import require_harness
+from synap_microsoft_agent.stream import (
+    install_tool_reporter,
+    report_message_reasoning,
+    report_message_turn,
+)
 
 require_harness()
 
@@ -131,7 +136,27 @@ class SynapMemoryContextProvider(MemoryContextProvider):
         ``context.input_messages`` and delegates. Same move as
         ``SynapMemoryMiddleware`` in the deepagents integration, for the same
         reason.
+
+        This is also where the tool reporter goes on, so a harness agent's
+        tool calls and results reach the anticipation agent. Installed at most
+        once per invocation, so running this alongside
+        :class:`~synap_microsoft_agent.context_provider.SynapContextProvider`
+        reports each tool once rather than twice.
         """
+        install_tool_reporter(
+            context,
+            self.sdk,
+            source_id=self.source_id,
+            # The same id ``save_messages`` will write the transcript under:
+            # both derive it from this provider's own ``state``, which is the
+            # dict MAF hands both hooks.
+            conversation_id=session_conversation_id(
+                getattr(context, "session_id", None),
+                owner=self._owner_from_state(state if isinstance(state, dict) else None),
+            ),
+            user_id=self.user_id or "",
+            customer_id=self.customer_id or "",
+        )
         token = None
         store = self.store
         if hasattr(store, "set_recall_query"):
@@ -214,6 +239,16 @@ class SynapMemoryContextProvider(MemoryContextProvider):
 
         Honours the inherited ``history_message_filter`` so a caller that
         redacts messages on the file store gets the same redaction here.
+
+        **Stream first, REST only as a fallback, never both.** The server
+        writes the conversation row from the stream event itself, so a
+        ``record_message`` on top of a delivered event stores the turn twice
+        and extracts it twice.
+
+        The agent's reasoning is reported alongside, in transcript order, from
+        the ``text_reasoning`` contents MAF leaves off ``Message.text``. It is
+        a stream event only: there is no REST equivalent and a turn with no
+        reasoning is an ordinary turn.
         """
         del kwargs
         if not messages:
@@ -238,14 +273,32 @@ class SynapMemoryContextProvider(MemoryContextProvider):
             conversation_id=conversation_id,
             user_id=self.user_id,
         ):
+            step = 0
             for message in messages:
                 if self.history_message_filter is not None:
                     filtered = self.history_message_filter(message)
                     if filtered is None:
                         continue
                     message = filtered
+                step += await report_message_reasoning(
+                    self.sdk,
+                    message,
+                    conversation_id=conversation_id,
+                    user_id=self.user_id or "",
+                    customer_id=self.customer_id or "",
+                    first_step=step,
+                )
                 role, text = _role_and_text(message)
                 if not role or not text:
+                    continue
+                if await report_message_turn(
+                    self.sdk,
+                    role=role,
+                    content=text,
+                    conversation_id=conversation_id,
+                    user_id=self.user_id or "",
+                    customer_id=self.customer_id or "",
+                ):
                     continue
                 await self.sdk.conversation.record_message(
                     conversation_id=conversation_id,

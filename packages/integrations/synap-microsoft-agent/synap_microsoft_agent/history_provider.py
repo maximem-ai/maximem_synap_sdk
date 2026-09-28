@@ -8,9 +8,12 @@ Load path (``get_messages``) reads via ``sdk.conversation.context.get_context_fo
 and degrades gracefully on failure (returns ``[]``) — a history read outage
 shouldn't abort the agent turn.
 
-Save path (``save_messages``) iterates ``sdk.conversation.record_message``
-and surfaces SDK errors as :class:`SynapIntegrationError` because silent drops
-would hide ingestion problems from the caller.
+Save path (``save_messages``) reports each turn on the live gRPC stream when
+one is open and falls back to ``sdk.conversation.record_message`` when it is
+not. **Never both**: the server writes the conversation row from the stream
+event itself, so doing both stores the turn twice and extracts it twice. SDK
+errors on the REST fallback surface as :class:`SynapIntegrationError` because
+silent drops would hide ingestion problems from the caller.
 """
 
 from __future__ import annotations
@@ -21,6 +24,8 @@ from typing import Any, ClassVar, Optional, Sequence
 from agent_framework import HistoryProvider, Message
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import wrap_sdk_errors_async
+
+from synap_microsoft_agent.stream import report_message_turn
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +127,19 @@ class SynapHistoryProvider(HistoryProvider):
                     continue
                 text = getattr(message, "text", "") or ""
                 if not text.strip():
+                    continue
+                # Stream first, REST only as a fallback, never both. A
+                # `system` message has no stream event, so it takes the REST
+                # path it always did rather than being filed as something the
+                # assistant said.
+                if await report_message_turn(
+                    self.sdk,
+                    role=role,
+                    content=text,
+                    conversation_id=conv_id,
+                    user_id=self.user_id,
+                    customer_id=self.customer_id,
+                ):
                     continue
                 await self.sdk.conversation.record_message(
                     conversation_id=conv_id,

@@ -16,6 +16,9 @@ pip install maximem-synap-camel-ai camel-ai
 | `create_synap_tools` | `FunctionTool` | Explicit `search_memory` / `store_memory` the model can call |
 | `synap_st_system_message` | `ChatAgent(system_message=...)` | Fold Synap short-term context into the system prompt |
 
+`SynapAgentMemory` also reports the turn on Synap's live stream — see
+[Live stream reporting](#live-stream-reporting).
+
 ## Native memory
 
 `SynapAgentMemory` subclasses CAMEL's `ChatHistoryMemory` and **augments** it rather
@@ -72,6 +75,41 @@ agent = ChatAgent(
     memory=SynapAgentMemory(sdk, user_id="alice"),
 )
 ```
+
+## Live stream reporting
+
+CAMEL has no callback protocol, so `SynapAgentMemory.write_records` is the only
+place an integration can see what an agent is doing — and it sees all of it,
+because `ChatAgent.update_memory` is how CAMEL records every part of a turn.
+When `sdk.instance.listen()` has a stream open, the memory reports five events
+on it so Synap's anticipation agent can watch the turn unfold:
+
+| What CAMEL writes | What goes on the stream |
+|-------------------|-------------------------|
+| a `USER` record | the user turn |
+| an `ASSISTANT` record carrying `meta_dict["tool_calls"]` | one `tool_call` per entry, with the parsed arguments and the provider's `tool_call_id` |
+| a `FUNCTION` record | the `tool_result`, under that same id |
+| an `ASSISTANT` record with `reasoning_content` | the reasoning step, then the assistant turn |
+
+**Stream first, REST only as a fallback, never both.** The server persists the
+streamed turns itself and extracts memories from the conversation it builds, so
+the transcript ingest stands down for any turn the stream carried. With no
+stream open — which is every caller who has not opted in — nothing changes:
+the transcript is ingested exactly as before, and the async bridge is not even
+entered.
+
+```python
+sdk = MaximemSynapSDK(api_key="sk-...")
+await sdk.instance.listen()
+
+memory = SynapAgentMemory(
+    sdk, user_id="alice", customer_id="acme",
+    conversation_id="conv_abc",   # defaults to the document id
+)
+```
+
+Reporting never raises into `ChatAgent.step` and never changes what the agent
+answers.
 
 ## Error policy
 

@@ -6,6 +6,7 @@ Documented in __init__.py:
 - create_synap_node re-exported from synap_langchain.graph (backward compat)
 - synap_st_prompt re-exported from synap_langgraph.short_term
 - create_synap_st_node re-exported from synap_langgraph.short_term
+- SynapLangGraphCallbackHandler re-exported from synap_langgraph.callbacks
 - __all__ lists every export
 
 Coverage shape:
@@ -31,6 +32,7 @@ import pytest
 def test_all_public_exports_importable():
     from synap_langgraph import (
         SynapCheckpointSaver,
+        SynapLangGraphCallbackHandler,
         SynapStore,
         create_synap_node,
         create_synap_st_node,
@@ -38,6 +40,7 @@ def test_all_public_exports_importable():
     )
     assert SynapStore is not None
     assert SynapCheckpointSaver is not None
+    assert SynapLangGraphCallbackHandler is not None
     assert create_synap_node is not None
     assert create_synap_st_node is not None
     assert synap_st_prompt is not None
@@ -46,7 +49,14 @@ def test_all_public_exports_importable():
 def test_all_list_is_complete():
     import synap_langgraph as pkg
 
-    expected = {"SynapStore", "SynapCheckpointSaver", "create_synap_node", "create_synap_st_node", "synap_st_prompt"}
+    expected = {
+        "SynapStore",
+        "SynapCheckpointSaver",
+        "SynapLangGraphCallbackHandler",
+        "create_synap_node",
+        "create_synap_st_node",
+        "synap_st_prompt",
+    }
     assert set(pkg.__all__) == expected
 
 

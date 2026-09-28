@@ -25,6 +25,12 @@ from claude_agent_sdk.types import (
     UserPromptSubmitHookInput,
 )
 from maximem_synap import MaximemSynapSDK
+from synap_integrations_common import (
+    end_session,
+    report_tool_call,
+    report_tool_result,
+    report_turn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +73,23 @@ def create_synap_hooks(
             to Synap conversation history via
             ``sdk.conversation.record_message``. Disable if you want
             injection-only semantics.
+
+    Stream events
+    -------------
+    When the application has an active ``sdk.instance.listen()`` stream, these
+    hooks also report the run on it: the user's turn, every tool call, every
+    tool result, and the end of the session. That is what anticipation reads,
+    and it is what makes the NEXT turn's fetch a cache hit instead of a cold
+    retrieval.
+
+    Nothing here requires a stream. With no ``listen()`` running, every report
+    is a no-op and these hooks behave exactly as they did before.
+
+    ⚠ One event cannot come from a hook: ``assistant_message``, which is the
+    event anticipation actually acts on. The Claude Agent SDK's hook inputs do
+    not carry the final assistant text — ``StopHookInput`` has the session id
+    and nothing else. Call :func:`report_assistant_turn` yourself once your run
+    returns, or anticipation never fires for this agent.
     """
     if sdk is None:
         raise ValueError("create_synap_hooks requires a non-None sdk")
@@ -107,20 +130,35 @@ def create_synap_hooks(
             )
 
         if record_user_prompts and conv_id:
-            try:
-                await sdk.conversation.record_message(
-                    conversation_id=conv_id,
-                    role="user",
-                    content=str(prompt),
-                    user_id=user_id,
-                    customer_id=customer_id,
-                )
-            except Exception as exc:  # noqa: BLE001 — must not raise
-                logger.error(
-                    "synap_claude_agent.UserPromptSubmit: record_message failed "
-                    "conversation_id=%s error=%s",
-                    conv_id, exc, exc_info=True,
-                )
+            # Stream first, REST only as a fallback, NEVER both.
+            #
+            # ⚠ This used to do both, with a comment saying `record_message`
+            # was "the durable write" and the stream event was "what
+            # anticipation reads", so "the two are not interchangeable". That
+            # comment was wrong. The server persists `user_message` off the
+            # stream itself (`grpc/servicer.py:489`), so sending both stored
+            # the turn twice and put it through extraction twice. Found by an
+            # agent reading this file while working on a sibling package.
+            sent = await report_turn(
+                sdk, role="user", content=str(prompt),
+                conversation_id=str(conv_id), user_id=user_id,
+                customer_id=customer_id,
+            )
+            if not sent:
+                try:
+                    await sdk.conversation.record_message(
+                        conversation_id=conv_id,
+                        role="user",
+                        content=str(prompt),
+                        user_id=user_id,
+                        customer_id=customer_id,
+                    )
+                except Exception as exc:  # noqa: BLE001 — must not raise
+                    logger.error(
+                        "synap_claude_agent.UserPromptSubmit: record_message failed "
+                        "conversation_id=%s error=%s",
+                        conv_id, exc, exc_info=True,
+                    )
 
         if not formatted:
             return {}
@@ -132,9 +170,97 @@ def create_synap_hooks(
             }
         }
 
+    async def on_pre_tool_use(
+        input_data: Any,
+        tool_use_id: Optional[str],
+        context: HookContext,
+    ) -> dict[str, Any]:
+        """Report the tool the agent is about to run."""
+        conv_id = conversation_id or _field(input_data, "session_id", None) or ""
+        await report_tool_call(
+            sdk,
+            tool_name=str(_field(input_data, "tool_name", "") or ""),
+            tool_args=_field(input_data, "tool_input", None),
+            tool_call_id=str(
+                _field(input_data, "tool_use_id", None) or tool_use_id or ""
+            ),
+            conversation_id=str(conv_id),
+            user_id=user_id,
+            customer_id=customer_id,
+        )
+        return {}
+
+    async def on_post_tool_use(
+        input_data: Any,
+        tool_use_id: Optional[str],
+        context: HookContext,
+    ) -> dict[str, Any]:
+        """Report what the tool returned.
+
+        ⚠ A tool response is usually the caller's own customer data. It is an
+        anticipation hint and never becomes a long-term memory, but it does
+        leave their process. Whatever the framework hands us is what travels,
+        and this hook does not go looking for more.
+        """
+        conv_id = conversation_id or _field(input_data, "session_id", None) or ""
+        await report_tool_result(
+            sdk,
+            result=_field(input_data, "tool_response", None),
+            tool_name=str(_field(input_data, "tool_name", "") or ""),
+            tool_call_id=str(
+                _field(input_data, "tool_use_id", None) or tool_use_id or ""
+            ),
+            conversation_id=str(conv_id),
+            user_id=user_id,
+            customer_id=customer_id,
+        )
+        return {}
+
+    async def on_stop(
+        input_data: Any,
+        tool_use_id: Optional[str],
+        context: HookContext,
+    ) -> dict[str, Any]:
+        """Close the session so the turn is finalised now rather than on a timer."""
+        conv_id = conversation_id or _field(input_data, "session_id", None) or ""
+        await end_session(sdk, str(conv_id))
+        return {}
+
     return {
         "UserPromptSubmit": [HookMatcher(hooks=[on_user_prompt_submit])],
+        "PreToolUse": [HookMatcher(hooks=[on_pre_tool_use])],
+        "PostToolUse": [HookMatcher(hooks=[on_post_tool_use])],
+        "Stop": [HookMatcher(hooks=[on_stop])],
     }
+
+
+async def report_assistant_turn(
+    sdk: MaximemSynapSDK,
+    content: str,
+    *,
+    conversation_id: str,
+    user_id: str,
+    customer_id: str = "",
+) -> bool:
+    """Report the agent's reply. Call this once your run returns.
+
+    This cannot be a hook. The Claude Agent SDK's hook inputs do not carry the
+    final assistant text: ``StopHookInput`` has a session id and a flag, and
+    nothing else. So the one event anticipation actually acts on is the one
+    event the hooks cannot produce.
+
+    Without it, Synap sees the question and the tools and never learns what was
+    answered, and the next turn's fetch is a cold retrieval. One line at the
+    end of your run is the whole cost.
+
+    Returns whether it was sent: False when no ``listen()`` stream is running,
+    which is not an error.
+    """
+    return await report_turn(
+        sdk, role="assistant", content=content or "",
+        conversation_id=conversation_id, user_id=user_id,
+        customer_id=customer_id,
+    )
 
 
 def _field(input_data: Any, name: str, default: Any) -> Any:

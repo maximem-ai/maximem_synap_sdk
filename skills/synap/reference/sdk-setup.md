@@ -36,15 +36,41 @@ Python 3.11+ required.
 npm install @maximem/synap-js-sdk
 ```
 
-The JS SDK is a thin wrapper that spawns the Python SDK as a subprocess, so the host needs
-**Python 3.11+ on `PATH` in addition to Node 18+**. It does **not** run on Edge Runtime,
-Cloudflare Workers, Bun, Deno Deploy, or Node-only Lambda runtimes.
+The JS SDK is **pure TypeScript**: no Python, no subprocess, and zero runtime
+dependencies. It needs **Node 20+** and nothing else. gRPC is reached through a
+lazy `import()`, so importing the SDK on Edge Runtime, Cloudflare Workers, Bun
+or Deno is safe; only the live stream (`instance.listen()`) needs a Node
+runtime, because grpc-js is built on `node:http2`.
 
 ## Environment variables (the canonical pattern)
 
 ```bash
-export SYNAP_API_KEY="synap_..."
+export SYNAP_API_KEY="synap_..."          # required
+export SYNAP_INSTANCE_ID="inst_..."       # optional; resolved from the key
 ```
+
+### Pointing at something other than production
+
+Four more, and they are the difference between testing against staging and
+silently writing to production. Leave them unset for production.
+
+```bash
+export SYNAP_BASE_URL="https://<host>"    # the REST API
+export SYNAP_GRPC_HOST="<host>"           # the live stream
+export SYNAP_GRPC_PORT="443"
+export SYNAP_GRPC_USE_TLS="true"
+```
+
+⚠ **An API key belongs to exactly one instance, and an instance lives in one
+deployment.** So pointing at a different host also means using that
+deployment's key: a production key against a staging host authenticates to
+nothing. `verify_synap.py` now fails on that rather than printing green, but
+the quiet version of this mistake is writing real customer turns into the
+wrong environment, which nothing catches.
+
+Set all four together or none of them. `SYNAP_BASE_URL` alone leaves the
+stream pointed at production while reads go elsewhere, which looks like
+anticipation silently not working.
 
 With this set, the SDK auto-loads it — no constructor args needed. The instance is
 resolved from the API key during `initialize()`, so `SYNAP_INSTANCE_ID` is **not**
@@ -83,25 +109,37 @@ await sdk.initialize()
 **TypeScript:**
 
 ```typescript
-import { createClient } from "@maximem/synap-js-sdk";
+import { SynapClient } from "@maximem/synap-js-sdk";
 
-const sdk = createClient({ apiKey: process.env.SYNAP_API_KEY! });
+const sdk = new SynapClient({ apiKey: process.env.SYNAP_API_KEY! });
 await sdk.init();             // note: init(), not initialize()
 // ... use sdk ...
 await sdk.shutdown();
 ```
 
-The JS API is flat and camelCase, and is **not** identical to Python: there is no
-`MaximemSynapSDK` class and no `sdk.memories` / `sdk.conversation` namespaces. Write with
-`sdk.addMemory({ userId, customerId, messages, mode })`; read with
+The class is `SynapClient`, imported from `@maximem/synap-js-sdk`. There is no
+`createClient` factory and no `MaximemSynapSDK` class.
+
+**Two surfaces, both live.** The namespaced one mirrors Python method for
+method: `sdk.conversation`, `sdk.memories`, `sdk.user`, `sdk.customer`,
+`sdk.client`, `sdk.instance`, `sdk.credits` and `sdk.cache` all exist. Prefer
+it. The flat camelCase one is deprecated but supported:
+`sdk.addMemory({ userId, customerId, messages, mode })`,
 `sdk.fetchUserContext({ userId, searchQuery, mode })`,
-`sdk.fetchCustomerContext({ customerId, ... })`, `sdk.fetchClientContext({ ... })`, or
-`sdk.getContextForPrompt({ conversationId })`. `customerId` and `fetchCustomerContext` are
-B2B only: on a B2C instance (`user_context_isolation = "equals_customer"`) send `userId`
-alone, since a `customerId` comes back as HTTP 400. Full example:
+`sdk.fetchCustomerContext({ customerId, ... })`, `sdk.fetchClientContext({ ... })`,
+`sdk.getContextForPrompt({ conversationId })`. They return different shapes on
+purpose: namespaced gives raw snake_case, camelCase gives a normalised object.
+
+`customerId` and `fetchCustomerContext` are B2B only: on a B2C instance
+(`user_context_isolation = "equals_customer"`) send `userId` alone, since a
+`customerId` comes back as HTTP 400. Full example:
 `examples/typescript-minimal.ts`.
 
-`init()` validates the API key, starts the Python bridge, opens the connection, and sets up the local cache.
+`init()` validates the API key, opens the connection and sets up the local cache.
+
+**It is pure TypeScript.** No Python, no subprocess, and zero runtime
+dependencies. Node 20+. gRPC is reached through a lazy `import()`, so importing
+the SDK on Edge or in a Worker is safe; only the live stream needs Node.
 
 **Calling any SDK method before `await sdk.initialize()` raises `AuthenticationError`.**
 
@@ -259,4 +297,4 @@ For testing, point `storage_path` at a tempdir or disable caching with `cache_ba
 - Error handling: `https://docs.maximem.ai/sdk/error-handling`
 
 ---
-*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.3.0 (JS) — verified 2026-06-20. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
