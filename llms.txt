@@ -1,0 +1,16 @@
+# Maximem Synap
+
+> The memory layer for production AI agents. Open-source Python and JS SDKs, 24 framework integrations and an MCP server; the memory engine runs as a managed service.
+
+## Docs
+- [Quickstart](https://github.com/maximem-ai/maximem_synap_sdk#60-second-quickstart): install and store a first memory in 60 seconds
+- [Documentation](https://docs.maximem.ai)
+- [All integrations](https://github.com/maximem-ai/maximem_synap_sdk#all-integrations): one package per framework
+- [MCP server](https://github.com/maximem-ai/maximem_synap_sdk/tree/main/packages/mcps/synap-mcp-server)
+- [Benchmark results](https://github.com/maximem-ai/eval_benchmark_runs_output) and [evaluation harness](https://github.com/maximem-ai/memory_and_context_eval_harness)
+- [Pricing](https://www.maximem.ai/synap/pricing): free Trial plan, 12,500 credits/month, no card required
+
+## For agents
+- Install: `pip install maximem-synap` or `npm install @maximem/synap-js-sdk`
+- API key: https://www.maximem.ai/synap
+- Wiring guide: skills/synap/SKILL.md in this repository

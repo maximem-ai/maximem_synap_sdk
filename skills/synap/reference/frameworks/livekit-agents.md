@@ -1,6 +1,6 @@
 # LiveKit Agents (voice)
 
-`pip install synap-livekit-agents`
+`pip install maximem-synap-livekit-agents`
 
 For LiveKit's voice agent framework. Memory in voice contexts has special needs — preload at session start (no time for tool calls mid-utterance) and record turns as they commit.
 
@@ -111,4 +111,4 @@ For voice agents the right pattern is: **preload + record + (optionally) tools**
 `https://docs.maximem.ai/integrations/livekit-agents`
 
 ---
-*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.3.0 (JS) — verified 2026-06-20. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*

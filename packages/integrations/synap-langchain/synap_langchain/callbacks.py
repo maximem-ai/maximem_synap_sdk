@@ -35,6 +35,13 @@ from langchain_core.outputs import Generation, LLMResult
 
 from maximem_synap import MaximemSynapSDK
 
+from synap_integrations_common.stream_events import (
+    report_reasoning,
+    report_tool_call,
+    report_tool_result,
+    report_turn,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -79,6 +86,23 @@ def _extract_text(generation: Generation) -> str:
     return ""
 
 
+def _tool_output(output: Any) -> Any:
+    """What the tool returned, in a shape the SDK can serialise.
+
+    ⚠ The SDK does `json.dumps` on this, and a LangChain `ToolMessage` is not
+    JSON serialisable. LangGraph's `ToolNode` hands `on_tool_end` exactly
+    that, so the dumps raised, `stream_events._send` swallowed it by design,
+    and **every tool result in a LangGraph run was silently never reported**.
+    Nothing failed, nothing logged above debug, and the anticipation agent
+    just never learned what any tool returned.
+
+    Unwrap to `.content` when it is there, and leave anything already
+    serialisable alone.
+    """
+    content = getattr(output, "content", None)
+    return output if content is None else content
+
+
 class SynapCallbackHandler(AsyncCallbackHandler):
     """Auto-records all conversation turns to Synap.
 
@@ -118,8 +142,34 @@ class SynapCallbackHandler(AsyncCallbackHandler):
         self.conversation_id = conversation_id
         self.user_id = user_id
         self.customer_id = customer_id
+        # ⚠ Which user turns have already gone out.
+        #
+        # `on_chat_model_start` fires once per MODEL CALL, not once per turn.
+        # A tool loop calls the model again after every tool result with the
+        # same human message still in the list, so a three-tool turn reported
+        # the user's question four times and Synap extracted it four times.
+        # Invisible in a single-shot chain, which is why it survived.
+        #
+        # Keyed on the message id langchain stamps, falling back to the text
+        # for graphs that do not set one. Per instance, not per class: two
+        # conversations must not silence each other.
+        self._reported_user_turns: set = set()
 
     async def _record(self, role: str, content: str) -> None:
+        # Stream first, and fall back to REST only if there was no stream.
+        #
+        # ⚠ Never both. The server persists `user_message` and
+        # `assistant_message` from the stream itself
+        # (`grpc/servicer.py`), so a `record_message` on top of a delivered
+        # stream event writes the same turn twice and extracts it twice.
+        # `report_turn` returns whether it actually went out, which is what
+        # makes this decidable rather than guessed.
+        if await report_turn(
+            self.sdk, role=role, content=content,
+            conversation_id=self.conversation_id,
+            user_id=self.user_id, customer_id=self.customer_id,
+        ):
+            return
         try:
             await self.sdk.conversation.record_message(
                 conversation_id=self.conversation_id,
@@ -155,7 +205,12 @@ class SynapCallbackHandler(AsyncCallbackHandler):
         last_batch = messages[-1]
         for msg in reversed(last_batch):
             if msg.type == "human":
-                await self._record("user", str(msg.content))
+                text = str(msg.content)
+                key = getattr(msg, "id", None) or text
+                if key in self._reported_user_turns:
+                    break  # same turn, later lap of the same tool loop
+                self._reported_user_turns.add(key)
+                await self._record("user", text)
                 break
 
     async def on_llm_end(
@@ -173,3 +228,84 @@ class SynapCallbackHandler(AsyncCallbackHandler):
         text = _extract_text(response.generations[0][0])
         if text:
             await self._record("assistant", text)
+
+    # ─── the three events this handler never reported ───────────────────
+    #
+    # It recorded the user turn and the assistant turn and stopped there, so
+    # anticipation saw a conversation with questions and answers and nothing
+    # in between: no tool calls, no results, no reasoning. Those are the
+    # events that say what the agent is ABOUT to need, which is the whole
+    # point of anticipating.
+    #
+    # All three are silent when no stream is running, and none of them can
+    # raise into the chain: `stream_events` swallows everything by design,
+    # and a callback that throws aborts the whole LangChain run.
+
+    async def on_tool_start(
+        self,
+        serialized: Dict[str, Any],
+        input_str: str,
+        *,
+        run_id: UUID,
+        parent_run_id: Optional[UUID] = None,
+        inputs: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Report a tool the agent is about to call.
+
+        `run_id` is LangChain's own id for this tool invocation and it is the
+        same value `on_tool_end` receives, so it ties the call to its result.
+        """
+        await report_tool_call(
+            self.sdk,
+            tool_name=str((serialized or {}).get("name") or "tool"),
+            # `inputs` is the PARSED dict; `input_str` is its Python repr.
+            # Sending the repr gave the anticipation agent
+            # `{"input": "{'pnr': 'QX41RT'}"}` to reason over instead of the
+            # arguments themselves.
+            tool_args=inputs if isinstance(inputs, dict) and inputs
+            else ({"input": input_str} if input_str else {}),
+            tool_call_id=str(run_id),
+            conversation_id=self.conversation_id,
+            user_id=self.user_id, customer_id=self.customer_id,
+        )
+
+    async def on_tool_end(
+        self,
+        output: Any,
+        *,
+        run_id: UUID,
+        parent_run_id: Optional[UUID] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Report what the tool returned, tied to the call by `run_id`."""
+        await report_tool_result(
+            self.sdk,
+            result=_tool_output(output),
+            tool_call_id=str(run_id),
+            conversation_id=self.conversation_id,
+            user_id=self.user_id, customer_id=self.customer_id,
+        )
+
+    async def on_agent_action(
+        self,
+        action: Any,
+        *,
+        run_id: UUID,
+        parent_run_id: Optional[UUID] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Report the agent's reasoning for choosing a tool.
+
+        `AgentAction.log` is where LangChain puts the model's own words about
+        why it picked this action, which is the closest thing the framework
+        exposes to a reasoning step.
+        """
+        text = getattr(action, "log", None)
+        if not isinstance(text, str) or not text.strip():
+            return
+        await report_reasoning(
+            self.sdk, content=text.strip(),
+            conversation_id=self.conversation_id,
+            user_id=self.user_id, customer_id=self.customer_id,
+        )

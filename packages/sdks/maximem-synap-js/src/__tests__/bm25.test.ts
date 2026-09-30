@@ -5,6 +5,12 @@ import { fileURLToPath } from 'node:url';
 import { BM25, tokenize, stem } from '../cache/bm25.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+// CONTRACT/ exists only in the monorepo; the public mirror (maximem_synap_sdk)
+// does not ship it. Skip there, but inside the monorepo a missing corpus fails
+// loudly instead of quietly switching the parity check off.
+// skipIf alone is not enough: vitest still runs a skipped suite's body to
+// collect it, so each guarded body also returns before reading the corpus.
+const inPublicMirror = !existsSync(path.resolve(here, '../../../CONTRACT'));
 const corpusPath = path.resolve(here, '../../../CONTRACT/conformance/bm25.json');
 
 describe('BM25 + tokenizer', () => {
@@ -35,8 +41,8 @@ describe('BM25 + tokenizer', () => {
   // This is the check that matters. Both SDKs implement BM25 independently, so
   // the shared contract only guarantees identical *parameters*. Identical
   // *arithmetic* is guaranteed here or not at all.
-  describe('matches the Python implementation exactly', () => {
-    if (!existsSync(corpusPath)) return;
+  describe.skipIf(inPublicMirror)('matches the Python implementation exactly', () => {
+    if (inPublicMirror) return;
     const golden = JSON.parse(readFileSync(corpusPath, 'utf8')) as {
       texts: string[];
       tokens: string[][];

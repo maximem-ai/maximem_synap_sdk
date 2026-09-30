@@ -8,6 +8,12 @@ import { InvalidInputError } from '../errors.js';
 import type { Json, RawContext } from '../context/types.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+// CONTRACT/ exists only in the monorepo; the public mirror (maximem_synap_sdk)
+// does not ship it. Skip there, but inside the monorepo a missing corpus fails
+// loudly instead of quietly switching the parity check off.
+// skipIf alone is not enough: vitest still runs a skipped suite's body to
+// collect it, so each guarded body also returns before reading the corpus.
+const inPublicMirror = !existsSync(path.resolve(here, '../../../CONTRACT'));
 const corpusPath = path.resolve(here, '../../../CONTRACT/conformance/unified_and_tool.json');
 
 interface Corpus {
@@ -33,8 +39,8 @@ interface Corpus {
   }>;
 }
 
-describe('unified fetch and as_tool parity with Python', () => {
-  if (!existsSync(corpusPath)) return;
+describe.skipIf(inPublicMirror)('unified fetch and as_tool parity with Python', () => {
+  if (inPublicMirror) return;
   const corpus = JSON.parse(readFileSync(corpusPath, 'utf8')) as Corpus;
 
   describe('merge + format_for_prompt', () => {

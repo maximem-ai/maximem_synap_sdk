@@ -5,6 +5,12 @@ import { fileURLToPath } from 'node:url';
 import { CONTRACT, RECALL_PATTERNS, THRESHOLDS, isRecallQuery, STOP_WORDS, SUFFIXES } from '../behavior/contract.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+// CONTRACT/ exists only in the monorepo; the public mirror (maximem_synap_sdk)
+// does not ship it. Skip there, but inside the monorepo a missing corpus fails
+// loudly instead of quietly switching the parity check off.
+// skipIf alone is not enough: vitest still runs a skipped suite's body to
+// collect it, so each guarded body also returns before reading the corpus.
+const inPublicMirror = !existsSync(path.resolve(here, '../../../CONTRACT'));
 const vendored = path.resolve(here, '../behavior/anticipation.json');
 const canonical = path.resolve(here, '../../../CONTRACT/behavior/anticipation.json');
 const corpusPath = path.resolve(here, '../../../CONTRACT/conformance/recall_queries.json');
@@ -44,8 +50,8 @@ describe('behavior contract', () => {
 
   // The golden corpus is the actual cross-language guarantee: Python runs the
   // identical file and must produce the identical verdicts.
-  describe('recall-bypass conformance corpus', () => {
-    if (!existsSync(corpusPath)) return;
+  describe.skipIf(inPublicMirror)('recall-bypass conformance corpus', () => {
+    if (inPublicMirror) return;
     const cases = JSON.parse(readFileSync(corpusPath, 'utf8')).cases as {
       query: string; expected: boolean; why: string;
     }[];

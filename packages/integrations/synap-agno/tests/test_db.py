@@ -930,6 +930,11 @@ class TestPublicSurface:
         assert "synap_st_instructions" in synap_agno.__all__
 
     def test_no_extra_public_exports(self):
-        """__all__ should contain exactly the two documented exports."""
+        """__all__ should contain exactly the four documented exports."""
         import synap_agno
-        assert set(synap_agno.__all__) == {"SynapDb", "synap_st_instructions"}
+        assert set(synap_agno.__all__) == {
+            "SynapDb",
+            "synap_st_instructions",
+            "create_synap_hooks",
+            "create_synap_async_hooks",
+        }

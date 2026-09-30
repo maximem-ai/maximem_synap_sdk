@@ -21,6 +21,7 @@ EXPECTED_EXPORTS = {
     "SynapSearchTool",
     "SynapShortTermMiddleware",
     "SynapStoreTool",
+    "SynapStreamMiddleware",
     "compose_system_prompt",
     "fetch_st_block",
     "synap_st_instructions",
@@ -59,7 +60,7 @@ def test_module_docstring_shows_the_composite_mount():
 @pytest.mark.parametrize(
     "name",
     ["SynapBackend", "SynapMemoryMiddleware", "SynapShortTermMiddleware",
-     "SynapSearchTool", "SynapStoreTool"],
+     "SynapSearchTool", "SynapStoreTool", "SynapStreamMiddleware"],
 )
 def test_public_classes_are_documented(name):
     obj = getattr(synap_deepagents, name)

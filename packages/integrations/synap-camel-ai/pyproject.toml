@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maximem-synap-camel-ai"
-version = "0.1.0"
+version = "0.1.1"
 description = "Synap memory integration for CAMEL-AI — native AgentMemory backed by Synap"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,8 +15,8 @@ authors = [
 keywords = ["synap", "memory", "camel-ai", "camel", "ai", "agents"]
 
 dependencies = [
-    "maximem-synap>=0.2.0",
-    "maximem-synap-integrations-common>=0.1.0",
+    "maximem-synap>=0.5.3",
+    "maximem-synap-integrations-common>=0.2.1",
     "camel-ai>=0.2.90",
     # Same load-bearing <2 bound as synap-mcp-server (#954): mcp 2.0 removed
     # `mcp.server.fastmcp`, and camel-ai's own `camel/toolkits/base.py` does

@@ -5,6 +5,12 @@ import { fileURLToPath } from 'node:url';
 import { SynapClient } from '../client.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+// CONTRACT/ exists only in the monorepo; the public mirror (maximem_synap_sdk)
+// does not ship it. Skip there, but inside the monorepo a missing corpus fails
+// loudly instead of quietly switching the parity check off.
+// skipIf alone is not enough: vitest still runs a skipped suite's body to
+// collect it, so each guarded body also returns before reading the corpus.
+const inPublicMirror = !existsSync(path.resolve(here, '../../../CONTRACT'));
 const surfacePath = path.resolve(here, '../../../CONTRACT/conformance/python_surface.json');
 
 /**
@@ -74,8 +80,8 @@ function resolveNamespace(client: SynapClient, dotted: string): Record<string, u
   return cur === null || typeof cur !== 'object' ? undefined : (cur as Record<string, unknown>);
 }
 
-describe('surface parity with the Python SDK', () => {
-  if (!existsSync(surfacePath)) return;
+describe.skipIf(inPublicMirror)('surface parity with the Python SDK', () => {
+  if (inPublicMirror) return;
   const golden = JSON.parse(readFileSync(surfacePath, 'utf8')) as {
     python_version: string;
     namespaces: Record<string, string[]>;

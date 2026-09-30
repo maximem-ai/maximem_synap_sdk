@@ -1,6 +1,6 @@
 # NVIDIA NeMo Agent Toolkit (NAT)
 
-`pip install synap-nemo-agent-toolkit`
+`pip install maximem-synap-nemo-agent-toolkit`
 
 | Export | Purpose |
 | --- | --- |
@@ -87,4 +87,4 @@ editor = synap_memory_client(
 `https://docs.maximem.ai/integrations/nemo-agent-toolkit`
 
 ---
-*Accurate as of `maximem-synap` 0.2.6 (Python) · `@maximem/synap-js-sdk` 0.3.0 (JS) — verified 2026-06-20. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*

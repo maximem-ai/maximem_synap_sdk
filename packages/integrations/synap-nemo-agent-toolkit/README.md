@@ -68,6 +68,51 @@ memory:
 NAT's plugin loader picks up `synap_memory` via the `nat.components`
 entry-point registered in this package's `pyproject.toml`.
 
+## Report the whole turn to the anticipation agent
+
+`_type: synap_stream` is a NAT telemetry exporter. Switch it on and every
+event of every run is reported on Synap's live gRPC stream, so the
+anticipation agent can see what the agent is doing while it does it:
+
+```yaml
+general:
+  telemetry:
+    tracing:
+      synap:
+        _type: synap_stream
+        customer_id: "acme"        # B2B instances only
+```
+
+| NAT event        | Synap event                    |
+|------------------|--------------------------------|
+| `WORKFLOW_START` | user turn                      |
+| `WORKFLOW_END`   | assistant turn                 |
+| `TOOL_START`     | tool call                      |
+| `TOOL_END`       | tool result (same call id)     |
+| `LLM_END`        | reasoning, except the last one |
+
+The turn is the workflow run, not the model call, so a three-tool turn is
+still one user message and one assistant message. The last LLM output of a
+run is the answer and goes out as the assistant turn, so it is never also
+reported as a thought.
+
+Nothing is written over REST. The server persists the turn from the stream
+itself, so reporting it and also calling `record_message` would store and
+extract it twice. To write turns into long-term memory, use
+`SynapMemoryEditor` above.
+
+To report from your own code instead of from YAML, construct the exporter
+with an SDK you have already called `listen()` on:
+
+```python
+from synap_nemo_agent_toolkit import SynapStreamExporter
+
+await sdk.instance.listen()
+exporter = SynapStreamExporter(sdk=sdk, user_id="alice", customer_id="acme")
+async with exporter.start():
+    ...  # run the workflow
+```
+
 ## Error policy
 
 | Operation       | Synap failure          | Why                                       |
