@@ -37,16 +37,39 @@ class NetworkTimeoutError(SynapTransientError):
 
 
 class RateLimitError(SynapTransientError):
-    """Rate limit exceeded. Includes retry_after if available."""
+    """Rate limit exceeded. Includes retry_after if available.
+
+    Also carries the two credit stops the server reports as HTTP 429 (and
+    gRPC ``RESOURCE_EXHAUSTED``), because both recover with time or a plan
+    change rather than with a retry of this request:
+
+    - ``reason="trial_limit_reached"``: the Trial cap is spent. ``upgrade_url``
+      points at the upgrade page; the next cycle also clears it.
+    - ``reason="subscription_inactive"``: a paid plan whose subscription is
+      past due, unpaid or cancelled. ``manage_url`` points at Plan & billing.
+
+    Attributes:
+        retry_after_seconds: Server's Retry-After, when it sent one.
+        reason: Machine-readable cause, when the stop was a credit stop.
+        upgrade_url: Where a Trial customer upgrades.
+        manage_url: Where billing is managed.
+    """
 
     def __init__(
         self,
         message: str,
         retry_after_seconds: Optional[int] = None,
         correlation_id: Optional[str] = None,
+        *,
+        reason: Optional[str] = None,
+        upgrade_url: Optional[str] = None,
+        manage_url: Optional[str] = None,
     ):
         super().__init__(message, correlation_id=correlation_id)
         self.retry_after_seconds = retry_after_seconds
+        self.reason = reason
+        self.upgrade_url = upgrade_url
+        self.manage_url = manage_url
 
 
 class InsufficientCreditsError(SynapPermanentError):
@@ -61,6 +84,12 @@ class InsufficientCreditsError(SynapPermanentError):
         minimum_required_credits: What the endpoint's minimum charge was.
         recovery_url: Where the balance can be viewed (defaults to /v1/credits/balance).
         redeem_url: Where the customer can enter a redeem code.
+        reason: Machine-readable cause. ``"overages_disabled"`` means the plan
+            is paid and the balance is spent, but the account has not allowed
+            usage past zero, so the work stops until someone allows overages
+            or adds credits. ``None`` when an older server did not send one.
+        manage_url: Where that setting and billing are managed, when the
+            server sent one.
     """
 
     def __init__(
@@ -71,12 +100,17 @@ class InsufficientCreditsError(SynapPermanentError):
         recovery_url: Optional[str] = None,
         redeem_url: Optional[str] = None,
         correlation_id: Optional[str] = None,
+        *,
+        reason: Optional[str] = None,
+        manage_url: Optional[str] = None,
     ):
         super().__init__(message, correlation_id=correlation_id)
         self.balance_credits = balance_credits
         self.minimum_required_credits = minimum_required_credits
         self.recovery_url = recovery_url
         self.redeem_url = redeem_url
+        self.reason = reason
+        self.manage_url = manage_url
 
 
 class ServiceUnavailableError(SynapTransientError):

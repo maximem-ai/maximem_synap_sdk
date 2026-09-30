@@ -1,0 +1,21 @@
+name: New framework integration
+description: Ask for Synap support in an agent framework we don't cover yet.
+labels: ["integration-request"]
+body:
+  - type: input
+    id: framework
+    attributes:
+      label: Framework name and link
+    validations:
+      required: true
+  - type: textarea
+    id: usecase
+    attributes:
+      label: How would you use Synap with it?
+    validations:
+      required: true
+  - type: textarea
+    id: surface
+    attributes:
+      label: Where should memory plug in?
+      description: e.g. a memory class, a callback, a graph node, a plugin. Link to the framework's docs if you can.

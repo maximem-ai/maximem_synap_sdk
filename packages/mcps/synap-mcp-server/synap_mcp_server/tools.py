@@ -42,6 +42,7 @@ from .client import (
 )
 from .config import settings
 from .context import MissingTokenError
+from .stream import report_exchange
 
 # Ingestion is async (long-range extraction). Terminal states reported by /status.
 _TERMINAL_STATUSES = {
@@ -281,6 +282,23 @@ def register(mcp) -> None:
             return _describe_api_error(exc, "saving to memory")
 
         ingestion_id = res.get("ingestion_id")
+
+        # Also report the exchange as a conversation turn, so the anticipation
+        # agent sees the turn and not only the memory that comes out of it.
+        # Off unless the deployment switched it on, best effort, and it cannot
+        # change what this tool answers: the write above has already
+        # succeeded and a telemetry miss is not the agent's problem. See
+        # stream.py for why this is the only one of the five events an MCP
+        # server can report at all.
+        await report_exchange(
+            user_message=user_message,
+            assistant_message=assistant_message,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            customer_id=customer_id,
+            ingestion_id=ingestion_id,
+        )
+
         scope_note = f"scope: {_SCOPE_LABELS[scope_for(user_id, customer_id)]}"
         if wait_for_processing and ingestion_id:
             try:

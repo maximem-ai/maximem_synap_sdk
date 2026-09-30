@@ -448,3 +448,250 @@ async def test_aget_all_delegates_to_aget(memory, mock_sdk):
     mock_sdk.fetch.return_value = MagicMock(formatted_context=None)
     result = await memory.aget_all()
     assert isinstance(result, list)
+
+
+# ---------------------------------------------------------------------------
+# The live stream
+#
+# aput is the one place every message a LlamaIndex agent produces passes
+# through: FunctionAgent hands its whole scratchpad to memory.aput_messages
+# when a step finishes. It used to forward the user turn and the assistant
+# turn and drop everything else, so anticipation saw a conversation of
+# questions and answers with nothing in between: no reasoning, no tool calls,
+# no tool results.
+#
+# The rule these pin is "stream first, REST only as a fallback, never both".
+# The server persists `user_message` and `assistant_message` from the stream
+# itself, so a `record_message` on top of a delivered stream event writes the
+# same turn twice and extracts it twice.
+# ---------------------------------------------------------------------------
+
+try:
+    from llama_index.core.base.llms.types import ThinkingBlock, ToolCallBlock
+    _HAS_BLOCKS = True
+except ImportError:  # pragma: no cover: llama-index-core predates blocks
+    _HAS_BLOCKS = False
+
+needs_blocks = pytest.mark.skipif(
+    not _HAS_BLOCKS,
+    reason="this llama-index-core predates ThinkingBlock/ToolCallBlock",
+)
+
+
+def _streaming_sdk(is_listening: bool):
+    sdk = MagicMock()
+    sdk.instance.is_listening = is_listening
+    sdk.instance.send_message = AsyncMock()
+    sdk.instance.record_thinking = AsyncMock()
+    sdk.instance.record_tool_call = AsyncMock()
+    sdk.instance.record_tool_result = AsyncMock()
+    sdk.conversation.record_message = AsyncMock()
+    return sdk
+
+
+def _memory_for(sdk):
+    return SynapChatMemory(
+        sdk=sdk, conversation_id="conv-1", user_id="u1", customer_id="c1",
+    )
+
+
+def _tool_message(tool_call_id="call_1", result="it ships tomorrow"):
+    return ChatMessage(
+        role=MessageRole.TOOL,
+        content=result,
+        additional_kwargs={"tool_call_id": tool_call_id, "name": "lookup_order"},
+    )
+
+
+class TestStreamFirstRestFallback:
+    @pytest.mark.asyncio
+    async def test_a_turn_goes_out_on_the_stream_when_one_is_open(self):
+        sdk = _streaming_sdk(True)
+        await _memory_for(sdk).aput(
+            ChatMessage(role=MessageRole.USER, content="where is my order")
+        )
+        sdk.instance.send_message.assert_awaited_once()
+        kw = sdk.instance.send_message.await_args.kwargs
+        assert kw["event_type"] == "user_message"
+        assert kw["content"] == "where is my order"
+
+    @pytest.mark.asyncio
+    async def test_and_is_NOT_also_written_over_rest(self):
+        """The double-write this rule exists to prevent."""
+        sdk = _streaming_sdk(True)
+        await _memory_for(sdk).aput(
+            ChatMessage(role=MessageRole.USER, content="where is my order")
+        )
+        sdk.conversation.record_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_with_no_stream_it_falls_back_to_rest(self):
+        sdk = _streaming_sdk(False)
+        await _memory_for(sdk).aput(
+            ChatMessage(role=MessageRole.ASSISTANT, content="it ships tomorrow")
+        )
+        sdk.conversation.record_message.assert_awaited_once()
+        sdk.instance.send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_assistant_turn_is_the_anticipation_moment(self):
+        sdk = _streaming_sdk(True)
+        await _memory_for(sdk).aput(
+            ChatMessage(role=MessageRole.ASSISTANT, content="it ships tomorrow")
+        )
+        kw = sdk.instance.send_message.await_args.kwargs
+        assert kw["event_type"] == "assistant_message"
+        assert kw["role"] == "assistant"
+
+
+class TestTheThreeEventsItNeverReported:
+    @needs_blocks
+    @pytest.mark.asyncio
+    async def test_a_tool_call_is_reported(self):
+        sdk = _streaming_sdk(True)
+        await _memory_for(sdk).aput(ChatMessage(
+            role=MessageRole.ASSISTANT,
+            blocks=[ToolCallBlock(
+                tool_call_id="call_1", tool_name="lookup_order",
+                tool_kwargs={"pnr": "QX41RT"},
+            )],
+        ))
+        sdk.instance.record_tool_call.assert_awaited_once()
+        args, kw = sdk.instance.record_tool_call.await_args
+        assert args[0] == "lookup_order"
+        assert args[1] == {"pnr": "QX41RT"}
+        assert kw["tool_call_id"] == "call_1"
+
+    @pytest.mark.asyncio
+    async def test_a_tool_result_is_reported(self):
+        sdk = _streaming_sdk(True)
+        await _memory_for(sdk).aput(_tool_message(result="shipped"))
+        sdk.instance.record_tool_result.assert_awaited_once()
+        assert sdk.instance.record_tool_result.await_args.args[0] == "shipped"
+
+    @needs_blocks
+    @pytest.mark.asyncio
+    async def test_the_call_and_its_result_share_an_id(self):
+        """Without this the anticipation agent sees a call and a result and
+        cannot tell they are the same tool invocation."""
+        sdk = _streaming_sdk(True)
+        memory = _memory_for(sdk)
+        await memory.aput(ChatMessage(
+            role=MessageRole.ASSISTANT,
+            blocks=[ToolCallBlock(
+                tool_call_id="call_7", tool_name="lookup_order", tool_kwargs={},
+            )],
+        ))
+        await memory.aput(_tool_message(tool_call_id="call_7"))
+        assert (sdk.instance.record_tool_call.await_args.kwargs["tool_call_id"]
+                == sdk.instance.record_tool_result.await_args.kwargs["tool_call_id"]
+                == "call_7")
+
+    @needs_blocks
+    @pytest.mark.asyncio
+    async def test_reasoning_is_reported_from_a_thinking_block(self):
+        sdk = _streaming_sdk(True)
+        await _memory_for(sdk).aput(ChatMessage(
+            role=MessageRole.ASSISTANT,
+            blocks=[ThinkingBlock(content="I should look up the booking first")],
+        ))
+        sdk.instance.record_thinking.assert_awaited_once()
+        assert (sdk.instance.record_thinking.await_args.args[0]
+                == "I should look up the booking first")
+
+    @needs_blocks
+    @pytest.mark.asyncio
+    async def test_an_empty_thinking_block_reports_nothing(self):
+        sdk = _streaming_sdk(True)
+        await _memory_for(sdk).aput(ChatMessage(
+            role=MessageRole.ASSISTANT, blocks=[ThinkingBlock(content="   ")],
+        ))
+        sdk.instance.record_thinking.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_tool_message_is_never_written_as_a_turn(self):
+        """A tool result is somebody's customer data, not something a person
+        said. It goes out as a tool_result and is never recorded as memory."""
+        sdk = _streaming_sdk(True)
+        await _memory_for(sdk).aput(_tool_message())
+        sdk.instance.send_message.assert_not_awaited()
+        sdk.conversation.record_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_tool_message_is_still_kept_in_local_history(self):
+        sdk = _streaming_sdk(True)
+        memory = _memory_for(sdk)
+        await memory.aput(_tool_message())
+        assert len(memory._messages) == 1
+
+
+@needs_blocks
+class TestTheToolCallOnlyTurnWasRecordedAsTheStringNone:
+    """`ChatMessage.content` is None for a message built only from non-text
+    blocks, which is every step of a function-calling agent. `str()` on that
+    turned into the four-character string "None", and it was recorded as an
+    assistant turn and extracted as a memory."""
+
+    def _tool_call_only(self):
+        return ChatMessage(
+            role=MessageRole.ASSISTANT,
+            blocks=[ToolCallBlock(
+                tool_call_id="call_1", tool_name="lookup_order", tool_kwargs={},
+            )],
+        )
+
+    @pytest.mark.asyncio
+    async def test_it_writes_no_turn_over_rest(self):
+        sdk = _streaming_sdk(False)
+        await _memory_for(sdk).aput(self._tool_call_only())
+        sdk.conversation.record_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_it_sends_no_turn_on_the_stream_either(self):
+        sdk = _streaming_sdk(True)
+        await _memory_for(sdk).aput(self._tool_call_only())
+        sdk.instance.send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_but_the_tool_call_is_still_reported(self):
+        sdk = _streaming_sdk(True)
+        await _memory_for(sdk).aput(self._tool_call_only())
+        sdk.instance.record_tool_call.assert_awaited_once()
+
+
+class TestNoneOfItBreaksTheAgentRun:
+    """A telemetry call that throws inside memory.aput takes down the agent
+    step, so every one of these must be silent on failure."""
+
+    @pytest.mark.asyncio
+    async def test_a_tool_result_on_a_dead_sdk_does_not_raise(self):
+        sdk = _streaming_sdk(True)
+        sdk.instance.record_tool_result = AsyncMock(side_effect=RuntimeError("boom"))
+        await _memory_for(sdk).aput(_tool_message())
+
+    @needs_blocks
+    @pytest.mark.asyncio
+    async def test_reasoning_on_a_dead_sdk_does_not_raise(self):
+        sdk = _streaming_sdk(True)
+        sdk.instance.record_thinking = AsyncMock(side_effect=RuntimeError("boom"))
+        await _memory_for(sdk).aput(ChatMessage(
+            role=MessageRole.ASSISTANT, blocks=[ThinkingBlock(content="thinking")],
+        ))
+
+    @pytest.mark.asyncio
+    async def test_an_sdk_with_no_instance_namespace_does_not_raise(self):
+        """An older SDK, or a test double. Every stream call must no-op."""
+        sdk = MagicMock(spec=["conversation"])
+        memory = SynapChatMemory(sdk=sdk, conversation_id="c", user_id="u")
+        await memory.aput(_tool_message())
+
+    @pytest.mark.asyncio
+    async def test_a_turn_that_the_stream_dropped_still_reaches_rest(self):
+        """`report_turn` answers whether the event actually went out. A
+        stream that is open but fails is the same as no stream at all."""
+        sdk = _streaming_sdk(True)
+        sdk.instance.send_message = AsyncMock(side_effect=RuntimeError("stream down"))
+        await _memory_for(sdk).aput(
+            ChatMessage(role=MessageRole.USER, content="hello")
+        )
+        sdk.conversation.record_message.assert_awaited_once()

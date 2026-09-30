@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maximem-synap-langgraph"
-version = "0.4.0"
+version = "0.4.1"
 description = "Synap memory integration for LangGraph — BaseStore + BaseCheckpointSaver"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,9 +15,9 @@ authors = [
 keywords = ["synap", "memory", "langgraph", "ai", "agents", "checkpointer", "store"]
 
 dependencies = [
-    "maximem-synap>=0.2.0",
-    "maximem-synap-integrations-common>=0.1.0",
-    "maximem-synap-langchain>=0.2.4",
+    "maximem-synap>=0.5.3",
+    "maximem-synap-integrations-common>=0.2.1",
+    "maximem-synap-langchain>=0.3.1",
     "langgraph>=1.0",
 ]
 

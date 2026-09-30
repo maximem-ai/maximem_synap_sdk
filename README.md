@@ -7,17 +7,20 @@
 -->
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-light.png">
-    <source media="(prefers-color-scheme: light)" srcset="assets/banner-dark.png">
-    <img src="assets/banner-light.png" alt="Maximem Synap: AI Agents Forget. Synap Makes Them Remember." width="100%" />
+    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="assets/banner-light.png">
+    <img src="assets/banner-light.png" alt="Synap: memory for production AI agents" width="100%" />
   </picture>
 </p>
 
+<h3 align="center">Your agents forget between conversations. Synap makes them remember.</h3>
+
 <p align="center">
   <a href="https://docs.maximem.ai"><strong>Docs</strong></a> ·
-  <a href="https://synap.maximem.ai"><strong>Dashboard</strong></a> ·
-  <a href="https://www.maximem.ai/blog/synap-benchmark-results"><strong>Benchmarks</strong></a> ·
-  <a href="https://www.maximem.ai/synap"><strong>Website</strong></a>
+  <a href="#60-second-quickstart"><strong>Quickstart</strong></a> ·
+  <a href="https://github.com/maximem-ai/memory_and_context_eval_harness"><strong>Evals (reproduce our numbers)</strong></a> ·
+  <a href="https://github.com/maximem-ai/maximem_synap_sdk/discussions"><strong>Discussions</strong></a> ·
+  <a href="https://synap.maximem.ai"><strong>Dashboard</strong></a>
 </p>
 
 <p align="center">
@@ -26,38 +29,43 @@
   <a href="https://www.npmjs.com/package/@maximem/synap-js-sdk"><img src="https://img.shields.io/npm/v/@maximem/synap-js-sdk?style=flat-square&color=blue&label=npm" alt="npm" /></a>
   <a href="https://pypi.org/project/maximem-synap"><img src="https://img.shields.io/pypi/pyversions/maximem-synap?style=flat-square" alt="Python versions" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License" /></a>
-  <a href="https://x.com/maximem_ai"><img src="https://img.shields.io/badge/follow-%40maximem__ai-1DA1F2?style=flat-square&logo=x&logoColor=white" alt="Twitter" /></a>
-  <a href="https://www.linkedin.com/company/maximem-ai"><img src="https://img.shields.io/badge/LinkedIn-Maximem%20AI-0A66C2?style=flat-square&logo=linkedin&logoColor=white" alt="LinkedIn" /></a>
+  <a href="https://github.com/maximem-ai/memory_and_context_eval_harness"><img src="https://img.shields.io/badge/evals-open%20harness-2ea44f?style=flat-square" alt="Open eval harness" /></a>
 </p>
 
 ---
 
 ## The memory layer for production AI agents
 
-Your AI agents forget everything between conversations. Synap fixes that with a production-grade memory layer built for applications that serve real users at scale. **#1 on [LongMemEval](https://www.maximem.ai/blog/synap-benchmark-results) (92%) and [LoCoMo](https://www.maximem.ai/blog/synap-benchmark-results) (93.2%)**, sub-15ms anticipatory retrieval, and native integrations with every major AI framework.
+Synap gives your agents memory that lasts across conversations, sessions and devices. It scores **92.0% on LongMemEval and 93.2% on LoCoMo** (gpt-5-mini answer and judge, [reproduce with our open harness](https://github.com/maximem-ai/memory_and_context_eval_harness)), fetches context in ~15ms P50 (internal measurement) before your agent asks, and ships native packages for 24 agent frameworks.
 
 <p align="center">
   <strong>LangChain · LangGraph · LlamaIndex · CrewAI · AutoGen · Haystack · Google ADK · OpenAI Agents · Semantic Kernel · Pydantic AI · Agno · LiveKit · Pipecat · Claude Agent · Mastra · Vercel AI SDK · NeMo Agent Toolkit · Microsoft Agent Framework</strong>
 </p>
 
-> **What's in this repo:** the open-source Python and JavaScript SDKs plus all framework integrations, licensed under Apache 2.0. The Synap memory engine itself (ingestion, entity resolution, retrieval, anticipation) runs as a fully managed cloud service operated by Maximem and is **not** open source. The SDKs in this repo are clients for that service; there is nothing to self-host, and an [API key](https://www.maximem.ai/synap) is required.
+### What's open, what's hosted
+
+| | This repo (Apache 2.0) | Synap Cloud (managed) |
+|---|---|---|
+| Python + JS SDKs, 24 framework packages, MCP adapter | ✅ open source | uses them |
+| Memory engine: ingestion, entity resolution, retrieval, anticipation | — | ✅ runs here |
+| What you need | `pip install maximem-synap` | an [API key](https://www.maximem.ai/synap). Free Trial plan: 12,500 credits/month, 1 agent, no card required ([pricing](https://www.maximem.ai/synap/pricing)) |
+
+Every plan, including the free one, gets every Synap capability. Plans differ on volume and support, not features.
 
 ---
 
 ## Benchmarks
 
-Synap leads the field on the two standard long-term memory benchmarks, evaluated on identical hardware with an open-source harness.
+Synap's scores on the two standard long-term memory benchmarks, produced with our open-source harness on the official dataset releases.
 
-| Benchmark | Synap accuracy |
-|---|---|
-| **LongMemEval** | **92%** |
-| **LoCoMo** | **93.2%** |
+| Benchmark | Synap accuracy | Scope |
+|---|---|---|
+| **LongMemEval** | **92.0%** (460 / 500) | Full set, 6 categories |
+| **LoCoMo** | **93.2%** | Cat 1–4, adversarial excluded |
 
-Synap outperforms leading published memory systems, run through the same [open-source evaluation harness](https://github.com/maximem-ai/memory_and_context_eval_harness) on identical hardware and configs.
+Other vendors publish their own numbers under different answer models and judges. Our harness ships adapters for Mem0, Zep and Supermemory, so you can run them side by side yourself. [How scores differ across setups →](https://github.com/maximem-ai/eval_benchmark_runs_output/blob/main/METHODOLOGY.md)
 
-> **"Longer conversations make Synap better, not worse."** Richer entity graphs and stronger pattern recognition at scale.
-
-Full methodology and reproduction instructions → [maximem.ai/blog/synap-benchmark-results](https://www.maximem.ai/blog/synap-benchmark-results)
+Category breakdown, methodology and every scope decision → [eval_benchmark_runs_output](https://github.com/maximem-ai/eval_benchmark_runs_output)
 
 ---
 
@@ -70,6 +78,34 @@ pip install maximem-synap
 # JavaScript / TypeScript
 npm install @maximem/synap-js-sdk
 ```
+
+### Using a coding agent?
+
+Paste this into Claude Code, Codex or Cursor:
+
+> Add Synap memory to this project. Run `pip install maximem-synap` (or `npm i @maximem/synap-js-sdk`), then install the Synap skill from https://github.com/maximem-ai/maximem_synap_sdk/tree/main/skills/synap and follow it to wire memory into the agent framework this repo uses. Ask me for my Synap API key when you need it.
+
+<details>
+<summary><strong>Claude Code</strong></summary>
+
+```bash
+git clone --depth 1 https://github.com/maximem-ai/maximem_synap_sdk /tmp/synap && cp -r /tmp/synap/skills/synap ~/.claude/skills/synap
+```
+</details>
+
+<details>
+<summary><strong>Codex</strong></summary>
+
+```bash
+git clone --depth 1 https://github.com/maximem-ai/maximem_synap_sdk /tmp/synap && mkdir -p ~/.agents/skills && cp -r /tmp/synap/skills/synap-codex ~/.agents/skills/synap
+```
+</details>
+
+<details>
+<summary><strong>Cursor / any MCP client</strong></summary>
+
+Add the Synap MCP server URL and your API key from the [dashboard](https://synap.maximem.ai). See [`packages/mcps/synap-mcp-server/`](packages/mcps/synap-mcp-server/).
+</details>
 
 ---
 
@@ -139,11 +175,13 @@ console.log(context.formattedContext);
 
 ---
 
-## What makes Synap different
+## How it works: anticipatory memory
+
+Most memory layers wait for the agent to ask. Synap works out what the agent will need next and has it ready. Six parts make that work.
 
 ### 🎯 Anticipatory Retrieval
 
-Synap **pre-fetches context before your agent requests it**. 15ms P50 latency in production. For voice AI agents, this is the difference between natural conversation and awkward pauses.
+Synap **pre-fetches context before your agent requests it**. ~15ms P50 latency in production (Maximem internal measurement). For voice AI agents, this is the difference between natural conversation and awkward pauses.
 
 ### 🔗 Entity Resolution
 
@@ -262,6 +300,7 @@ agent = ReActAgent.from_tools(tools, memory=memory)
 | CAMEL-AI | [`maximem-synap-camel-ai`](packages/integrations/synap-camel-ai/) | `pip install maximem-synap-camel-ai` |
 | Smolagents | [`maximem-synap-smolagents`](packages/integrations/synap-smolagents/) | `pip install maximem-synap-smolagents` |
 | Deepagents | [`maximem-synap-deepagents`](packages/integrations/synap-deepagents/) | `pip install maximem-synap-deepagents` |
+| Remote MCP Server | [`maximem-synap-mcp-server`](packages/mcps/synap-mcp-server/) | `pip install maximem-synap-mcp-server` |
 
 <!-- END integrations -->
 
@@ -283,23 +322,24 @@ Understand the system before building on it:
 
 - 📘 **[Why we built Synap](https://www.maximem.ai/blog/why-we-built-synap)**: the problem with current AI memory systems
 - ⚙️ **[How Synap works under the hood](https://www.maximem.ai/blog/how-maximem-synap-works)**: architecture, retrieval pipeline, and design decisions
-- 📊 **[Benchmark results](https://www.maximem.ai/blog/synap-benchmark-results)**: 92% on LongMemEval, 93.2% on LoCoMo, methodology, and reproducibility
+- 📊 **[Benchmark results](https://www.maximem.ai/blog/synap-benchmark-results)**: 92.0% on LongMemEval, 93.2% on LoCoMo, methodology, and reproducibility
 - 🧪 **[Evaluation harness](https://github.com/maximem-ai/memory_and_context_eval_harness)**: run LoCoMo and LongMemEval yourself against Synap, Mem0, Zep and Supermemory
 
 ---
 
 ## Agent skills
 
-Drop-in instructions for coding agents (Claude Code, Cursor, etc.) that teach them how to wire Synap into your codebase.
+Drop-in instructions that teach coding agents how to wire Synap into your codebase. Install steps are in [Using a coding agent?](#using-a-coding-agent).
 
-- **[Maximem Synap skill](skills/synap/)**: covers SDK setup, scoping (User/Customer/Client), ingestion, retrieval, and one-page wiring guides for all supported frameworks.
+- **[Synap skill for Claude Code](skills/synap/)**: SDK setup, scoping (User/Customer/Client), ingestion, retrieval, and one-page wiring guides for all supported frameworks.
+- **[Synap skill for Codex](skills/synap-codex/)**: the same guide, packaged for Codex (`~/.agents/skills/synap`).
 
 ---
 
 ## Requirements
 
 - **Python SDK**: Python 3.11+
-- **JavaScript SDK**: Node 18+ (Python 3.11+ for the bridge layer)
+- **JavaScript SDK**: Node 20+ (Python 3.11+ for the bridge layer)
 - A Synap API key: [get one at maximem.ai](https://www.maximem.ai/synap)
 
 ---
@@ -308,6 +348,9 @@ Drop-in instructions for coding agents (Claude Code, Cursor, etc.) that teach th
 
 - 📖 [Documentation](https://docs.maximem.ai)
 - 🚀 [Dashboard](https://synap.maximem.ai)
+- 💬 [GitHub Discussions](https://github.com/maximem-ai/maximem_synap_sdk/discussions): questions, ideas, show what you built
+- 🔒 [Security policy](SECURITY.md)
+- 🤖 [AGENTS.md](AGENTS.md) and [llms.txt](llms.txt) for coding agents
 - 𝕏 [Twitter / X](https://x.com/maximem_ai)
 - 💼 [LinkedIn](https://www.linkedin.com/company/maximem-ai)
 
@@ -315,13 +358,13 @@ Drop-in instructions for coding agents (Claude Code, Cursor, etc.) that teach th
 
 ## Contributing
 
-This repo is a published mirror of Maximem's monorepo, so everything under `packages/` is overwritten on each sync and pull requests against it are closed. Bug reports, gaps, and new-framework requests are very welcome as [issues](https://github.com/maximem-ai/maximem_synap_sdk/issues). See [CONTRIBUTING.md](CONTRIBUTING.md) for how to run the code locally and what a new integration needs.
+This repo is a published mirror of Maximem's monorepo, so everything under `packages/` is overwritten on each sync and pull requests against it are closed. Bug reports, gaps, and new-framework requests are very welcome as [issues](https://github.com/maximem-ai/maximem_synap_sdk/issues), and questions go to [Discussions](https://github.com/maximem-ai/maximem_synap_sdk/discussions). See [CONTRIBUTING.md](CONTRIBUTING.md) for how to run the code locally and what a new integration needs.
 
 ---
 
 ## License
 
-Apache 2.0. See [LICENSE](LICENSE).
+Apache 2.0 (see [LICENSE](LICENSE)). Each package declares its own license in its metadata; the core Python and JS SDKs and the Vercel AI SDK integration are MIT.
 
 ---
 

@@ -15,11 +15,25 @@ beforeEach(() => {
 
 // Helper: call the tool's execute function directly.
 // createTool returns a Tool object whose .execute property holds the handler.
+//
+// Mastra 1.26 types `execute` as `(inputData, context) => Promise<Out |
+// ValidationError>`. The input is still the first argument, which is what these
+// tools read, and they never return a ValidationError of Mastra's — so the call
+// site narrows the union back to the tool's own declared output. Without this
+// every `result.available` below is a typecheck error even though the runtime
+// call is unchanged.
+type SearchOutput = { formattedContext: string; available: boolean };
+type StoreOutput = { recorded: boolean; ingestionId?: string; error?: string };
+
+function handlerOf<T>(execute: unknown): (input: unknown) => Promise<T> {
+  return execute as (input: unknown) => Promise<T>;
+}
+
 async function execSearch(
   sdk: SynapSdkLike,
   input: { query?: string; maxResults?: number },
   opts: { userId?: string; customerId?: string; conversationId?: string; mode?: string } = {},
-) {
+): Promise<SearchOutput> {
   const tool = synapSearchTool({
     sdk,
     userId: opts.userId ?? 'alice',
@@ -27,21 +41,21 @@ async function execSearch(
     conversationId: opts.conversationId,
     mode: opts.mode,
   });
-  return tool.execute!(input);
+  return handlerOf<SearchOutput>(tool.execute)(input);
 }
 
 async function execStore(
   sdk: SynapSdkLike,
   input: { content?: string; metadata?: Record<string, unknown> },
   opts: { userId?: string; customerId?: string; conversationId?: string } = {},
-) {
+): Promise<StoreOutput> {
   const tool = synapStoreTool({
     sdk,
     userId: opts.userId ?? 'alice',
     customerId: opts.customerId,
     conversationId: opts.conversationId,
   });
-  return tool.execute!(input);
+  return handlerOf<StoreOutput>(tool.execute)(input);
 }
 
 // ── synapSearchTool — construction guards ─────────────────────────────────────

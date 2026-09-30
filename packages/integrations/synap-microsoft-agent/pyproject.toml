@@ -7,7 +7,7 @@ name = "maximem-synap-microsoft-agent"
 # The publish workflow reads the current version from PyPI and bumps from
 # there, overwriting this line. Kept one below intent: the harness surfaces are
 # a feature addition, so publish with BUMP=minor to land 0.3.0.
-version = "0.3.0"
+version = "0.3.1"
 description = "Synap memory integration for Microsoft Agent Framework"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,8 +18,8 @@ authors = [
 keywords = ["synap", "memory", "microsoft", "agent-framework", "ai", "agents"]
 
 dependencies = [
-    "maximem-synap>=0.2.0",
-    "maximem-synap-integrations-common>=0.1.0",
+    "maximem-synap>=0.5.3",
+    "maximem-synap-integrations-common>=0.2.1",
     # Deliberately NOT raised to >=1.13 for the harness surfaces. The SDK
     # surfaces work on 1.0, and raising the floor would break existing users
     # for a feature they are not using. The harness modules import lazily and

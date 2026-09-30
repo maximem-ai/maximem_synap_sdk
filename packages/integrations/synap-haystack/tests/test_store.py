@@ -505,3 +505,285 @@ class TestSharedHarness:
         )
         with pytest.raises(SynapIntegrationError):
             store.add_memories(messages=[ChatMessage.from_user("hello")])
+
+
+# ---------------------------------------------------------------------------
+# The live stream
+#
+# aadd_memories is the single funnel every write passes through, and the
+# SynapMemoryWriter component delegates to it. It used to forward the user
+# turn and the assistant turn over REST and drop everything else, so
+# anticipation saw a conversation of questions and answers with nothing in
+# between: no reasoning, no tool calls, no tool results.
+#
+# The rule these pin is "stream first, REST only as a fallback, never both".
+# The server persists `user_message` and `assistant_message` from the stream
+# itself, so a `record_message` on top of a delivered stream event writes the
+# same turn twice and extracts it twice.
+# ---------------------------------------------------------------------------
+
+from haystack.dataclasses import ToolCall  # noqa: E402
+
+try:
+    from haystack.dataclasses import ReasoningContent
+    _HAS_REASONING = "reasoning" in __import__("inspect").signature(
+        ChatMessage.from_assistant
+    ).parameters
+except ImportError:  # pragma: no cover: haystack-ai older than reasoning
+    _HAS_REASONING = False
+
+needs_reasoning = pytest.mark.skipif(
+    not _HAS_REASONING, reason="this haystack-ai predates ReasoningContent",
+)
+
+
+def _streaming_sdk(is_listening: bool):
+    sdk = MagicMock()
+    sdk.instance_id = "test-instance"
+    sdk.instance.is_listening = is_listening
+    sdk.instance.send_message = AsyncMock()
+    sdk.instance.record_thinking = AsyncMock()
+    sdk.instance.record_tool_call = AsyncMock()
+    sdk.instance.record_tool_result = AsyncMock()
+    sdk.conversation.record_message = AsyncMock(return_value={"message_id": "m1"})
+    return sdk
+
+
+def _store_for(sdk):
+    return SynapMemoryStore(
+        sdk, user_id="u1", customer_id="c1", conversation_id="conv-1"
+    )
+
+
+_CALL = ToolCall(tool_name="lookup_order", arguments={"pnr": "QX41RT"}, id="call_1")
+
+
+class TestStreamFirstRestFallback:
+    @pytest.mark.asyncio
+    async def test_a_turn_goes_out_on_the_stream_when_one_is_open(self):
+        sdk = _streaming_sdk(True)
+        await _store_for(sdk).aadd_memories(
+            messages=[ChatMessage.from_user("where is my order")]
+        )
+        sdk.instance.send_message.assert_awaited_once()
+        kw = sdk.instance.send_message.await_args.kwargs
+        assert kw["event_type"] == "user_message"
+        assert kw["content"] == "where is my order"
+
+    @pytest.mark.asyncio
+    async def test_and_is_NOT_also_written_over_rest(self):
+        """The double-write this rule exists to prevent."""
+        sdk = _streaming_sdk(True)
+        await _store_for(sdk).aadd_memories(
+            messages=[ChatMessage.from_user("where is my order")]
+        )
+        sdk.conversation.record_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_with_no_stream_it_falls_back_to_rest(self):
+        sdk = _streaming_sdk(False)
+        await _store_for(sdk).aadd_memories(
+            messages=[ChatMessage.from_assistant("it ships tomorrow")]
+        )
+        sdk.conversation.record_message.assert_awaited_once()
+        sdk.instance.send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_streamed_turn_still_counts_as_written(self):
+        """`written_count` in SynapMemoryWriter reads this. A turn that went
+        out on the stream landed; it just has no REST message_id."""
+        sdk = _streaming_sdk(True)
+        results = await _store_for(sdk).aadd_memories(
+            messages=[ChatMessage.from_user("hi")]
+        )
+        assert results[0]["status"] == "written"
+        assert results[0]["transport"] == "stream"
+        assert results[0]["message_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_rest_turn_says_so_too(self):
+        sdk = _streaming_sdk(False)
+        results = await _store_for(sdk).aadd_memories(
+            messages=[ChatMessage.from_user("hi")]
+        )
+        assert results[0]["transport"] == "rest"
+        assert results[0]["message_id"] == "m1"
+
+    @pytest.mark.asyncio
+    async def test_the_assistant_turn_is_the_anticipation_moment(self):
+        sdk = _streaming_sdk(True)
+        await _store_for(sdk).aadd_memories(
+            messages=[ChatMessage.from_assistant("it ships tomorrow")]
+        )
+        kw = sdk.instance.send_message.await_args.kwargs
+        assert kw["event_type"] == "assistant_message"
+        assert kw["role"] == "assistant"
+
+    @pytest.mark.asyncio
+    async def test_a_turn_the_stream_dropped_still_reaches_rest(self):
+        """`report_turn` answers whether the event actually went out. A
+        stream that is open but fails is the same as no stream at all."""
+        sdk = _streaming_sdk(True)
+        sdk.instance.send_message = AsyncMock(side_effect=RuntimeError("stream down"))
+        results = await _store_for(sdk).aadd_memories(
+            messages=[ChatMessage.from_user("hi")]
+        )
+        sdk.conversation.record_message.assert_awaited_once()
+        assert results[0]["transport"] == "rest"
+
+
+class TestACustomerScopedStoreDoesNotClaimTheStreamTookIt:
+    """`report_turn` answers "it went out", not "it was stored". The server
+    refuses a conversation event with no user_id, so a customer-scoped store
+    that took the stream path would skip the fallback and lose the turn with
+    nothing to show for it."""
+
+    def _customer_scoped(self, sdk):
+        return SynapMemoryStore(
+            sdk, user_id=None, customer_id="c1", conversation_id="conv-1",
+        )
+
+    @pytest.mark.asyncio
+    async def test_it_goes_to_rest_even_with_a_stream_open(self):
+        sdk = _streaming_sdk(True)
+        results = await self._customer_scoped(sdk).aadd_memories(
+            messages=[ChatMessage.from_user("where is my order")]
+        )
+        sdk.instance.send_message.assert_not_awaited()
+        sdk.conversation.record_message.assert_awaited_once()
+        assert results[0]["transport"] == "rest"
+
+    @pytest.mark.asyncio
+    async def test_and_a_rest_failure_is_still_loud(self):
+        sdk = _streaming_sdk(True)
+        sdk.conversation.record_message = AsyncMock(side_effect=RuntimeError("down"))
+        with pytest.raises(SynapIntegrationError):
+            await self._customer_scoped(sdk).aadd_memories(
+                messages=[ChatMessage.from_user("where is my order")]
+            )
+
+    @pytest.mark.asyncio
+    async def test_but_its_tool_results_are_still_reported(self):
+        """A tool result is not persisted as a conversation row, so the
+        missing user_id does not cost anything there."""
+        sdk = _streaming_sdk(True)
+        await self._customer_scoped(sdk).aadd_memories(
+            messages=[ChatMessage.from_tool(tool_result="shipped", origin=_CALL)]
+        )
+        sdk.instance.record_tool_result.assert_awaited_once()
+
+
+class TestTheThreeEventsItNeverReported:
+    @pytest.mark.asyncio
+    async def test_a_tool_call_is_reported(self):
+        sdk = _streaming_sdk(True)
+        await _store_for(sdk).aadd_memories(messages=[
+            ChatMessage.from_assistant("let me check", tool_calls=[_CALL]),
+        ])
+        sdk.instance.record_tool_call.assert_awaited_once()
+        args, kw = sdk.instance.record_tool_call.await_args
+        assert args[0] == "lookup_order"
+        assert args[1] == {"pnr": "QX41RT"}
+        assert kw["tool_call_id"] == "call_1"
+
+    @pytest.mark.asyncio
+    async def test_a_tool_result_is_reported(self):
+        sdk = _streaming_sdk(True)
+        await _store_for(sdk).aadd_memories(messages=[
+            ChatMessage.from_tool(tool_result="shipped", origin=_CALL),
+        ])
+        sdk.instance.record_tool_result.assert_awaited_once()
+        assert sdk.instance.record_tool_result.await_args.args[0] == "shipped"
+
+    @pytest.mark.asyncio
+    async def test_the_call_and_its_result_share_an_id(self):
+        """Without this the anticipation agent sees a call and a result and
+        cannot tell they are the same tool invocation."""
+        sdk = _streaming_sdk(True)
+        await _store_for(sdk).aadd_memories(messages=[
+            ChatMessage.from_assistant("let me check", tool_calls=[_CALL]),
+            ChatMessage.from_tool(tool_result="shipped", origin=_CALL),
+        ])
+        assert (sdk.instance.record_tool_call.await_args.kwargs["tool_call_id"]
+                == sdk.instance.record_tool_result.await_args.kwargs["tool_call_id"]
+                == "call_1")
+
+    @needs_reasoning
+    @pytest.mark.asyncio
+    async def test_reasoning_is_reported(self):
+        sdk = _streaming_sdk(True)
+        await _store_for(sdk).aadd_memories(messages=[
+            ChatMessage.from_assistant(
+                "let me check", reasoning="I should look up the booking first",
+            ),
+        ])
+        sdk.instance.record_thinking.assert_awaited_once()
+        assert (sdk.instance.record_thinking.await_args.args[0]
+                == "I should look up the booking first")
+
+    @needs_reasoning
+    @pytest.mark.asyncio
+    async def test_empty_reasoning_reports_nothing(self):
+        sdk = _streaming_sdk(True)
+        await _store_for(sdk).aadd_memories(messages=[
+            ChatMessage.from_assistant("hi", reasoning="   "),
+        ])
+        sdk.instance.record_thinking.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_tool_message_is_still_never_written_as_memory(self):
+        """A tool result is somebody's customer data, not something a person
+        said. It goes out as a tool_result and stays 'skipped' for the write
+        contract."""
+        sdk = _streaming_sdk(True)
+        results = await _store_for(sdk).aadd_memories(messages=[
+            ChatMessage.from_tool(tool_result="shipped", origin=_CALL),
+        ])
+        assert results[0]["status"] == "skipped"
+        sdk.instance.send_message.assert_not_awaited()
+        sdk.conversation.record_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_system_message_reports_nothing_at_all(self):
+        sdk = _streaming_sdk(True)
+        results = await _store_for(sdk).aadd_memories(messages=[
+            ChatMessage.from_system("be nice"),
+        ])
+        assert results[0]["status"] == "skipped"
+        sdk.instance.send_message.assert_not_awaited()
+        sdk.instance.record_tool_call.assert_not_awaited()
+        sdk.instance.record_tool_result.assert_not_awaited()
+
+
+class TestNoneOfItBreaksThePipeline:
+    """A telemetry call that throws inside a Haystack component aborts the
+    pipeline run, so every one of these must be silent on failure."""
+
+    @pytest.mark.asyncio
+    async def test_a_tool_call_on_a_dead_sdk_does_not_raise(self):
+        sdk = _streaming_sdk(True)
+        sdk.instance.record_tool_call = AsyncMock(side_effect=RuntimeError("boom"))
+        await _store_for(sdk).aadd_memories(messages=[
+            ChatMessage.from_assistant("let me check", tool_calls=[_CALL]),
+        ])
+
+    @pytest.mark.asyncio
+    async def test_a_tool_result_on_a_dead_sdk_does_not_raise(self):
+        sdk = _streaming_sdk(True)
+        sdk.instance.record_tool_result = AsyncMock(side_effect=RuntimeError("boom"))
+        await _store_for(sdk).aadd_memories(messages=[
+            ChatMessage.from_tool(tool_result="shipped", origin=_CALL),
+        ])
+
+    @pytest.mark.asyncio
+    async def test_an_sdk_with_no_instance_namespace_does_not_raise(self):
+        """An older SDK, or a test double. Every stream call must no-op and
+        the write falls through to REST."""
+        sdk = MagicMock(spec=["conversation", "instance_id"])
+        sdk.conversation.record_message = AsyncMock(return_value={"message_id": "m1"})
+        results = await _store_for(sdk).aadd_memories(messages=[
+            ChatMessage.from_tool(tool_result="shipped", origin=_CALL),
+            ChatMessage.from_user("hi"),
+        ])
+        assert [r["status"] for r in results] == ["skipped", "written"]
+        sdk.conversation.record_message.assert_awaited_once()

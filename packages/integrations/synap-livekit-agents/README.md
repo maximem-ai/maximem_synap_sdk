@@ -48,8 +48,23 @@ async def entrypoint(ctx):
 ## Scope
 
 - **`preload_synap_context(chat_ctx, sdk, *, user_id, ...)`** — async helper. Fetches user-scoped context from Synap and prepends a single `system`-role `ChatMessage` to the `ChatContext` so the agent starts with long-term memory in scope. Read failures degrade silently — a Synap blip must never prevent a call from starting.
-- **`attach_synap_recording(session, sdk, *, user_id, ...)`** — wires `AgentSession.on("conversation_item_added", ...)` to `sdk.conversation.record_message()`. Handles both user and assistant turns (dispatched on `item.role`). Returns the `conversation_id` used for this call (auto-generated per call when absent). Callbacks never raise — write failures are logged and swallowed, consistent with LiveKit's sync-event contract.
+- **`attach_synap_recording(session, sdk, *, user_id, ...)`** — reports the whole turn, not just its two ends. Wires four listeners onto one `AgentSession` and returns the `conversation_id` used for this call (auto-generated when absent). Callbacks never raise — write failures are logged and swallowed, consistent with LiveKit's sync-event contract.
+
+  | LiveKit event | Reported as |
+  | --- | --- |
+  | `conversation_item_added` | the user or assistant turn |
+  | `tool_execution_updated` (`ToolCallStarted`) | the tool call, at dispatch |
+  | `function_tools_executed` | the tool result, and the call if the dispatch event never arrived |
+  | `close` | end of the Synap session |
+
+  A tool call and its result share LiveKit's own `call_id`, so the anticipation agent reads them as one exchange. On a voice call the tool call is reported the moment the tool is *dispatched*, not when the batch finishes: the gap between a caller's question and the answer is dead air, and that gap is the whole window anticipation has to work in.
 - **`synap_search_tool(sdk, *, user_id, ...)`** / **`synap_store_tool(sdk, *, user_id, ...)`** — factories that return `FunctionTool` instances registerable via `Agent(tools=[...])`. The LLM can invoke `synap_search(query)` to retrieve formatted context, or `synap_store(content, category)` to write a new memory.
+
+## Stream first, REST only as a fallback, never both
+
+When `sdk.instance.listen()` is running, turns go out as `user_message` / `assistant_message` stream events and `sdk.conversation.record_message` is **not** called. The server persists those two event types from the stream itself, so doing both would store the turn twice and extract it twice. With no stream open, nothing changes: the integration behaves exactly as it did before, over REST.
+
+Tool calls, tool results and reasoning are anticipation hints. The server does not persist them, so they have no REST fallback and are simply silent when no stream is open.
 
 ## Error policy
 

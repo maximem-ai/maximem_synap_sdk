@@ -8,6 +8,12 @@ import type { FetchOptions } from '../context/types.js';
 import type { CreateMemoryOptions } from '../memories/interface.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+// CONTRACT/ exists only in the monorepo; the public mirror (maximem_synap_sdk)
+// does not ship it. Skip there, but inside the monorepo a missing corpus fails
+// loudly instead of quietly switching the parity check off.
+// skipIf alone is not enough: vitest still runs a skipped suite's body to
+// collect it, so each guarded body also returns before reading the corpus.
+const inPublicMirror = !existsSync(path.resolve(here, '../../../CONTRACT'));
 const corpusPath = path.resolve(here, '../../../CONTRACT/conformance/request_payloads.json');
 const memoryCorpusPath = path.resolve(here, '../../../CONTRACT/conformance/memory_payloads.json');
 
@@ -18,8 +24,8 @@ const memoryCorpusPath = path.resolve(here, '../../../CONTRACT/conformance/memor
  * divergence from Python, and a divergence from Python is what actually breaks:
  * the server is tuned against Python's payload.
  */
-describe('request payload parity with the Python SDK', () => {
-  if (!existsSync(corpusPath)) return;
+describe.skipIf(inPublicMirror)('request payload parity with the Python SDK', () => {
+  if (inPublicMirror) return;
   const golden = JSON.parse(readFileSync(corpusPath, 'utf8')) as {
     scope: string;
     cases: { args: Record<string, unknown>; payload: Record<string, unknown> }[];
@@ -45,8 +51,8 @@ describe('request payload parity with the Python SDK', () => {
  * extraction path, so a body that merely looks tidier can silently store far
  * less from identical input.
  */
-describe('memory payload parity with the Python SDK', () => {
-  if (!existsSync(memoryCorpusPath)) return;
+describe.skipIf(inPublicMirror)('memory payload parity with the Python SDK', () => {
+  if (inPublicMirror) return;
   const golden = JSON.parse(readFileSync(memoryCorpusPath, 'utf8')) as {
     create: { args: Record<string, unknown>; body: Record<string, unknown> }[];
     update: { args: Record<string, unknown>; body: Record<string, unknown> }[];

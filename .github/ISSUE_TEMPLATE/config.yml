@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/maximem-ai/maximem_synap_sdk/discussions
+    about: Ask how to do something, share what you built, or suggest an idea.
+  - name: Documentation
+    url: https://docs.maximem.ai
+    about: Guides and API reference.
+  - name: Security report
+    url: https://github.com/maximem-ai/maximem_synap_sdk/security/advisories/new
+    about: Report a vulnerability privately.

@@ -1,0 +1,41 @@
+name: Bug report
+description: Something in an SDK or integration does not work as documented.
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      options:
+        - maximem-synap (Python SDK)
+        - "@maximem/synap-js-sdk (JavaScript SDK)"
+        - A framework integration
+        - MCP server
+        - Agent skill
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+      placeholder: "e.g. 0.5.3"
+    validations:
+      required: true
+  - type: input
+    id: framework
+    attributes:
+      label: Framework and version (if using an integration)
+      placeholder: "e.g. LangGraph 0.4.2"
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal code to reproduce
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+    validations:
+      required: true

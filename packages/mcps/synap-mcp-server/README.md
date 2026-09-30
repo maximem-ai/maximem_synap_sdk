@@ -1,5 +1,7 @@
 # synap-mcp-server
 
+[![Maximem Synap MCP connector – tool definition quality and endpoint health on Glama](https://glama.ai/mcp/connectors/ai.maximem/synap/badges/score.svg)](https://glama.ai/mcp/connectors/ai.maximem/synap)
+
 Hosted remote **MCP server** (Streamable HTTP) that re-fronts the existing Synap public
 REST operations as MCP tools, so no-code platforms (Gumloop, n8n) can give their agents
 persistent memory with nothing but a pasted **MCP URL** and a **Bearer token**.
@@ -51,6 +53,33 @@ SYNAP_API_URL=http://localhost:8000 uvicorn synap_mcp_server.server:app --port 8
 curl http://localhost:8090/health        # {"status":"ok",...}
 ```
 
+## Reporting the turn to the anticipation agent
+
+An MCP server is not an agent. It exposes tools to somebody else's agent and
+is handed one stateless HTTP call at a time, so most of what an agent does is
+invisible here: the caller's tool calls, its tool results and its reasoning
+never reach this process, and nothing tells a stateless server that a
+conversation has ended. Those are not reported, because there is nothing to
+report.
+
+The turn does exist. `log_exchange` is handed the user's message and the
+assistant's reply as arguments. Set `MCP_STREAM_EVENTS=true` and each logged
+exchange is also reported as a conversation turn on `POST /v1/events/batch`,
+the HTTP door onto the same listening path the gRPC stream feeds, so the
+anticipation agent sees the turn and not only the memory extracted from it.
+There is no gRPC stream here to use: this server holds no SDK, keeps no state
+between requests, and every request can carry a different tenant's key.
+
+It is **off by default**, on purpose. Turning it on adds a second backend call
+per `log_exchange`, writes the turn to conversation history in addition to the
+long-range document, and runs the anticipation agent, which bills model calls.
+
+What does not change either way: `log_exchange` still queues the long-range
+document and still returns the `ingestion_id` that `check_memory_status` and
+`wait_for_processing` are built on. A turn report is best effort and can never
+alter what a tool answers. A turn with no `user_id` or no `conversation_id` is
+not reported at all, because the events route requires both.
+
 ## Test
 
 ```bash
@@ -67,6 +96,8 @@ pytest -q
 | `MCP_RECALL_TIMEOUT_S` | `10` | Recall (read) timeout. |
 | `MCP_INGEST_TIMEOUT_S` | `8` | Log/ingest (write) timeout. |
 | `MCP_DEFAULT_MAX_RESULTS` | `10` | Default recall result count. |
+| `MCP_STREAM_EVENTS` | `false` | Also report a logged exchange as a conversation turn for anticipation. See above before enabling. |
+| `MCP_EVENTS_TIMEOUT_S` | `4` | Turn-report timeout. Best effort; a miss never changes a tool's answer. |
 | `LOG_LEVEL` | `INFO` | Log level. |
 | `ENVIRONMENT` | `production` | Reported in `/health`. |
 

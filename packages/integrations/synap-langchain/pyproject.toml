@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maximem-synap-langchain"
-version = "0.3.0"
+version = "0.3.1"
 description = "Synap memory integration for LangChain and LangGraph"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,8 +24,8 @@ classifiers = [
 ]
 
 dependencies = [
-    "maximem-synap>=0.2.0",
-    "maximem-synap-integrations-common>=0.1.0",
+    "maximem-synap>=0.5.3",
+    "maximem-synap-integrations-common>=0.2.1",
     "langchain-core>=0.3",
 ]
 

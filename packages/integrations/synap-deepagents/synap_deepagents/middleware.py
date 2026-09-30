@@ -36,6 +36,7 @@ from langchain.agents.middleware.types import (
     ResponseT,
 )
 from langchain_core.messages import SystemMessage
+from langchain_core.runnables import RunnableConfig
 from typing_extensions import TypedDict
 
 from deepagents.middleware._utils import append_to_system_message
@@ -244,7 +245,7 @@ class SynapMemoryMiddleware(AgentMiddleware[SynapMemoryState, ContextT, Response
         )
 
     async def abefore_agent(
-        self, state: SynapMemoryState, runtime: Any, config: Any
+        self, state: SynapMemoryState, runtime: Any, config: Optional[RunnableConfig] = None
     ) -> Optional[SynapMemoryStateUpdate]:
         """Retrieve memory for the pending user message."""
         query = _latest_user_text(state.get("messages"))
@@ -257,7 +258,7 @@ class SynapMemoryMiddleware(AgentMiddleware[SynapMemoryState, ContextT, Response
         )
 
     def before_agent(
-        self, state: SynapMemoryState, runtime: Any, config: Any
+        self, state: SynapMemoryState, runtime: Any, config: Optional[RunnableConfig] = None
     ) -> Optional[SynapMemoryStateUpdate]:
         """Synchronous entry point. See :meth:`abefore_agent`."""
         return run_async(self.abefore_agent(state, runtime, config))
@@ -331,7 +332,7 @@ class SynapShortTermMiddleware(
         self.preamble_close = preamble_close
 
     async def abefore_agent(
-        self, state: SynapShortTermState, runtime: Any, config: Any
+        self, state: SynapShortTermState, runtime: Any, config: Optional[RunnableConfig] = None
     ) -> SynapShortTermStateUpdate:
         """Fetch the short-term block for this turn."""
         block = await fetch_st_block(
@@ -344,7 +345,7 @@ class SynapShortTermMiddleware(
         return SynapShortTermStateUpdate(synap_short_term=block)
 
     def before_agent(
-        self, state: SynapShortTermState, runtime: Any, config: Any
+        self, state: SynapShortTermState, runtime: Any, config: Optional[RunnableConfig] = None
     ) -> SynapShortTermStateUpdate:
         """Synchronous entry point. See :meth:`abefore_agent`."""
         return run_async(self.abefore_agent(state, runtime, config))

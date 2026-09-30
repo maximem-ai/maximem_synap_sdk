@@ -38,6 +38,31 @@ and synap-crewai).
 The public read/write methods are **sync** (matching Mem0's surface) and bridge
 to the async SDK via ``run_async``; ``a``-prefixed async variants are provided
 for callers already inside an event loop.
+
+## The live stream
+
+``aadd_memories`` is the single funnel every write passes through (the
+:class:`~synap_haystack.SynapMemoryWriter` component delegates to it), so it is
+where a turn is reported to Synap's live gRPC stream. A Haystack
+``ChatMessage`` is a list of content parts, and the parts carry everything the
+anticipation agent needs beyond the text: ``ToolCall(tool_name, arguments,
+id)`` on an assistant message, ``ToolCallResult(result, origin, error)`` on a
+tool message, and ``ReasoningContent(reasoning_text)`` on either.
+``ToolCall.id`` is Haystack's own id for the invocation and the result repeats
+it as ``origin.id``, which is what ties a call to its result.
+
+Only the turns are also memory, and they follow the one rule that matters:
+**stream first, REST only as a fallback, never both**. The server persists
+``user_message`` and ``assistant_message`` straight off the stream
+(``grpc/servicer.py``), so a ``record_message`` on top of a delivered stream
+event writes the turn twice and extracts it twice. Tool calls, tool results
+and reasoning are stream-only: there is no REST equivalent and none of them is
+a memory. Tool and system messages stay ``"skipped"`` for the write contract,
+but a tool message's results are still reported.
+
+The content parts are read through ``getattr`` rather than imported, so a
+``haystack-ai`` old enough to predate tool calling or ``ReasoningContent``
+reports nothing extra instead of failing to import.
 """
 
 from __future__ import annotations
@@ -51,6 +76,12 @@ from haystack.dataclasses import ChatMessage
 
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import SynapIntegrationError, run_async
+from synap_integrations_common.stream_events import (
+    report_reasoning,
+    report_tool_call,
+    report_tool_result,
+    report_turn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,9 +159,12 @@ class SynapMemoryStore:
         """Record chat messages to Synap for server-side memory extraction.
 
         Returns one result dict per message: ``{"role", "status", ...}`` where
-        ``status`` is ``"written"`` (with ``message_id`` when the SDK returns
-        one), ``"failed"`` (with ``error``), or ``"skipped"`` (role not in
-        user/assistant). Raises :class:`SynapIntegrationError` if *every*
+        ``status`` is ``"written"``, ``"failed"`` (with ``error``), or
+        ``"skipped"`` (role not in user/assistant). A written message also
+        carries ``transport``: ``"stream"`` when the turn went out on the live
+        gRPC stream, which persists it server-side and leaves ``message_id``
+        ``None``, or ``"rest"`` when it fell back to ``record_message``, which
+        returns one. Raises :class:`SynapIntegrationError` if *every*
         recordable message fails.
         """
         return run_async(
@@ -164,8 +198,18 @@ class SynapMemoryStore:
         failed = 0
         first_error: Optional[str] = None
 
+        ids = {"conversation_id": conv_id, "user_id": uid or "", "customer_id": cid or ""}
+
         for msg in messages:
             role = _role_of(msg)
+
+            # ── the live stream ──────────────────────────────────────────
+            # Reported for every role, including the ones that are never
+            # written as memory: a tool result is not a turn, but it is
+            # exactly what the anticipation agent needs to see.
+            await self._report_reasoning(msg, ids)
+            await self._report_tool_results(msg, ids)
+
             if role not in _WRITE_ROLES:
                 results.append({"role": role, "status": "skipped"})
                 logger.info(
@@ -176,31 +220,55 @@ class SynapMemoryStore:
                 )
                 continue
 
-            try:
-                resp = await self.sdk.conversation.record_message(
-                    conversation_id=conv_id,
-                    role=role,
-                    content=msg.text or "",
-                    user_id=uid or None,
-                    customer_id=cid,
-                )
+            # Stream first, REST only as a fallback, never both.
+            #
+            # ⚠ Only when there is a user_id. The server refuses to persist a
+            # conversation event without one and says so in its own log, and
+            # `report_turn` answers "it went out", not "it was stored". A
+            # customer-scoped store (user_id=None, customer-wide shared pool)
+            # would therefore report a turn, believe it landed, skip the
+            # fallback and lose it silently. REST fails loudly instead, which
+            # is what this store did before there was a stream at all.
+            if uid and await report_turn(
+                self.sdk, role=role, content=msg.text or "", **ids
+            ):
                 written += 1
                 results.append({
                     "role": role,
                     "status": "written",
-                    "message_id": _message_id(resp),
+                    "message_id": None,
+                    "transport": "stream",
                 })
-            except Exception as exc:  # noqa: BLE001 — boundary
-                failed += 1
-                logger.error(
-                    "SynapMemoryStore.add_memories: record_message failed "
-                    "conversation_id=%s role=%s error=%s",
-                    conv_id, role, exc, exc_info=True,
-                )
-                err = f"{type(exc).__name__}: {exc}"
-                if first_error is None:
-                    first_error = err
-                results.append({"role": role, "status": "failed", "error": err})
+            else:
+                try:
+                    resp = await self.sdk.conversation.record_message(
+                        conversation_id=conv_id,
+                        role=role,
+                        content=msg.text or "",
+                        user_id=uid or None,
+                        customer_id=cid,
+                    )
+                    written += 1
+                    results.append({
+                        "role": role,
+                        "status": "written",
+                        "message_id": _message_id(resp),
+                        "transport": "rest",
+                    })
+                except Exception as exc:  # noqa: BLE001 — boundary
+                    failed += 1
+                    logger.error(
+                        "SynapMemoryStore.add_memories: record_message failed "
+                        "conversation_id=%s role=%s error=%s",
+                        conv_id, role, exc, exc_info=True,
+                    )
+                    err = f"{type(exc).__name__}: {exc}"
+                    if first_error is None:
+                        first_error = err
+                    results.append({"role": role, "status": "failed", "error": err})
+
+            # After the turn: the model says its piece, then asks for tools.
+            await self._report_tool_calls(msg, ids)
 
         processed = written + failed
         if processed > 0 and written == 0:
@@ -213,6 +281,64 @@ class SynapMemoryStore:
             )
 
         return results
+
+    # ── the three events this store never reported ──────────────────────────
+    #
+    # None of these can raise into a Haystack pipeline: `stream_events`
+    # swallows everything by design, and all three are silent when no stream
+    # is open.
+
+    async def _report_reasoning(self, msg: Any, ids: Dict[str, str]) -> None:
+        """Report each ``ReasoningContent`` part of a message."""
+        parts = getattr(msg, "reasonings", None)
+        if not isinstance(parts, (list, tuple)):
+            return
+        step = 0
+        for part in parts:
+            content = str(getattr(part, "reasoning_text", "") or "").strip()
+            if not content:
+                continue
+            await report_reasoning(
+                self.sdk, content=content,
+                step_index=step, thought_type="reasoning", **ids,
+            )
+            step += 1
+
+    async def _report_tool_calls(self, msg: Any, ids: Dict[str, str]) -> None:
+        """Report each ``ToolCall`` part of an assistant message.
+
+        ``ToolCall.id`` is Haystack's own id for the invocation, and the
+        ``ToolCallResult`` that follows repeats it as ``origin.id``. Without
+        it the anticipation agent cannot tell a call and a result belong
+        together.
+        """
+        calls = getattr(msg, "tool_calls", None)
+        if not isinstance(calls, (list, tuple)):
+            return
+        for call in calls:
+            args = getattr(call, "arguments", None)
+            await report_tool_call(
+                self.sdk,
+                tool_name=str(getattr(call, "tool_name", "") or "tool"),
+                tool_args=args if isinstance(args, dict) else None,
+                tool_call_id=str(getattr(call, "id", "") or ""),
+                **ids,
+            )
+
+    async def _report_tool_results(self, msg: Any, ids: Dict[str, str]) -> None:
+        """Report each ``ToolCallResult`` part of a tool message."""
+        outcomes = getattr(msg, "tool_call_results", None)
+        if not isinstance(outcomes, (list, tuple)):
+            return
+        for outcome in outcomes:
+            origin = getattr(outcome, "origin", None)
+            await report_tool_result(
+                self.sdk,
+                result=getattr(outcome, "result", None),
+                tool_name=str(getattr(origin, "tool_name", "") or ""),
+                tool_call_id=str(getattr(origin, "id", "") or ""),
+                **ids,
+            )
 
     # ── read ─────────────────────────────────────────────────────────────────
 

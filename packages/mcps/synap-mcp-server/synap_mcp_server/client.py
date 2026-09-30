@@ -303,6 +303,26 @@ async def fetch_context(
     )
 
 
+async def send_events(events: list[dict]) -> dict:
+    """Hand a batch of conversation events to the anticipation path.
+
+    ``POST /v1/events/batch`` is the HTTP door onto the same listening path
+    the gRPC ``Listen`` stream feeds. It exists precisely for a process that
+    cannot hold a socket open for the length of a conversation, which is what
+    this server is: stateless, one Bearer token per request, no place to keep
+    a stream.
+
+    Answers per event rather than per batch, so a rejection names its reason.
+    Takes no scope ids of its own — each event carries them.
+    """
+    return await _request(
+        "POST",
+        "/v1/events/batch",
+        json={"events": events},
+        timeout=settings.events_timeout_s,
+    )
+
+
 async def get_ingestion_status(ingestion_id: str) -> dict:
     """Poll the status of a queued ingestion (the long-range pipeline is async).
     Returns the REST status payload: { status, memories_created, completed_at, ... }.
