@@ -1009,6 +1009,7 @@ class GRPCTransport:
         served_item_ids: Optional[List[str]] = None,
         scope: str = "",
         source_bundle_ids: Optional[List[str]] = None,
+        query_count: int = 0,
     ) -> None:
         """Emit a ContextUsedEvent over the Listen stream.
 
@@ -1034,6 +1035,7 @@ class GRPCTransport:
             timestamp_ms=now_ms,
             scope=scope or "",
             source_bundle_ids=list(source_bundle_ids or []),
+            query_count=max(0, int(query_count or 0)),
         )
         event = synap_service_pb2.StreamEvent(context_used=used)
         async with self._write_lock:
@@ -1084,6 +1086,7 @@ class GRPCTransport:
                     "entity_id": item.entity_id,
                     "created_at": item.created_at,
                     "event_date": item.event_date or None,
+                    "said_at": item.said_at or None,
                     "valid_until": item.valid_until or None,
                     "temporal_category": item.temporal_category or None,
                     "temporal_confidence": item.temporal_confidence,

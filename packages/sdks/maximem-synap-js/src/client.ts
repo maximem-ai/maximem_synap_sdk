@@ -40,7 +40,9 @@ import { ShortTermStore } from './cache/short-term-store.js';
 import { overlayLocalRecentTurns } from './context/overlay.js';
 import { renderForPrompt, renderCompacted } from './context/local-prompt.js';
 import { TurnCounter, mergeUserSummary } from './context/user-summary.js';
-import { tryServeFromCache, servedItemIds, type Scope as AnticipationScope } from './context/anticipated.js';
+import {
+  tryServeFromCache, servedItemIds, distinctQueryCount, type Scope as AnticipationScope,
+} from './context/anticipated.js';
 import { rungKey } from './context/anticipation-cache.js';
 import type { FetchHooks } from './context/fetch.js';
 import { buildAssembledEvent } from './context/assembled.js';
@@ -171,6 +173,10 @@ export interface UnifiedFetchOptions {
   types?: string[];
   mode?: string;
   precision_level?: string;
+  /** The moment the question is being asked. See FetchOptions.query_date. */
+  query_date?: string;
+  /** A share of the response per search query. See FetchOptions.max_results_per_query. */
+  max_results_per_query?: number;
   include_conversation_context?: boolean;
   scopes?: string[];
   include_scope_labels?: boolean;
@@ -273,6 +279,16 @@ export class SynapClient {
     this.#fetchHooks = {
       beforeFetch: (scope, options) => {
         const o = options as Record<string, unknown>;
+        // A prefetched bundle was assembled with no period restriction, so it
+        // cannot answer a request that names one. Same class as the scope_path
+        // defect described below: a bundle built for one question served to a
+        // different one, entirely inside this process and invisible to every
+        // server log. Skipping the cache costs one round trip; serving a bundle
+        // that ignores the date costs the answer.
+        if (o['query_date'] ?? o['queryDate']) return null;
+        // A prefetched bundle was not assembled under a per-query share
+        // either, and its items do not say which query found them.
+        if (o['max_results_per_query'] ?? o['maxResultsPerQuery']) return null;
         const attempt = tryServeFromCache(
           this.#anticipationCache,
           scope as AnticipationScope,
@@ -351,7 +367,14 @@ export class SynapClient {
         compacted: (conversationId, format) => this.#localCompacted(conversationId, format),
       },
     );
-    this.memories = createMemoriesInterface(this.#transport);
+    // After a forget that deleted something, drop that user's cached bundles so
+    // they are not served until the TTL runs out. Unconditional, unlike the
+    // invalidate-on-write hook: a forgotten memory must not be served.
+    this.memories = createMemoriesInterface(this.#transport, ({ userId, customerId }) => {
+      for (const id of new Set([userId, customerId])) {
+        if (id) this.#anticipationCache.dropEntity(id);
+      }
+    });
     this.credits = createCreditsNamespace(this.#transport);
     this.cache = createCacheNamespace(this.#anticipationCache);
     this.instance = createInstanceNamespace(
@@ -617,6 +640,8 @@ export class SynapClient {
       types,
       mode = 'fast',
       precision_level: precisionLevel = 'high',
+      query_date: queryDate,
+      max_results_per_query: maxResultsPerQuery,
       include_conversation_context: includeConversationContext = true,
       scopes,
       include_scope_labels: includeScopeLabels = false,
@@ -634,6 +659,11 @@ export class SynapClient {
       types,
       mode,
       precision_level: precisionLevel,
+      // In `shared` so it reaches all four branches at once. The Python edit
+      // threaded three call sites by hand and missed the client branch, which
+      // sits one indent deeper; spreading removes that whole class of miss.
+      query_date: queryDate,
+      max_results_per_query: maxResultsPerQuery,
     };
 
     const labels: string[] = [];
@@ -767,6 +797,11 @@ export class SynapClient {
         scope,
         source_bundle_ids: served.bundleId ? [served.bundleId] : [],
         timestamp_ms: Date.now(),
+        // How many distinct search queries the fetch carried. A hit never
+        // reaches the fetch route, so this event is how the server learns it
+        // happened and what it is charged by. The count only: this event must
+        // not carry the caller's words.
+        query_count: distinctQueryCount(options['search_query'] ?? options['searchQuery']),
       });
     } catch {
       // Non-fatal by design.
