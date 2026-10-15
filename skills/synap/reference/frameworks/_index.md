@@ -24,6 +24,7 @@ One file per supported framework. Read only the one matching the user's stack. E
 | Claude Agent SDK, `query()`, hooks, `ClaudeAgentOptions`, MCP | `claude-agent.md` |
 | Mastra, `@mastra/core`, MastraMemory, TypeScript agent | `mastra.md` |
 | Vercel AI SDK, `ai` package, `generateText`, model wrapping | `vercel-adk.md` |
+| HarnessX, `harnessx`, `Extension`, `SynapExtension` | `harnessx.md` |
 | MCP client (Claude Desktop, Cursor, custom), no-code, "MCP server", URL + token | `mcp.md` |
 
 ## Common shape across all packages
@@ -36,13 +37,13 @@ Every integration:
 2. **Accepts `user_id`, `customer_id`, optional `conversation_id`** as scoping parameters. `customer_id` is B2B only: required on a `strict` instance, rejected with HTTP 400 on a B2C (`equals_customer`) one, where `user_id` is the whole scope. `GET /api/v1/auth/whoami` says which you have.
 3. **Degrades reads gracefully, surfaces writes explicitly.** Read failures return empty results + log; write failures raise `SynapIntegrationError` (or framework-equivalent).
 4. **Defaults `mode="fast"` for retrieval, `mode="long-range"` for ingestion** — change only if the situation demands it.
-5. **Leaves the live stream to you unless it is one of the five below.** No package opens `sdk.instance.listen()` on its own; the app owns the stream. Read `reference/streaming.md` with whichever framework file you pick.
+5. **Leaves the live stream to you unless it is one of the six below.** No package opens `sdk.instance.listen()` on its own; the app owns the stream. Read `reference/streaming.md` with whichever framework file you pick.
 
 ## Who reports the stream for you
 
-Five packages drive the live stream from the framework's own hooks. Every other
+Six packages drive the live stream from the framework's own hooks. Every other
 framework needs the loop in `reference/streaming.md` written by hand. None of
-the five covers every event, so read the third column.
+the six covers every event, so read the third column.
 
 | Framework | Reported for you | Still yours |
 | --- | --- | --- |
@@ -51,6 +52,7 @@ the five covers every event, so read the third column.
 | Claude Agent SDK (hooks) | The user's turn, tool calls, tool results, session end | The reply — call `report_assistant_turn` when the run returns |
 | Vercel AI SDK (model middleware) | Turns, tool calls, reasoning | Nothing |
 | Strands Agents | Turns and tool intent | Tool results and reasoning |
+| HarnessX (`SynapExtension`) | Turns, tool calls, tool results, session end | Reasoning |
 
 In every case the app still calls `sdk.instance.listen()` at startup and
 `stop_listening()` at shutdown. These packages are silent until it does.
