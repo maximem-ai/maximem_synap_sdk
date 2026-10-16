@@ -15,6 +15,7 @@ ENDPOINTS: Final[Dict[str, Dict[str, object]]] = {
     "memories_get": {"method": "GET", "path": "/api/v1/memories/{memory_id}", "idempotent": True},
     "memories_update": {"method": "PATCH", "path": "/api/v1/memories/{memory_id}", "idempotent": False},
     "memories_delete": {"method": "DELETE", "path": "/api/v1/memories/{memory_id}", "idempotent": True},
+    "memories_forget": {"method": "POST", "path": "/api/v1/memories/forget", "idempotent": False},
     "context_fetch_user": {"method": "POST", "path": "/v1/context/user/fetch", "idempotent": True},
     "context_fetch_customer": {"method": "POST", "path": "/v1/context/customer/fetch", "idempotent": True},
     "context_fetch_client": {"method": "POST", "path": "/v1/context/client/fetch", "idempotent": True},

@@ -3,7 +3,7 @@
  *
  * Source:    synap/proto/synap_service.proto
  * Generator: synap/sdk/scripts/gen_proto_descriptor.mjs
- * Proto SHA: c1d834043608ad4f
+ * Proto SHA: b6bca1c7234fc54b
  *
  * The proto is inlined as a JSON descriptor rather than loaded from disk so
  * that bundlers and Vercel file tracing cannot lose it. Regenerate with
@@ -11,7 +11,7 @@
  */
 
 /** sha256 (first 16 hex chars) of the proto this descriptor was built from. */
-export const PROTO_SHA = 'c1d834043608ad4f';
+export const PROTO_SHA = 'b6bca1c7234fc54b';
 
 export const SYNAP_PROTO_DESCRIPTOR = {
   "nested": {
@@ -104,6 +104,10 @@ export const SYNAP_PROTO_DESCRIPTOR = {
                   "rule": "repeated",
                   "type": "string",
                   "id": 8
+                },
+                "query_count": {
+                  "type": "int32",
+                  "id": 9
                 }
               }
             },
@@ -287,7 +291,8 @@ export const SYNAP_PROTO_DESCRIPTOR = {
                     "context_bundle",
                     "heartbeat_pong",
                     "signal",
-                    "event_ack"
+                    "event_ack",
+                    "conversation_state"
                   ]
                 }
               },
@@ -307,6 +312,22 @@ export const SYNAP_PROTO_DESCRIPTOR = {
                 "event_ack": {
                   "type": "EventAck",
                   "id": 4
+                },
+                "conversation_state": {
+                  "type": "ConversationState",
+                  "id": 5
+                }
+              }
+            },
+            "ConversationState": {
+              "fields": {
+                "conversation_id": {
+                  "type": "string",
+                  "id": 1
+                },
+                "message_count": {
+                  "type": "int64",
+                  "id": 2
                 }
               }
             },
@@ -483,6 +504,14 @@ export const SYNAP_PROTO_DESCRIPTOR = {
                 "conversation_id": {
                   "type": "string",
                   "id": 7
+                },
+                "compacted_message_count": {
+                  "type": "int32",
+                  "id": 8
+                },
+                "total_message_count": {
+                  "type": "int32",
+                  "id": 9
                 }
               }
             },
@@ -568,6 +597,10 @@ export const SYNAP_PROTO_DESCRIPTOR = {
                 "temporal_confidence": {
                   "type": "float",
                   "id": 14
+                },
+                "said_at": {
+                  "type": "string",
+                  "id": 15
                 }
               }
             },
