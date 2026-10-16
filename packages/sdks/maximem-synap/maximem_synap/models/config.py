@@ -44,12 +44,21 @@ class SDKConfig(BaseModel):
     timeouts: TimeoutConfig = Field(default_factory=TimeoutConfig)
     retry_policy: Optional[RetryPolicy] = Field(default_factory=RetryPolicy)
     log_level: str = "WARNING"
-    # Phase 1 rollout flag for SDK-authoritative short-term context.
-    # When true: SDK appends raw turns into a local ShortTermContextStore on
-    # record_message/send_message, applies compaction_update bundles into
-    # it, and serves get_compacted/get_context_for_prompt from cache before
-    # falling back to REST. Default off — flipped via env var or explicit
-    # config during the canary. See
+    # SDK-authoritative short-term context. When true the SDK serves
+    # get_compacted/get_context_for_prompt from its local ShortTermContextStore
+    # (the last compaction it was sent, plus the turns since), and falls back
+    # to REST whenever that store does not hold the whole conversation: the
+    # server reports its message count on every write and every compaction, and
+    # the store only answers when it accounts for all of them. Against a server
+    # that sends no counts it never answers locally.
+    #
+    # Defaults OFF, and should stay off for an application that runs more than
+    # one process against the same conversation. A process learns the server's
+    # count only when it writes. If it reads before it writes (build the prompt,
+    # then record the turn), it cannot know that another process recorded a
+    # turn in between, and it answers without that turn. Turn it on where one
+    # process owns a conversation for its whole life, such as a voice agent.
+    # SYNAP_SDK_ST_AUTHORITATIVE overrides this in either direction. See
     # docs/internal/sdk_authoritative_short_term_context_plan.md.
     sdk_st_authoritative: bool = False
     # Read-your-writes verbatim short-term overlay (correctness, not an

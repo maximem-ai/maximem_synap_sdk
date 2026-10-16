@@ -64,6 +64,10 @@ from .memories.models import (
     IngestStatus,
     Memory,
     MemoryStatusResponse,
+    ForgetMode,
+    ForgetStatus,
+    ForgetCandidate,
+    ForgetResponse,
     MergeStrategy,
     UpdateMemoryRequest,
 )
@@ -147,5 +151,9 @@ __all__ = [
     "BatchCreateRequest",
     "BatchCreateResponse",
     "MemoryStatusResponse",
+    "ForgetMode",
+    "ForgetStatus",
+    "ForgetCandidate",
+    "ForgetResponse",
     "UpdateMemoryRequest",
 ]

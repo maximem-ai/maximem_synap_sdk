@@ -155,6 +155,13 @@ export interface InstanceInternals {
   onCompactionUpdate(conversationId: string, bundle: Record<string, unknown>): void;
   /** Set by the client so a compaction can prune the locally buffered tail. */
   setCompactionApplier(apply: (bundle: Record<string, unknown>) => void): void;
+  /**
+   * Set by the client. Receives the server's message count for a conversation
+   * after each streamed write has been stored.
+   */
+  setConversationStateHandler(
+    handle: (conversationId: string, messageCount: number) => void,
+  ): void;
   /** Learning-loop event, fired after a fetch is served from the cache. */
   sendContextUsed(event: Record<string, unknown>): void;
   /** Audit event, fired after every fetch resolves. */
@@ -280,6 +287,8 @@ export function createInstanceNamespace(
     | null = null;
 
   let applyCompaction: ((bundle: Record<string, unknown>) => void) | null = null;
+  let onConversationState: ((conversationId: string, messageCount: number) => void) | null =
+    null;
 
   const internals: InstanceInternals = {
     onCompactionUpdate(conversationId, bundle) {
@@ -290,6 +299,9 @@ export function createInstanceNamespace(
     },
     setCompactionApplier(apply) {
       applyCompaction = apply;
+    },
+    setConversationStateHandler(handle) {
+      onConversationState = handle;
     },
     sendContextUsed(event) {
       // Fire-and-forget: the stream drops it silently when disconnected, which
@@ -372,6 +384,9 @@ export function createInstanceNamespace(
         ...(onContext !== undefined ? { onContext } : {}),
         onCompactionUpdate: (conversationId, bundle) => {
           internals.onCompactionUpdate(conversationId, bundle);
+        },
+        onConversationState: (conversationId, messageCount) => {
+          onConversationState?.(conversationId, messageCount);
         },
         onStateChange: (state: StreamState) => {
           // Any state change away from connected retires the sessions this

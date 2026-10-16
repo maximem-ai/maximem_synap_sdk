@@ -51,6 +51,46 @@ from .facade.conversation import ConversationController
 
 logger = logging.getLogger("synap.sdk")
 
+# Every ``style`` / ``format`` a compaction response can be cached under. The
+# cache key includes it, so a delete has to name each one.
+_PROMPT_CACHE_VARIANTS = ("structured", "narrative", "bullet_points")
+
+
+def _stored_batch_rows(messages: List[Dict[str, Any]], result: Any) -> List[tuple]:
+    """Pair each message a batch write stored with the server's row for it.
+
+    The server's ``results`` holds the messages that were stored, in input
+    order, and leaves the failed ones out; those are in ``errors``, each with
+    the ``index`` it had in the request. Pairing ``results`` against the whole
+    input by position shifts everything after the first failure: the failed
+    message is mirrored locally and the last stored one is lost.
+
+    Returns nothing when the two cannot be lined up. Mirroring a guess would
+    put a message that does not exist into the caller's next prompt.
+    """
+    if not isinstance(result, dict):
+        return []
+    results = result.get("results") or []
+    failed = {
+        e.get("index") for e in (result.get("errors") or []) if isinstance(e, dict)
+    }
+    stored = [m for i, m in enumerate(messages) if i not in failed]
+    if len(stored) != len(results):
+        logger.warning(
+            "Batch result does not line up with the request (%d stored, %d results); "
+            "not mirroring it locally", len(stored), len(results),
+        )
+        return []
+    return list(zip(stored, results))
+
+
+def _one_write_landed(in_flight: Dict[str, int], conversation_id: str) -> None:
+    remaining = in_flight.get(conversation_id, 0) - 1
+    if remaining > 0:
+        in_flight[conversation_id] = remaining
+    else:
+        in_flight.pop(conversation_id, None)
+
 # Event types the server has a reader for. `send_message` refuses anything
 # else rather than sending it: an unknown type falls through every classifier
 # on the server into UNKNOWN, where it is recorded and acted on by nothing, so
@@ -178,6 +218,7 @@ async def _emit_context_used_event(
     user_id: str = "",
     customer_id: str = "",
     source_bundle_ids: Optional[List[str]] = None,
+    search_query: Optional[List[str]] = None,
 ) -> None:
     """Emit a context_used event over the Listen stream (fire-and-forget).
 
@@ -185,6 +226,10 @@ async def _emit_context_used_event(
     Drives the server's learning loop: per-prefetch outcome scoring,
     per-pattern hit rates, per-query-family priors. Privacy: no raw user
     prompt content is sent — only ids and scope.
+
+    It is also how the server learns the fetch happened at all, since a hit
+    never reaches the fetch route, so it carries how many distinct search
+    queries the fetch had. The count only, for the privacy rule above.
     """
     try:
         if not sdk.instance.is_listening:
@@ -197,6 +242,7 @@ async def _emit_context_used_event(
             served_item_ids=served_item_ids,
             scope=scope,
             source_bundle_ids=source_bundle_ids or [],
+            query_count=len(dict.fromkeys(q for q in (search_query or []) if q)),
         )
     except Exception as e:
         logger.debug("context_used emit failed (non-fatal): %s", e)
@@ -322,7 +368,8 @@ def _should_skip_server_st(sdk: "MaximemSynapSDK", conversation_id: Optional[str
 
     Warm = a previous ``compaction_update`` bundle landed for this
     conversation (so the cache holds a real summary, not just locally
-    appended raw turns). Without that we still need the server's summary.
+    appended raw turns) and the entry holds every message the server does.
+    Without that we still need the server's summary.
 
     Off when ``sdk_st_authoritative`` flag is false. Off when no
     conversation id is supplied (other-scoped fetches without a
@@ -333,7 +380,9 @@ def _should_skip_server_st(sdk: "MaximemSynapSDK", conversation_id: Optional[str
     if not sdk._is_st_authoritative():
         return False
     entry = sdk._st_store.get(conversation_id)
-    return entry is not None and entry.has_compaction()
+    # Complete, not merely present: an entry that is missing turns would have
+    # the server skip the very assembly that could supply them.
+    return entry is not None and entry.has_compaction() and entry.is_complete()
 
 
 # Conv-ctx budget the server applies to ``recent_turns`` before returning them
@@ -374,10 +423,16 @@ def _overlay_local_recent_turns(
     just-said turn instead of the server's async-lagged buffer.
 
     Design (docs/internal/short_term_context_freshness_plan.md):
-      * **Verbatim tail = local store, wholesale.** The local store is a single
-        ordered append-log per conversation (no internal duplicates, one clock),
-        so we *replace* the server's ``recent_turns`` with it rather than
-        union+dedup — removing the cross-clock dedup hazard entirely [C3/C4].
+      * **Verbatim tail = local store, wholesale, when it is the whole
+        conversation.** The local store is a single ordered append-log per
+        conversation (no internal duplicates, one clock), so we *replace* the
+        server's ``recent_turns`` with it rather than union+dedup — removing
+        the cross-clock dedup hazard entirely [C3/C4]. That holds only while
+        the store holds every message the server does
+        (``CachedShortTermContext.is_complete()``). When it does not (a
+        restart, an eviction, another process writing), the server's turns are
+        kept and the local list adds only the turns that come after them,
+        matched by position and text, not by clock.
       * **Compacted fields stay server-authoritative.** ``summary`` /
         ``current_state`` / ``key_extractions`` / ``compaction_id`` are kept from
         the server's response when present, and fall back to the local entry
@@ -422,8 +477,33 @@ def _overlay_local_recent_turns(
                 return obj.get(name)
             return getattr(obj, name, None)
 
+        # Which turns the tail is built from. The local list replaces the
+        # server's only when it is known to be the whole conversation and to
+        # follow the same summary the server sent. Otherwise the server's
+        # turns stand, and the local list adds only what comes after them.
+        # A process that has just restarted holds one turn, and replacing the
+        # server's list with it dropped every turn before the restart.
+        server_compaction = _field(existing_cc, "compaction_id")
+        local_is_whole = entry.is_complete() and (
+            not server_compaction or server_compaction == entry.compaction_id
+        )
+        if existing_cc is None or local_is_whole:
+            source_turns = list(entry.recent_turns)
+        else:
+            from .cache.short_term_store import turns_after
+
+            server_turns = [
+                {
+                    "role": _field(t, "role") or "user",
+                    "content": _field(t, "content") or "",
+                    "timestamp": _field(t, "timestamp"),
+                }
+                for t in (_field(existing_cc, "recent_turns") or [])
+            ]
+            source_turns = server_turns + turns_after(entry.recent_turns, server_turns)
+
         local_turns: List[Dict[str, Any]] = []
-        for t in entry.recent_turns:
+        for t in source_turns:
             ts = t.get("timestamp")
             if isinstance(ts, datetime):
                 ts = ts.isoformat()
@@ -742,6 +822,11 @@ def _merge_user_summary_into_response(
                 "detected_at": item.get("detected_at") or item.get("extracted_at") or item.get("created_at"),
                 "metadata": item.get("metadata", {}),
                 "event_date": item.get("event_date"),
+                # The day it was said, which is not the day it happened.
+                # Dropping it here would make every typed item built
+                # through this path carry no date whenever the turn
+                # stated no event date.
+                "said_at": item.get("said_at"),
                 "valid_until": item.get("valid_until"),
                 "temporal_category": item.get("temporal_category"),
                 "temporal_confidence": item.get("temporal_confidence", 0.0),
@@ -894,6 +979,10 @@ class MaximemSynapSDK:
         # instance_id. None = not-yet-checked. Refreshed opportunistically
         # via `_refresh_st_authoritative_flag()`.
         self._st_authoritative_enabled: Optional[bool] = None
+        # conversation_id -> REST writes this process has sent and not yet
+        # mirrored into the ST store. Lets the store tell two of its own
+        # concurrent writes apart from a second writer.
+        self._st_writes_in_flight: Dict[str, int] = {}
 
         # Phase 4 — typed compaction-update subscribers (per-conversation
         # callbacks fired when a `compaction_update` bundle arrives on the
@@ -972,19 +1061,25 @@ class MaximemSynapSDK:
         Resolution order:
           1. Cached value (``_st_authoritative_enabled``) — set by
              ``initialize()``.
-          2. Explicit ``SDKConfig.sdk_st_authoritative``.
-          3. Env var ``SYNAP_SDK_ST_AUTHORITATIVE`` (truthy strings only).
+          2. Env var ``SYNAP_SDK_ST_AUTHORITATIVE`` — an explicit override in
+             either direction (truthy enables, falsy disables).
+          3. ``SDKConfig.sdk_st_authoritative`` (defaults False).
 
-        Defaults to False.
+        Off by default; see the note on ``SDKConfig.sdk_st_authoritative`` for
+        why. Being enabled does not mean the local store is used: that also
+        takes an entry that holds the whole conversation, see
+        ``_st_entry_is_complete``.
         """
         if self._st_authoritative_enabled is not None:
             return self._st_authoritative_enabled
 
-        enabled = bool(getattr(self._config, "sdk_st_authoritative", False))
-        if not enabled:
-            env_val = os.environ.get("SYNAP_SDK_ST_AUTHORITATIVE", "").strip().lower()
-            if env_val in {"1", "true", "yes", "on"}:
-                enabled = True
+        env_val = os.environ.get("SYNAP_SDK_ST_AUTHORITATIVE", "").strip().lower()
+        if env_val in {"0", "false", "no", "off"}:
+            enabled = False
+        elif env_val in {"1", "true", "yes", "on"}:
+            enabled = True
+        else:
+            enabled = bool(getattr(self._config, "sdk_st_authoritative", False))
 
         self._st_authoritative_enabled = enabled
         return enabled
@@ -1023,6 +1118,65 @@ class MaximemSynapSDK:
         surface.
         """
         return self._is_st_verbatim_overlay() or self._is_st_authoritative()
+
+    def _st_entry_is_complete(self, conversation_id: Optional[str]):
+        """The ST store's entry for a conversation, if it can answer alone.
+
+        None when the flag is off, when nothing is cached, or when the server
+        holds messages the entry does not (a restart, an eviction, another
+        process writing to the same conversation). The caller then asks the
+        server.
+        """
+        if not conversation_id or not self._is_st_authoritative():
+            return None
+        entry = self._st_store.get(conversation_id)
+        if entry is None or not entry.is_complete():
+            return None
+        return entry
+
+    def _on_conversation_state(self, conversation_id: str, message_count: int) -> None:
+        """The server has written a streamed message and says how many it holds.
+
+        The cached prompt context is dropped here as well as on the send. A
+        read that lands between the send and the server's write caches an
+        answer without the turn, and the send-time drop has already happened.
+        """
+        self._st_store.note_server_count(conversation_id, message_count)
+        self._invalidate_prompt_cache(conversation_id)
+
+    def _invalidate_prompt_cache(
+        self, conversation_id: Optional[str], *, compaction_changed: bool = False,
+    ) -> None:
+        """Drop the cached ``get_context_for_prompt`` responses for a conversation.
+
+        That response holds the messages since the last compaction, so every
+        new turn makes it wrong. Nothing dropped it on a write, and the drop
+        on a compaction bundle named the key without the ``style`` it was
+        stored under and so matched nothing: the method went on returning the
+        same text for the full five-minute TTL.
+
+        ``compaction_changed`` also drops the cached ``get_compacted``
+        responses, which a new turn does not affect.
+        """
+        if not conversation_id or self._cache_manager is None:
+            return
+        try:
+            for variant in _PROMPT_CACHE_VARIANTS:
+                self._cache_manager.delete(
+                    scope=CacheScope.CONVERSATION,
+                    entity_id=conversation_id,
+                    context_type="compacted_context",
+                    query={"style": variant},
+                )
+                if compaction_changed:
+                    self._cache_manager.delete(
+                        scope=CacheScope.CONVERSATION,
+                        entity_id=conversation_id,
+                        context_type="compacted_full",
+                        query={"format": variant},
+                    )
+        except Exception:
+            pass  # Non-critical
 
     def _should_inject_user_summary(self, conversation_id: Optional[str]) -> bool:
         """Check if user summary should be injected this turn."""
@@ -1326,6 +1480,21 @@ class MaximemSynapSDK:
         types: Optional[List[str]] = None,
         mode: str = "fast",
         precision_level: str = "high",
+        # The moment the question is being asked, so the server can resolve a
+        # period the question names ("in March", "two months ago") instead of
+        # counting back from now. Absent means now, which is what every
+        # existing caller gets, byte-identical.
+        #
+        # Lenient on the server: "2023-03-11", "2023/03/11 21:26" and
+        # "2023/03/11 (Sat) 21:26" all parse, and anything unreadable falls
+        # back to now with a warning rather than failing the read.
+        query_date: Optional[str] = None,
+        # How many items each search query may contribute when `search_query`
+        # holds more than one, so a query with many strong matches cannot take
+        # every place. `max_results` stays the ceiling on the whole response.
+        # Left out, or with one query, the response is the best `max_results`
+        # overall, which is what every existing caller gets, byte-identical.
+        max_results_per_query: Optional[int] = None,
         include_conversation_context: bool = True,
         scopes: Optional[List[str]] = None,
         include_scope_labels: bool = False,
@@ -1410,6 +1579,8 @@ class MaximemSynapSDK:
                 types=types,
                 mode=mode,
                 precision_level=precision_level,
+                query_date=query_date,
+                max_results_per_query=max_results_per_query,
                 user_id=user_id,
                 customer_id=customer_id,
             ))
@@ -1428,6 +1599,8 @@ class MaximemSynapSDK:
                 types=types,
                 mode=mode,
                 precision_level=precision_level,
+                query_date=query_date,
+                max_results_per_query=max_results_per_query,
                 customer_id=customer_id,
                 context_mode=context_mode,
                 include_profile=include_profile,
@@ -1444,6 +1617,8 @@ class MaximemSynapSDK:
                 types=types,
                 mode=mode,
                 precision_level=precision_level,
+                query_date=query_date,
+                max_results_per_query=max_results_per_query,
             ))
             scope_labels.append("customer")
 
@@ -1457,6 +1632,8 @@ class MaximemSynapSDK:
                     types=types,
                     mode=mode,
                     precision_level=precision_level,
+                    query_date=query_date,
+                    max_results_per_query=max_results_per_query,
                 ))
                 scope_labels.append("client")
 
@@ -1554,6 +1731,33 @@ class MaximemSynapSDK:
         for eid in {user_id, customer_id}:
             if eid:
                 self._anticipation_cache.invalidate_entity(str(eid))
+
+    def _evict_forgotten(
+        self,
+        user_id: Optional[str] = None,
+        customer_id: Optional[str] = None,
+    ) -> None:
+        """Drop this user's locally cached context after a forget deleted something.
+
+        The server has removed the memory, but a copy in this process's context
+        cache or anticipation cache would keep serving it until its TTL ran out.
+        Unlike `_invalidate_anticipation_on_write`, this is not gated by an
+        environment flag: a forgotten memory must not be served. Over-eviction
+        only costs the next lookup a cold fetch. Never raises, so a cache problem
+        cannot turn a successful delete into an error.
+        """
+        if user_id and self._cache_manager is not None:
+            try:
+                self._cache_manager.clear_user(str(user_id))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("forget: could not clear the local context cache: %s", e)
+        if self._anticipation_cache is not None:
+            for eid in {user_id, customer_id}:
+                if eid:
+                    try:
+                        self._anticipation_cache.invalidate_entity(str(eid))
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("forget: could not clear the anticipation cache: %s", e)
 
     async def _get_auth_context(self, correlation_id: Optional[str] = None):
         """Get auth context for requests."""
@@ -1749,17 +1953,24 @@ class ConversationInterface:
         validate_conversation_id(conversation_id)
         controller = self._ensure_controller()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
-        result = await controller.record_message(
-            conversation_id=conversation_id,
-            role=role,
-            content=content,
-            user_id=user_id,
-            customer_id=customer_id,
-            session_id=session_id,
-            metadata=metadata,
-            scope_path=scope_path,
-            correlation_id=correlation_id,
-        )
+        in_flight = self._sdk._st_writes_in_flight
+        in_flight[conversation_id] = in_flight.get(conversation_id, 0) + 1
+        try:
+            result = await controller.record_message(
+                conversation_id=conversation_id,
+                role=role,
+                content=content,
+                user_id=user_id,
+                customer_id=customer_id,
+                session_id=session_id,
+                metadata=metadata,
+                scope_path=scope_path,
+                correlation_id=correlation_id,
+            )
+        finally:
+            _one_write_landed(in_flight, conversation_id)
+        # The cached prompt context ends at the turn before this one.
+        self._sdk._invalidate_prompt_cache(conversation_id)
         # Mirror the turn into the local ST store only AFTER the server
         # acknowledges the write (D3 in the plan). Append on success guarantees
         # the SDK cache and the server's view stay consistent w.r.t. which turns
@@ -1784,6 +1995,15 @@ class ConversationInterface:
                     role=role,
                     content=content,
                     timestamp=ts,
+                    # The server's id and its message count for the
+                    # conversation after this write. The count is what tells
+                    # the store whether it holds the whole conversation.
+                    message_id=result.get("message_id") if isinstance(result, dict) else None,
+                    server_message_count=(
+                        result.get("conversation_message_count")
+                        if isinstance(result, dict) else None
+                    ),
+                    in_flight=in_flight.get(conversation_id, 0),
                 )
             except Exception as e:
                 logger.warning("Failed to append turn to ST store: %s", e)
@@ -1816,12 +2036,10 @@ class ConversationInterface:
         )
         if self._sdk._st_store_active():
             # Best-effort mirror: only the rows the server confirmed succeeded
-            # should be reflected in local cache. The batch result has a
-            # per-message ``results`` array aligned with the input order; rows
-            # without a ``message_id`` are treated as failed (matches the
-            # server-side route's response shape).
-            results = result.get("results", []) if isinstance(result, dict) else []
-            for msg, res in zip(messages, results):
+            # should be reflected in local cache. ``results`` lists the stored
+            # rows only, in input order, and ``errors`` names the failed ones
+            # by index, so the two are paired up by ``_stored_batch_rows``.
+            for msg, res in _stored_batch_rows(messages, result):
                 if not isinstance(res, dict) or not res.get("message_id"):
                     continue
                 try:
@@ -1829,10 +2047,16 @@ class ConversationInterface:
                         conversation_id=msg.get("conversation_id", ""),
                         role=msg.get("role", "user"),
                         content=msg.get("content", ""),
+                        message_id=res.get("message_id"),
+                        server_message_count=res.get("conversation_message_count"),
+                        in_flight=self._sdk._st_writes_in_flight.get(
+                            msg.get("conversation_id", ""), 0
+                        ),
                     )
                 except Exception as e:
                     logger.warning("Failed to append batch turn to ST store: %s", e)
         for msg in messages:
+            self._sdk._invalidate_prompt_cache(msg.get("conversation_id"))
             self._sdk._invalidate_anticipation_on_write(
                 user_id=msg.get("user_id"), customer_id=msg.get("customer_id")
             )
@@ -2095,6 +2319,21 @@ class ConversationContextInterface:
         types: Optional[List[str]] = None,
         mode: str = "fast",
         precision_level: str = "high",
+        # The moment the question is being asked, so the server can resolve a
+        # period the question names ("in March", "two months ago") instead of
+        # counting back from now. Absent means now, which is what every
+        # existing caller gets, byte-identical.
+        #
+        # Lenient on the server: "2023-03-11", "2023/03/11 21:26" and
+        # "2023/03/11 (Sat) 21:26" all parse, and anything unreadable falls
+        # back to now with a warning rather than failing the read.
+        query_date: Optional[str] = None,
+        # How many items each search query may contribute when `search_query`
+        # holds more than one, so a query with many strong matches cannot take
+        # every place. `max_results` stays the ceiling on the whole response.
+        # Left out, or with one query, the response is the best `max_results`
+        # overall, which is what every existing caller gets, byte-identical.
+        max_results_per_query: Optional[int] = None,
         user_id: Optional[str] = None,
         customer_id: Optional[str] = None,
         scope_path: Optional[Dict[str, str]] = None,
@@ -2150,6 +2389,14 @@ class ConversationContextInterface:
             "types": types,
             "mode": mode,
             "precision_level": precision_level,
+            # ⚠ PART OF THE KEY, for the same reason scope_path is below: it
+            # changes which items the server keeps, so two fetches differing
+            # only in the date they name must not share one cached answer.
+            "query_date": query_date,
+            # ⚠ PART OF THE KEY when set: it decides which items fill the
+            # response. Absent from the dict when unset, so the key of every
+            # fetch that does not use it is the key it had before.
+            **({"max_results_per_query": max_results_per_query} if max_results_per_query else {}),
             # ⚠ The rung this read is addressed to is PART OF THE KEY.
             #
             # `scope_path` reached the request body and nothing else, so two
@@ -2182,7 +2429,13 @@ class ConversationContextInterface:
         # case behaves exactly as it did.
         _rung = _rung_key(scope_path)
 
-        anticipated = self._sdk._anticipation_cache.lookup(
+        # A prefetched bundle was assembled with no period restriction, so it
+        # cannot answer a request that names one. Same class as the scope_path
+        # defect described above: a bundle built for one question served to a
+        # different one, entirely inside this process and invisible to every
+        # server log. Skipping the cache costs one round trip; serving a bundle
+        # that ignores the date costs the answer.
+        anticipated = None if (query_date or max_results_per_query) else self._sdk._anticipation_cache.lookup(
             search_query=search_query,
             entity_id=user_id,
             conversation_id=conversation_id,
@@ -2203,6 +2456,7 @@ class ConversationContextInterface:
                 scope="conversation",
                 conversation_id=conversation_id,
                 source_bundle_ids=anticipated.get("source_bundle_ids", []),
+                search_query=search_query,
             ))
         else:
             # Check local cache
@@ -2245,6 +2499,17 @@ class ConversationContextInterface:
                 }
                 if precision_level != "high":
                     body["precision_level"] = precision_level
+                # Omitted at its default, like precision_level above. The golden
+                # payloads in CONTRACT/conformance/request_payloads.json are
+                # byte-for-byte, so an always-present key would break every
+                # existing case and every caller who never sets it.
+                if query_date:
+                    body["query_date"] = query_date
+                # Omitted when unset, like query_date above. A prefetched
+                # bundle was not assembled under a share either, which is why
+                # the lookup above is skipped when one is named.
+                if max_results_per_query:
+                    body["max_results_per_query"] = max_results_per_query
                 if skip_server_st:
                     body["include_conversation_context"] = False
                 # Nested scoping. Names each rung of the client's own ladder
@@ -2274,6 +2539,11 @@ class ConversationContextInterface:
                 context_data = result.get("context", {})
                 if "conversation_context" in result:
                     context_data["conversation_context"] = result["conversation_context"]
+                # Carried across for the same reason: `retrieval` is a SIBLING
+                # of `context` in the body, so the factory never saw it and the
+                # server's own failure signal was dropped by this SDK.
+                if "retrieval" in result:
+                    context_data["retrieval"] = result["retrieval"]
                 response = ContextResponse.from_cloud_response(context_data, metadata)
                 # NB: when skip_server_st is set the server omits
                 # conversation_context; the local ST block is spliced back on by
@@ -2475,7 +2745,7 @@ class ConversationContextInterface:
         # latest).
         if version is None and self._sdk._is_st_authoritative():
             try:
-                entry = self._sdk._st_store.get(conversation_id)
+                entry = self._sdk._st_entry_is_complete(conversation_id)
                 if entry and entry.has_compaction():
                     from .formatter.context_for_prompt import LocalContextFormatter
                     rendered = LocalContextFormatter.render_compacted(
@@ -2647,12 +2917,17 @@ class ConversationContextInterface:
         correlation_id = generate_correlation_id(self._sdk.instance_id)
 
         # SDK-authoritative path: render locally from the ST store when
-        # the feature is on and we have either a compaction or pending
-        # raw turns for this conversation. This bypasses the cloud
-        # round-trip entirely on the warm path.
+        # the feature is on and the store holds the whole conversation: the
+        # server has confirmed a count this entry accounts for. This bypasses
+        # the cloud round-trip entirely on the warm path. An entry that is
+        # merely present is not enough. After a restart or an eviction it
+        # holds one turn, and rendering that as the conversation drops
+        # everything said before it.
+        st_entry = None
         if self._sdk._is_st_authoritative():
             try:
-                entry = self._sdk._st_store.get(conversation_id)
+                st_entry = self._sdk._st_store.get(conversation_id)
+                entry = st_entry if st_entry is not None and st_entry.is_complete() else None
                 if entry is not None and (
                     entry.has_compaction() or entry.recent_turns
                 ):
@@ -2674,9 +2949,14 @@ class ConversationContextInterface:
                     e,
                 )
 
-        # Check local cache first (Tier 2 optimization)
+        # Check local cache first (Tier 2 optimization). Skipped for a
+        # conversation this process writes to under the ST-authoritative flag:
+        # getting here means its entry is behind the server, and only a fresh
+        # answer can bring it back in step (or, for a conversation another
+        # process also writes to, be right at all).
+        reseeding = st_entry is not None and st_entry.participant
         try:
-            cached = self._sdk._cache_manager.get(
+            cached = None if reseeding else self._sdk._cache_manager.get(
                 scope=CacheScope.CONVERSATION,
                 entity_id=conversation_id,
                 context_type="compacted_context",
@@ -2720,6 +3000,20 @@ class ConversationContextInterface:
             compacted_message_count=result.get("compacted_message_count", 0),
             total_message_count=result.get("total_message_count", 0),
         )
+
+        if reseeding:
+            # The server's answer lists every message its summary does not
+            # cover, which is exactly what the entry was missing.
+            try:
+                self._sdk._st_store.reseed(
+                    conversation_id,
+                    compaction_id=result.get("compaction_id"),
+                    recent_messages=result.get("recent_messages") or [],
+                    compacted_message_count=result.get("compacted_message_count", 0),
+                    total_message_count=result.get("total_message_count", 0),
+                )
+            except Exception as e:
+                logger.warning("Failed to reseed ST store: %s", e)
 
         # Cache the response locally (5 min TTL)
         try:
@@ -2842,6 +3136,21 @@ class UserContextInterface:
         types: Optional[List[str]] = None,
         mode: str = "fast",
         precision_level: str = "high",
+        # The moment the question is being asked, so the server can resolve a
+        # period the question names ("in March", "two months ago") instead of
+        # counting back from now. Absent means now, which is what every
+        # existing caller gets, byte-identical.
+        #
+        # Lenient on the server: "2023-03-11", "2023/03/11 21:26" and
+        # "2023/03/11 (Sat) 21:26" all parse, and anything unreadable falls
+        # back to now with a warning rather than failing the read.
+        query_date: Optional[str] = None,
+        # How many items each search query may contribute when `search_query`
+        # holds more than one, so a query with many strong matches cannot take
+        # every place. `max_results` stays the ceiling on the whole response.
+        # Left out, or with one query, the response is the best `max_results`
+        # overall, which is what every existing caller gets, byte-identical.
+        max_results_per_query: Optional[int] = None,
         customer_id: Optional[str] = None,
         context_mode: str = "in-conversation",
         include_profile: bool = True,
@@ -2912,6 +3221,14 @@ class UserContextInterface:
             "types": types,
             "mode": mode,
             "precision_level": precision_level,
+            # ⚠ PART OF THE KEY, for the same reason scope_path is below: it
+            # changes which items the server keeps, so two fetches differing
+            # only in the date they name must not share one cached answer.
+            "query_date": query_date,
+            # ⚠ PART OF THE KEY when set: it decides which items fill the
+            # response. Absent from the dict when unset, so the key of every
+            # fetch that does not use it is the key it had before.
+            **({"max_results_per_query": max_results_per_query} if max_results_per_query else {}),
             # Summary mode is a distinct cache key so it can never be served a
             # cached in-conversation items bundle (and vice-versa).
             "context_mode": context_mode,
@@ -2944,7 +3261,13 @@ class UserContextInterface:
         # case behaves exactly as it did.
         _rung = _rung_key(scope_path)
 
-        anticipated = self._sdk._anticipation_cache.lookup(
+        # A prefetched bundle was assembled with no period restriction, so it
+        # cannot answer a request that names one. Same class as the scope_path
+        # defect described above: a bundle built for one question served to a
+        # different one, entirely inside this process and invisible to every
+        # server log. Skipping the cache costs one round trip; serving a bundle
+        # that ignores the date costs the answer.
+        anticipated = None if (query_date or max_results_per_query) else self._sdk._anticipation_cache.lookup(
             search_query=search_query,
             entity_id=user_id,
             customer_id=customer_id,
@@ -2966,6 +3289,7 @@ class UserContextInterface:
                 customer_id=customer_id or "",
                 conversation_id=conversation_id or "",
                 source_bundle_ids=anticipated.get("source_bundle_ids", []),
+                search_query=search_query,
             ))
         else:
             # Check local cache
@@ -3001,6 +3325,17 @@ class UserContextInterface:
                 }
                 if precision_level != "high":
                     body["precision_level"] = precision_level
+                # Omitted at its default, like precision_level above. The golden
+                # payloads in CONTRACT/conformance/request_payloads.json are
+                # byte-for-byte, so an always-present key would break every
+                # existing case and every caller who never sets it.
+                if query_date:
+                    body["query_date"] = query_date
+                # Omitted when unset, like query_date above. A prefetched
+                # bundle was not assembled under a share either, which is why
+                # the lookup above is skipped when one is named.
+                if max_results_per_query:
+                    body["max_results_per_query"] = max_results_per_query
                 if skip_server_st:
                     body["include_conversation_context"] = False
                 # Nested scoping. Names each rung of the client's own ladder
@@ -3037,6 +3372,11 @@ class UserContextInterface:
                 context_data = result.get("context", {})
                 if "conversation_context" in result:
                     context_data["conversation_context"] = result["conversation_context"]
+                # Carried across for the same reason: `retrieval` is a SIBLING
+                # of `context` in the body, so the factory never saw it and the
+                # server's own failure signal was dropped by this SDK.
+                if "retrieval" in result:
+                    context_data["retrieval"] = result["retrieval"]
                 # Splice the C4 summary siblings (profile / conversations) into
                 # context_data so ContextResponse.from_cloud_response types them.
                 for _summary_key in ("profile", "conversations"):
@@ -3136,6 +3476,21 @@ class CustomerContextInterface:
         types: Optional[List[str]] = None,
         mode: str = "fast",
         precision_level: str = "high",
+        # The moment the question is being asked, so the server can resolve a
+        # period the question names ("in March", "two months ago") instead of
+        # counting back from now. Absent means now, which is what every
+        # existing caller gets, byte-identical.
+        #
+        # Lenient on the server: "2023-03-11", "2023/03/11 21:26" and
+        # "2023/03/11 (Sat) 21:26" all parse, and anything unreadable falls
+        # back to now with a warning rather than failing the read.
+        query_date: Optional[str] = None,
+        # How many items each search query may contribute when `search_query`
+        # holds more than one, so a query with many strong matches cannot take
+        # every place. `max_results` stays the ceiling on the whole response.
+        # Left out, or with one query, the response is the best `max_results`
+        # overall, which is what every existing caller gets, byte-identical.
+        max_results_per_query: Optional[int] = None,
         scope_path: Optional[Dict[str, str]] = None,
     ) -> ContextResponse:
         """Fetch context for a customer (B2B)."""
@@ -3163,6 +3518,14 @@ class CustomerContextInterface:
             "types": types,
             "mode": mode,
             "precision_level": precision_level,
+            # ⚠ PART OF THE KEY, for the same reason scope_path is below: it
+            # changes which items the server keeps, so two fetches differing
+            # only in the date they name must not share one cached answer.
+            "query_date": query_date,
+            # ⚠ PART OF THE KEY when set: it decides which items fill the
+            # response. Absent from the dict when unset, so the key of every
+            # fetch that does not use it is the key it had before.
+            **({"max_results_per_query": max_results_per_query} if max_results_per_query else {}),
             # ⚠ The rung this read is addressed to is PART OF THE KEY.
             #
             # `scope_path` reached the request body and nothing else, so two
@@ -3191,7 +3554,13 @@ class CustomerContextInterface:
         # case behaves exactly as it did.
         _rung = _rung_key(scope_path)
 
-        anticipated = self._sdk._anticipation_cache.lookup(
+        # A prefetched bundle was assembled with no period restriction, so it
+        # cannot answer a request that names one. Same class as the scope_path
+        # defect described above: a bundle built for one question served to a
+        # different one, entirely inside this process and invisible to every
+        # server log. Skipping the cache costs one round trip; serving a bundle
+        # that ignores the date costs the answer.
+        anticipated = None if (query_date or max_results_per_query) else self._sdk._anticipation_cache.lookup(
             search_query=search_query,
             entity_id=customer_id,
             client_id=self._sdk._client_id,
@@ -3211,6 +3580,7 @@ class CustomerContextInterface:
                 customer_id=customer_id,
                 conversation_id=conversation_id or "",
                 source_bundle_ids=anticipated.get("source_bundle_ids", []),
+                search_query=search_query,
             ))
         else:
             cached = self._sdk._cache_manager.get(
@@ -3244,6 +3614,17 @@ class CustomerContextInterface:
                 }
                 if precision_level != "high":
                     body["precision_level"] = precision_level
+                # Omitted at its default, like precision_level above. The golden
+                # payloads in CONTRACT/conformance/request_payloads.json are
+                # byte-for-byte, so an always-present key would break every
+                # existing case and every caller who never sets it.
+                if query_date:
+                    body["query_date"] = query_date
+                # Omitted when unset, like query_date above. A prefetched
+                # bundle was not assembled under a share either, which is why
+                # the lookup above is skipped when one is named.
+                if max_results_per_query:
+                    body["max_results_per_query"] = max_results_per_query
                 if skip_server_st:
                     body["include_conversation_context"] = False
                 # Nested scoping. Names each rung of the client's own ladder
@@ -3273,6 +3654,11 @@ class CustomerContextInterface:
                 context_data = result.get("context", {})
                 if "conversation_context" in result:
                     context_data["conversation_context"] = result["conversation_context"]
+                # Carried across for the same reason: `retrieval` is a SIBLING
+                # of `context` in the body, so the factory never saw it and the
+                # server's own failure signal was dropped by this SDK.
+                if "retrieval" in result:
+                    context_data["retrieval"] = result["retrieval"]
                 response = ContextResponse.from_cloud_response(context_data, metadata)
 
                 # skip_server_st → server omits conversation_context; the local
@@ -3366,6 +3752,21 @@ class ClientContextInterface:
         types: Optional[List[str]] = None,
         mode: str = "fast",
         precision_level: str = "high",
+        # The moment the question is being asked, so the server can resolve a
+        # period the question names ("in March", "two months ago") instead of
+        # counting back from now. Absent means now, which is what every
+        # existing caller gets, byte-identical.
+        #
+        # Lenient on the server: "2023-03-11", "2023/03/11 21:26" and
+        # "2023/03/11 (Sat) 21:26" all parse, and anything unreadable falls
+        # back to now with a warning rather than failing the read.
+        query_date: Optional[str] = None,
+        # How many items each search query may contribute when `search_query`
+        # holds more than one, so a query with many strong matches cannot take
+        # every place. `max_results` stays the ceiling on the whole response.
+        # Left out, or with one query, the response is the best `max_results`
+        # overall, which is what every existing caller gets, byte-identical.
+        max_results_per_query: Optional[int] = None,
         scope_path: Optional[Dict[str, str]] = None,
     ) -> ContextResponse:
         """Fetch organizational context."""
@@ -3392,6 +3793,14 @@ class ClientContextInterface:
             "types": types,
             "mode": mode,
             "precision_level": precision_level,
+            # ⚠ PART OF THE KEY, for the same reason scope_path is below: it
+            # changes which items the server keeps, so two fetches differing
+            # only in the date they name must not share one cached answer.
+            "query_date": query_date,
+            # ⚠ PART OF THE KEY when set: it decides which items fill the
+            # response. Absent from the dict when unset, so the key of every
+            # fetch that does not use it is the key it had before.
+            **({"max_results_per_query": max_results_per_query} if max_results_per_query else {}),
             # ⚠ The rung this read is addressed to is PART OF THE KEY.
             #
             # `scope_path` reached the request body and nothing else, so two
@@ -3421,7 +3830,13 @@ class ClientContextInterface:
         # case behaves exactly as it did.
         _rung = _rung_key(scope_path)
 
-        anticipated = self._sdk._anticipation_cache.lookup(
+        # A prefetched bundle was assembled with no period restriction, so it
+        # cannot answer a request that names one. Same class as the scope_path
+        # defect described above: a bundle built for one question served to a
+        # different one, entirely inside this process and invisible to every
+        # server log. Skipping the cache costs one round trip; serving a bundle
+        # that ignores the date costs the answer.
+        anticipated = None if (query_date or max_results_per_query) else self._sdk._anticipation_cache.lookup(
             search_query=search_query,
             entity_id="_client",
             client_id=self._sdk._client_id,
@@ -3440,6 +3855,7 @@ class ClientContextInterface:
                 scope="client",
                 conversation_id=conversation_id or "",
                 source_bundle_ids=anticipated.get("source_bundle_ids", []),
+                search_query=search_query,
             ))
         else:
             cached = self._sdk._cache_manager.get(
@@ -3472,6 +3888,17 @@ class ClientContextInterface:
                 }
                 if precision_level != "high":
                     body["precision_level"] = precision_level
+                # Omitted at its default, like precision_level above. The golden
+                # payloads in CONTRACT/conformance/request_payloads.json are
+                # byte-for-byte, so an always-present key would break every
+                # existing case and every caller who never sets it.
+                if query_date:
+                    body["query_date"] = query_date
+                # Omitted when unset, like query_date above. A prefetched
+                # bundle was not assembled under a share either, which is why
+                # the lookup above is skipped when one is named.
+                if max_results_per_query:
+                    body["max_results_per_query"] = max_results_per_query
                 if skip_server_st:
                     body["include_conversation_context"] = False
                 # Nested scoping. Names each rung of the client's own ladder
@@ -3501,6 +3928,11 @@ class ClientContextInterface:
                 context_data = result.get("context", {})
                 if "conversation_context" in result:
                     context_data["conversation_context"] = result["conversation_context"]
+                # Carried across for the same reason: `retrieval` is a SIBLING
+                # of `context` in the body, so the factory never saw it and the
+                # server's own failure signal was dropped by this SDK.
+                if "retrieval" in result:
+                    context_data["retrieval"] = result["retrieval"]
                 response = ContextResponse.from_cloud_response(context_data, metadata)
 
                 # skip_server_st → server omits conversation_context; the local
@@ -3602,6 +4034,9 @@ class InstanceInterface:
             # Where the outbox journal lives, so buffered events survive a
             # restart. Same root the cache uses; None means ~/.synap.
             storage_path=self._sdk._config.storage_path,
+            # The server's message count after each streamed write, which is
+            # how the ST store learns whether it holds the whole conversation.
+            on_conversation_state=self._sdk._on_conversation_state,
             **kwargs,
         )
         self._sdk._grpc_transport = transport
@@ -3674,23 +4109,11 @@ class InstanceInterface:
 
             conv_id = bundle_dict.get("_anticipation_conversation_id")
             if conv_id:
-                try:
-                    self._sdk._cache_manager.delete(
-                        scope=CacheScope.CONVERSATION,
-                        entity_id=conv_id,
-                        context_type="compacted_full",
-                    )
-                    self._sdk._cache_manager.delete(
-                        scope=CacheScope.CONVERSATION,
-                        entity_id=conv_id,
-                        context_type="compacted_context",
-                    )
-                    logger.debug(
-                        "Invalidated local compaction cache for conversation %s",
-                        conv_id,
-                    )
-                except Exception:
-                    pass  # Non-critical
+                self._sdk._invalidate_prompt_cache(conv_id, compaction_changed=True)
+                logger.debug(
+                    "Invalidated local compaction cache for conversation %s",
+                    conv_id,
+                )
 
                 # Phase 4: dispatch to typed subscribers for this conversation.
                 # Failures in user callbacks are swallowed and logged so a
@@ -3891,9 +4314,16 @@ class InstanceInterface:
 
         await transport.send(payload)
 
-        # Mirror the turn into the local ST store (read-your-writes). gRPC send
-        # is fire-and-forget (no ack), so we treat the successful write to the
-        # stream as confirmation. Gated on ``_st_store_active`` (overlay OR
+        if event_type in ("user_message", "assistant_message"):
+            # The cached prompt context ends at the turn before this one.
+            self._sdk._invalidate_prompt_cache(conversation_id)
+
+        # Mirror the turn into the local ST store (read-your-writes). The send
+        # returns before the server has written the turn, so we treat the
+        # successful write to the stream as confirmation. The server's message
+        # count follows on the stream once the row exists (``ConversationState``,
+        # handled by ``ShortTermContextStore.note_server_count``). Gated on
+        # ``_st_store_active`` (overlay OR
         # authoritative) so the overlay captures the turn with the authoritative
         # flag off [C1] — this is the path the playground emits on. Only mirror
         # conversational events, not tool_call/context_request hints.

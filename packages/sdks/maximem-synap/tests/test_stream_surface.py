@@ -58,6 +58,7 @@ def make_instance() -> InstanceInterface:
     inst._sdk = type("FakeSDK", (), {
         "_check_customer_id": lambda *a, **k: None,
         "_st_store_active": lambda self=None: False,
+        "_invalidate_prompt_cache": lambda *a, **k: None,
         "_grpc_transport": None,
     })()
     inst._controller = FakeController()
