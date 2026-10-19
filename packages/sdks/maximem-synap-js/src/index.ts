@@ -26,6 +26,8 @@ export {
   type CreateMemoryOptions, type CreateMemoryResult, type MemoriesInterface,
   type DocumentType, type IngestMode, type UpdateMemoryOptions, type WaitOptions,
   type CreateFromFileOptions, type BatchCreateResult,
+  FORGET_MODES, type ForgetOptions, type ForgetResult, type ForgetCandidate,
+  type ForgetMode, type ForgetStatus,
 } from './memories/interface.js';
 export type {
   ConversationNamespace, RecordMessageOptions, IngestTranscriptOptions,

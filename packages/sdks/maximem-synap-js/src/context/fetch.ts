@@ -40,6 +40,8 @@ export function buildFetchRequest(scope: Scope, options: FetchOptions): BuiltReq
   const searchQuery = opt<string[]>(options, 'search_query', 'searchQuery');
   const maxResults = opt<number>(options, 'max_results', 'maxResults') ?? 10;
   const precisionLevel = opt<string>(options, 'precision_level', 'precisionLevel') ?? 'high';
+  const queryDate = opt<string>(options, 'query_date', 'queryDate');
+  const perQuery = opt<number>(options, 'max_results_per_query', 'maxResultsPerQuery');
   const mode = options.mode ?? 'fast';
 
   if (searchQuery !== undefined && !Array.isArray(searchQuery)) {
@@ -55,6 +57,8 @@ export function buildFetchRequest(scope: Scope, options: FetchOptions): BuiltReq
   //   - conversation_id is ALWAYS present, null when unset, not omitted
   //   - mode always defaults to "fast"
   //   - precision_level is sent ONLY when it differs from "high"
+  //   - query_date is sent ONLY when the caller supplied one
+  //   - max_results_per_query is sent ONLY when the caller supplied one
   //   - include_conversation_context is sent ONLY when false
   // Sending an extra key, or omitting one Python always sends, is exactly the
   // kind of difference that shows up as "works in Python, empty in JS".
@@ -66,6 +70,10 @@ export function buildFetchRequest(scope: Scope, options: FetchOptions): BuiltReq
     mode,
   };
   if (precisionLevel !== 'high') body['precision_level'] = precisionLevel;
+  // Omitted at its default, for the same reason precision_level is.
+  if (queryDate) body['query_date'] = queryDate;
+  // Omitted when unset, and `0` counts as unset, as in Python.
+  if (perQuery) body['max_results_per_query'] = perQuery;
   if (options.include_conversation_context === false) {
     body['include_conversation_context'] = false;
   }

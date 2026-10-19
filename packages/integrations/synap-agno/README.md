@@ -15,21 +15,30 @@ Requires `agno>=2.0`, `maximem-synap>=0.2.0`.
 ```python
 from agno.agent import Agent
 from agno.models.openai import OpenAIChat
+import asyncio
+
 from maximem_synap import MaximemSynapSDK
 from synap_agno import SynapDb, create_synap_hooks
 
 sdk = MaximemSynapSDK(api_key="sk-...")
+asyncio.run(sdk.initialize())  # required: without it every Synap call fails
 
 agent = Agent(
     db=SynapDb(sdk, customer_id="acme"),
     model=OpenAIChat(id="gpt-4o-mini"),
-    enable_user_memories=True,
+    update_memory_on_run=True,  # Agno 2.5+; enable_user_memories was removed in Agno 3.0
     **create_synap_hooks(sdk, customer_id="acme"),
 )
 
 agent.run("Remember that I prefer tea over coffee", user_id="alice")
 agent.run("What do you remember about me?", user_id="alice")
 ```
+
+For async agents (`await agent.arun(...)`) use `AsyncSynapDb` instead of `SynapDb`.
+
+Synap retrieval answers a question; it cannot list everything stored for a user.
+`get_user_memories(user_id, search_content="...")` returns what matches that topic; with no
+search term it asks `default_query` and returns a best-effort sample.
 
 ## Reporting the turn
 
