@@ -36,11 +36,13 @@ import { createInstanceNamespace, type InstanceNamespace } from './instance/inte
 import type { FetchOptions, Json, NormalisedContext, RawContext } from './context/types.js';
 import { SDK_VERSION } from './version.js';
 import * as registry from './registry.js';
-import { ShortTermStore } from './cache/short-term-store.js';
+import { ShortTermStore, isComplete, type ShortTermTurn } from './cache/short-term-store.js';
 import { overlayLocalRecentTurns } from './context/overlay.js';
 import { renderForPrompt, renderCompacted } from './context/local-prompt.js';
 import { TurnCounter, mergeUserSummary } from './context/user-summary.js';
-import { tryServeFromCache, servedItemIds, type Scope as AnticipationScope } from './context/anticipated.js';
+import {
+  tryServeFromCache, servedItemIds, distinctQueryCount, type Scope as AnticipationScope,
+} from './context/anticipated.js';
 import { rungKey } from './context/anticipation-cache.js';
 import type { FetchHooks } from './context/fetch.js';
 import { buildAssembledEvent } from './context/assembled.js';
@@ -101,7 +103,15 @@ export interface SynapClientOptions {
   /**
    * Let the SDK answer `get_context_for_prompt` and `get_compacted` from its
    * own short-term store when the conversation is warm, skipping the cloud
-   * round trip. Off by default. `SYNAP_SDK_ST_AUTHORITATIVE` also enables it.
+   * round trip. Off by default. `SYNAP_SDK_ST_AUTHORITATIVE` overrides this in
+   * either direction.
+   *
+   * Leave it off for an application that runs more than one process against
+   * the same conversation. A process learns the server's message count only
+   * when it writes. If it reads before it writes (build the prompt, then
+   * record the turn), it cannot know that another process recorded a turn in
+   * between, and it answers without that turn. Turn it on where one process
+   * owns a conversation for its whole life, such as a voice agent.
    *
    * This is the COST switch. `st_verbatim_overlay` is the correctness one and
    * is independent of it.
@@ -171,6 +181,10 @@ export interface UnifiedFetchOptions {
   types?: string[];
   mode?: string;
   precision_level?: string;
+  /** The moment the question is being asked. See FetchOptions.query_date. */
+  query_date?: string;
+  /** A share of the response per search query. See FetchOptions.max_results_per_query. */
+  max_results_per_query?: number;
   include_conversation_context?: boolean;
   scopes?: string[];
   include_scope_labels?: boolean;
@@ -273,6 +287,16 @@ export class SynapClient {
     this.#fetchHooks = {
       beforeFetch: (scope, options) => {
         const o = options as Record<string, unknown>;
+        // A prefetched bundle was assembled with no period restriction, so it
+        // cannot answer a request that names one. Same class as the scope_path
+        // defect described below: a bundle built for one question served to a
+        // different one, entirely inside this process and invisible to every
+        // server log. Skipping the cache costs one round trip; serving a bundle
+        // that ignores the date costs the answer.
+        if (o['query_date'] ?? o['queryDate']) return null;
+        // A prefetched bundle was not assembled under a per-query share
+        // either, and its items do not say which query found them.
+        if (o['max_results_per_query'] ?? o['maxResultsPerQuery']) return null;
         const attempt = tryServeFromCache(
           this.#anticipationCache,
           scope as AnticipationScope,
@@ -339,8 +363,12 @@ export class SynapClient {
       },
       // Buffer the turn locally so the next fetch sees it, ahead of the server
       // having persisted and compacted it.
-      ({ conversationId, role, content, timestamp }) => {
-        this.#shortTerm.appendTurn(conversationId, role, content, timestamp);
+      ({ conversationId, role, content, timestamp, messageId, serverMessageCount, inFlight }) => {
+        this.#shortTerm.appendTurn(conversationId, role, content, timestamp, {
+          messageId,
+          serverMessageCount,
+          inFlight,
+        });
       },
       (response, conversationId, userId, scopePath) => {
         overlayLocalRecentTurns(response, this.#shortTerm, conversationId, this.#stVerbatimOverlay);
@@ -349,9 +377,17 @@ export class SynapClient {
       {
         prompt: (conversationId, style) => this.#localPrompt(conversationId, style),
         compacted: (conversationId, format) => this.#localCompacted(conversationId, format),
+        reseed: (conversationId, response) => this.#reseedShortTerm(conversationId, response),
       },
     );
-    this.memories = createMemoriesInterface(this.#transport);
+    // After a forget that deleted something, drop that user's cached bundles so
+    // they are not served until the TTL runs out. Unconditional, unlike the
+    // invalidate-on-write hook: a forgotten memory must not be served.
+    this.memories = createMemoriesInterface(this.#transport, ({ userId, customerId }) => {
+      for (const id of new Set([userId, customerId])) {
+        if (id) this.#anticipationCache.dropEntity(id);
+      }
+    });
     this.credits = createCreditsNamespace(this.#transport);
     this.cache = createCacheNamespace(this.#anticipationCache);
     this.instance = createInstanceNamespace(
@@ -365,6 +401,11 @@ export class SynapClient {
     // of those turns must go or they keep being spliced back in.
     this.instance._internal.setCompactionApplier((bundle) => {
       this.#shortTerm.applyCompaction(bundle);
+    });
+    // The server's message count after each streamed write, which is how the
+    // store learns whether it holds the whole conversation.
+    this.instance._internal.setConversationStateHandler((conversationId, messageCount) => {
+      this.#shortTerm.noteServerCount(conversationId, messageCount);
     });
 
     if (options._force_new !== true) {
@@ -617,6 +658,8 @@ export class SynapClient {
       types,
       mode = 'fast',
       precision_level: precisionLevel = 'high',
+      query_date: queryDate,
+      max_results_per_query: maxResultsPerQuery,
       include_conversation_context: includeConversationContext = true,
       scopes,
       include_scope_labels: includeScopeLabels = false,
@@ -634,6 +677,11 @@ export class SynapClient {
       types,
       mode,
       precision_level: precisionLevel,
+      // In `shared` so it reaches all four branches at once. The Python edit
+      // threaded three call sites by hand and missed the client branch, which
+      // sits one indent deeper; spreading removes that whole class of miss.
+      query_date: queryDate,
+      max_results_per_query: maxResultsPerQuery,
     };
 
     const labels: string[] = [];
@@ -767,6 +815,11 @@ export class SynapClient {
         scope,
         source_bundle_ids: served.bundleId ? [served.bundleId] : [],
         timestamp_ms: Date.now(),
+        // How many distinct search queries the fetch carried. A hit never
+        // reaches the fetch route, so this event is how the server learns it
+        // happened and what it is charged by. The count only: this event must
+        // not carry the caller's words.
+        query_count: distinctQueryCount(options['search_query'] ?? options['searchQuery']),
       });
     } catch {
       // Non-fatal by design.
@@ -832,26 +885,32 @@ export class SynapClient {
   /**
    * Whether the SDK is authoritative for short-term context.
    *
-   * Resolution order matches Python's `_is_st_authoritative`: the explicit
-   * option first, then `SYNAP_SDK_ST_AUTHORITATIVE` (truthy strings only).
-   * Defaults to false, so nothing changes for a caller who never sets it.
+   * Resolution order matches Python's `_is_st_authoritative`:
+   * `SYNAP_SDK_ST_AUTHORITATIVE` first, as an explicit override in either
+   * direction, then the option. Off by default. Being enabled does not mean
+   * the local store is used: that also takes an entry that holds the whole
+   * conversation, see `isComplete`.
    */
   #isStAuthoritative(): boolean {
-    if (this.#stAuthoritative === true) return true;
     const raw = (getEnv('SYNAP_SDK_ST_AUTHORITATIVE') ?? '').trim().toLowerCase();
-    return ['1', 'true', 'yes', 'on'].includes(raw);
+    if (['0', 'false', 'no', 'off'].includes(raw)) return false;
+    if (['1', 'true', 'yes', 'on'].includes(raw)) return true;
+    return this.#stAuthoritative === true;
   }
 
   /**
    * Render `get_context_for_prompt` from the local store, or null to fall
-   * through to the network. Warm means a compaction landed OR raw turns are
-   * buffered: with neither there is nothing to render and the server's answer
-   * is the only real one.
+   * through to the network.
+   *
+   * The store answers only when it holds the whole conversation: the server
+   * has confirmed a count the entry accounts for. An entry that is merely
+   * present is not enough. After a restart or an eviction it holds one turn,
+   * and rendering that as the conversation drops everything said before it.
    */
   #localPrompt(conversationId: string, style: string): Json | null {
     if (!this.#isStAuthoritative()) return null;
     const entry = this.#shortTerm.get(conversationId);
-    if (entry === null) return null;
+    if (entry === null || !isComplete(entry)) return null;
     if (entry.compactionId === null && entry.recentTurns.length === 0) return null;
     return renderForPrompt(entry, style) as unknown as Json;
   }
@@ -860,8 +919,29 @@ export class SynapClient {
   #localCompacted(conversationId: string, format: string): Json | null {
     if (!this.#isStAuthoritative()) return null;
     const entry = this.#shortTerm.get(conversationId);
-    if (entry === null || entry.compactionId === null) return null;
+    if (entry === null || entry.compactionId === null || !isComplete(entry)) return null;
     return renderCompacted(entry, format);
+  }
+
+  /**
+   * Bring the local store back in step from the server's answer.
+   *
+   * Only for a conversation this process writes to. The server's answer lists
+   * every message its summary does not cover, which is exactly what the entry
+   * was missing.
+   */
+  #reseedShortTerm(conversationId: string, response: Json): void {
+    if (!this.#isStAuthoritative()) return;
+    const entry = this.#shortTerm.get(conversationId);
+    if (entry === null || !entry.participant) return;
+    const r = (response ?? {}) as Record<string, unknown>;
+    const recent = Array.isArray(r['recent_messages']) ? r['recent_messages'] : [];
+    this.#shortTerm.reseed(conversationId, {
+      compactionId: typeof r['compaction_id'] === 'string' ? r['compaction_id'] : null,
+      recentMessages: recent as ShortTermTurn[],
+      compactedMessageCount: Number(r['compacted_message_count'] ?? 0) || 0,
+      totalMessageCount: Number(r['total_message_count'] ?? 0) || 0,
+    });
   }
 
   /** Every diagnostic the SDK emits passes through here. */
