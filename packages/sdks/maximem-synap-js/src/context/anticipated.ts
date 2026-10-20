@@ -124,3 +124,14 @@ export function tryServeFromCache(
     return { response: null, hit: null };
   }
 }
+
+/**
+ * How many distinct, non-empty search queries a fetch carried, for the
+ * `context_used` event's `query_count`. Matches the Python SDK and the count
+ * the server itself uses when it answers a fetch: the same query sent twice is
+ * one, and an empty string is none.
+ */
+export function distinctQueryCount(searchQuery: unknown): number {
+  if (!Array.isArray(searchQuery)) return 0;
+  return new Set(searchQuery.filter((q) => typeof q === 'string' && q.length > 0)).size;
+}

@@ -77,7 +77,7 @@ function buildRecentMessages(turns: readonly ShortTermTurn[]): LocalRecentMessag
     role: t.role || 'user',
     content: t.content ?? '',
     timestamp: t.timestamp,
-    message_id: `local-${idx}`,
+    message_id: t.message_id || `local-${idx}`,
   }));
 }
 

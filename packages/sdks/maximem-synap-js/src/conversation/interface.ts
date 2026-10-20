@@ -293,6 +293,36 @@ export class CompactionSubscribers {
 }
 
 /**
+ * Pair each message a batch write stored with the server's row for it.
+ *
+ * The server's `results` holds the messages that were stored, in input order,
+ * and leaves the failed ones out; those are in `errors`, each with the `index`
+ * it had in the request. Buffering every body, or pairing `results` against
+ * the whole input by position, puts a message the server refused into the
+ * caller's next prompt.
+ *
+ * Returns nothing when the two cannot be lined up, as Python does. A row with
+ * no `message_id` is treated as not stored.
+ */
+export function storedBatchRows(
+  bodies: Array<Record<string, unknown>>,
+  result: unknown,
+): Array<[Record<string, unknown>, Record<string, unknown>]> {
+  const r = (result ?? {}) as Record<string, unknown>;
+  const results = Array.isArray(r['results']) ? (r['results'] as Array<Record<string, unknown>>) : [];
+  const errors = Array.isArray(r['errors']) ? (r['errors'] as Array<Record<string, unknown>>) : [];
+  const failed = new Set(errors.map((e) => e?.['index']));
+  const stored = bodies.filter((_, index) => !failed.has(index));
+  if (stored.length !== results.length) return [];
+  const pairs: Array<[Record<string, unknown>, Record<string, unknown>]> = [];
+  stored.forEach((body, i) => {
+    const row = results[i];
+    if (row && typeof row === 'object' && row['message_id']) pairs.push([body, row]);
+  });
+  return pairs;
+}
+
+/**
  * Called after a successful write with the ids that were written for.
  *
  * Backs `SYNAP_SDK_CACHE_INVALIDATE_ON_WRITE`. The cloud invalidates its own
@@ -316,6 +346,16 @@ export type TurnRecorder = (turn: {
   role: string;
   content: string;
   timestamp?: string | undefined;
+  /** The server's id for the turn, from the write's response. */
+  messageId?: string | undefined;
+  /**
+   * The conversation's message count after this write, as the server reported
+   * it. This is what tells the local store whether it holds the whole
+   * conversation. Absent from a server that predates it.
+   */
+  serverMessageCount?: number | null | undefined;
+  /** Other writes this process still has outstanding for the conversation. */
+  inFlight?: number | undefined;
 }) => void;
 
 export function createConversationNamespace(
@@ -347,8 +387,37 @@ export function createConversationNamespace(
   localShortTerm: {
     prompt: (conversationId: string, style: string) => Json | null;
     compacted: (conversationId: string, format: string) => Json | null;
+    /**
+     * Handed the server's `/context-for-prompt` answer after the local store
+     * could not answer, so the store can be brought back in step.
+     */
+    reseed?: (conversationId: string, serverResponse: Json) => void;
   } = { prompt: () => null, compacted: () => null },
 ): ConversationNamespace {
+  // conversation_id -> REST writes sent and not yet buffered locally. Lets the
+  // local store tell two of this process's own concurrent writes apart from a
+  // second writer.
+  const writesInFlight = new Map<string, number>();
+  const writeStarted = (conversationId: string): void => {
+    writesInFlight.set(conversationId, (writesInFlight.get(conversationId) ?? 0) + 1);
+  };
+  const writeLanded = (conversationId: string): void => {
+    const remaining = (writesInFlight.get(conversationId) ?? 0) - 1;
+    if (remaining > 0) writesInFlight.set(conversationId, remaining);
+    else writesInFlight.delete(conversationId);
+  };
+  const confirmation = (
+    result: unknown,
+    conversationId: string,
+  ): { messageId?: string; serverMessageCount?: number | null; inFlight: number } => {
+    const r = (result ?? {}) as Record<string, unknown>;
+    const count = r['conversation_message_count'];
+    return {
+      ...(typeof r['message_id'] === 'string' ? { messageId: r['message_id'] } : {}),
+      serverMessageCount: typeof count === 'number' ? count : null,
+      inFlight: writesInFlight.get(conversationId) ?? 0,
+    };
+  };
   const convId = (v: { conversation_id?: string; conversationId?: string } | string): string => {
     const id = typeof v === 'string' ? v : (v.conversation_id ?? v.conversationId);
     if (!id) throw new InvalidInputError('conversation_id is required');
@@ -367,14 +436,22 @@ export function createConversationNamespace(
         'conversation.record_message',
       );
       const body = buildRecordMessageBody(options);
-      const result = await transport.request<Json>('conversations_messages', { body });
+      const conversationId = String(body['conversation_id'] ?? '');
+      writeStarted(conversationId);
+      let result: Json;
+      try {
+        result = await transport.request<Json>('conversations_messages', { body });
+      } finally {
+        writeLanded(conversationId);
+      }
       // Buffer locally only AFTER the server accepted it. Recording a turn the
       // write failed on would surface a message that does not exist.
       onTurn({
-        conversationId: String(body['conversation_id'] ?? ''),
+        conversationId,
         role: String(body['role'] ?? 'user'),
         content: String(body['content'] ?? ''),
         timestamp: body['timestamp'] as string | undefined,
+        ...confirmation(result, conversationId),
       });
       onWrite({
         userId: body['user_id'] as string | undefined,
@@ -399,12 +476,15 @@ export function createConversationNamespace(
       const result = await transport.request<Json>('conversations_messages_batch', {
         body: { messages: bodies },
       });
-      for (const body of bodies) {
+      // Buffer only what the server stored, each paired with its own row.
+      for (const [body, row] of storedBatchRows(bodies, result)) {
+        const conversationId = String(body['conversation_id'] ?? '');
         onTurn({
-          conversationId: String(body['conversation_id'] ?? ''),
+          conversationId,
           role: String(body['role'] ?? 'user'),
           content: String(body['content'] ?? ''),
           timestamp: body['timestamp'] as string | undefined,
+          ...confirmation(row, conversationId),
         });
       }
       // Every distinct entity in the batch, not just the first message's.
@@ -459,7 +539,9 @@ export function createConversationNamespace(
           pathParams: { conversation_id: id },
           query: { style: options.style ?? 'structured' },
         });
-        return (result?.['context_for_prompt'] as Json) ?? result ?? {};
+        const response = (result?.['context_for_prompt'] as Json) ?? result ?? {};
+        localShortTerm.reseed?.(id, response);
+        return response;
       },
 
       async compact(options) {

@@ -1,6 +1,6 @@
 """Shared utilities for Synap framework integrations."""
 
-from synap_integrations_common.async_bridge import run_async
+from synap_integrations_common.async_bridge import run_async, run_blocking
 from synap_integrations_common.errors import (
     SynapIntegrationError,
     wrap_sdk_errors,
@@ -18,6 +18,7 @@ from synap_integrations_common.stream_events import (
 
 __all__ = [
     "run_async",
+    "run_blocking",
     "SynapIntegrationError",
     "wrap_sdk_errors",
     "wrap_sdk_errors_async",
