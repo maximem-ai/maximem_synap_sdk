@@ -57,10 +57,35 @@ class Fact(BaseModel):
     extracted_at: datetime
     metadata: Dict[str, Any] = Field(default_factory=dict)
     event_date: Optional[datetime] = None
+    # The day the user SAID this, which is not the day the thing happened.
+    #
+    # `event_date` is now empty unless somebody actually stated when the event
+    # took place, so without this field beside it an item whose turn stated no
+    # event date arrives with no machine-readable date at all. On the
+    # 500-question benchmark that was 2,017 of 10,443 served items (19.3%),
+    # where the day they were said reached the caller only inside the content
+    # string as "(said ...)".
+    #
+    # Empty when the client never told the server when the conversation
+    # happened. It is never the server's own ingest or extraction clock.
+    said_at: Optional[datetime] = None
+    # The rest of the event window. `event_date` is its START: "last month"
+    # is 2023-04-01 to 2023-04-30 at precision "month", and reading only the
+    # start makes it look like the 1st. `event_precision` also carries the one
+    # distinction nothing else does: "approximate" has no end, so "around
+    # November 20" and "on November 20" differ only by this label.
+    event_end: Optional[datetime] = None
+    event_precision: Optional[str] = None
     valid_until: Optional[datetime] = None
     temporal_category: Optional[str] = None
     temporal_confidence: float = 0.0
     source_evidence: Optional[List[str]] = None
+    # The search queries of the fetch that found this item, in the order they
+    # were sent. Empty when the fetch named no query, when the server predates
+    # the field, and for an item served from the prefetch cache.
+    matched_queries: List[str] = Field(default_factory=list)
+
+    model_config = {"extra": "allow"}
 
 
 class Preference(BaseModel):
@@ -74,10 +99,26 @@ class Preference(BaseModel):
     extracted_at: datetime
     metadata: Dict[str, Any] = Field(default_factory=dict)
     event_date: Optional[datetime] = None
+    # The day the user SAID this, as distinct from when the event happened.
+    # See the note on `Fact.said_at`.
+    said_at: Optional[datetime] = None
+    # The rest of the event window. `event_date` is its START: "last month"
+    # is 2023-04-01 to 2023-04-30 at precision "month", and reading only the
+    # start makes it look like the 1st. `event_precision` also carries the one
+    # distinction nothing else does: "approximate" has no end, so "around
+    # November 20" and "on November 20" differ only by this label.
+    event_end: Optional[datetime] = None
+    event_precision: Optional[str] = None
     valid_until: Optional[datetime] = None
     temporal_category: Optional[str] = None
     temporal_confidence: float = 0.0
     source_evidence: Optional[List[str]] = None
+    # The search queries of the fetch that found this item, in the order they
+    # were sent. Empty when the fetch named no query, when the server predates
+    # the field, and for an item served from the prefetch cache.
+    matched_queries: List[str] = Field(default_factory=list)
+
+    model_config = {"extra": "allow"}
 
 
 class Episode(BaseModel):
@@ -90,10 +131,26 @@ class Episode(BaseModel):
     participants: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     event_date: Optional[datetime] = None
+    # The day the user SAID this, as distinct from when the event happened.
+    # See the note on `Fact.said_at`.
+    said_at: Optional[datetime] = None
+    # The rest of the event window. `event_date` is its START: "last month"
+    # is 2023-04-01 to 2023-04-30 at precision "month", and reading only the
+    # start makes it look like the 1st. `event_precision` also carries the one
+    # distinction nothing else does: "approximate" has no end, so "around
+    # November 20" and "on November 20" differ only by this label.
+    event_end: Optional[datetime] = None
+    event_precision: Optional[str] = None
     valid_until: Optional[datetime] = None
     temporal_category: Optional[str] = None
     temporal_confidence: float = 0.0
     source_evidence: Optional[List[str]] = None
+    # The search queries of the fetch that found this item, in the order they
+    # were sent. Empty when the fetch named no query, when the server predates
+    # the field, and for an item served from the prefetch cache.
+    matched_queries: List[str] = Field(default_factory=list)
+
+    model_config = {"extra": "allow"}
 
 
 class Emotion(BaseModel):
@@ -106,10 +163,26 @@ class Emotion(BaseModel):
     context: str  # What triggered this
     metadata: Dict[str, Any] = Field(default_factory=dict)
     event_date: Optional[datetime] = None
+    # The day the user SAID this, as distinct from when the event happened.
+    # See the note on `Fact.said_at`.
+    said_at: Optional[datetime] = None
+    # The rest of the event window. `event_date` is its START: "last month"
+    # is 2023-04-01 to 2023-04-30 at precision "month", and reading only the
+    # start makes it look like the 1st. `event_precision` also carries the one
+    # distinction nothing else does: "approximate" has no end, so "around
+    # November 20" and "on November 20" differ only by this label.
+    event_end: Optional[datetime] = None
+    event_precision: Optional[str] = None
     valid_until: Optional[datetime] = None
     temporal_category: Optional[str] = None
     temporal_confidence: float = 0.0
     source_evidence: Optional[List[str]] = None
+    # The search queries of the fetch that found this item, in the order they
+    # were sent. Empty when the fetch named no query, when the server predates
+    # the field, and for an item served from the prefetch cache.
+    matched_queries: List[str] = Field(default_factory=list)
+
+    model_config = {"extra": "allow"}
 
 
 class TemporalEvent(BaseModel):
@@ -117,7 +190,25 @@ class TemporalEvent(BaseModel):
 
     id: str
     content: str
-    event_date: datetime
+    # Optional for the same reason it is optional on `Fact`: the server now
+    # leaves it empty unless somebody actually stated when the event happened.
+    # It was required here, and the parser below dropped any item that arrived
+    # without one, which was harmless only while the server always filled the
+    # field with the conversation's own date. On the benchmark instance 917 of
+    # 5,345 stored temporal events (17%) have no stated event date, so keeping
+    # it required would have deleted every one of them from a typed caller's
+    # response while raw HTTP and the JS SDK still saw them.
+    event_date: Optional[datetime] = None
+    # The day the user SAID this, as distinct from when the event happened.
+    # See the note on `Fact.said_at`.
+    said_at: Optional[datetime] = None
+    # The rest of the event window. `event_date` is its START: "last month"
+    # is 2023-04-01 to 2023-04-30 at precision "month", and reading only the
+    # start makes it look like the 1st. `event_precision` also carries the one
+    # distinction nothing else does: "approximate" has no end, so "around
+    # November 20" and "on November 20" differ only by this label.
+    event_end: Optional[datetime] = None
+    event_precision: Optional[str] = None
     valid_until: Optional[datetime] = None
     temporal_category: str  # "perpetual" | "temporal_fact" | "episode"
     temporal_confidence: float = Field(ge=0.0, le=1.0)
@@ -126,6 +217,46 @@ class TemporalEvent(BaseModel):
     extracted_at: Optional[datetime] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
     source_evidence: Optional[List[str]] = None
+    # The search queries of the fetch that found this item, in the order they
+    # were sent. Empty when the fetch named no query, when the server predates
+    # the field, and for an item served from the prefetch cache.
+    matched_queries: List[str] = Field(default_factory=list)
+
+    model_config = {"extra": "allow"}
+
+
+# Keys the parsers below map onto typed fields. Everything else on a served
+# item is passed through untouched, so a field the server adds is reachable as
+# an attribute the day it ships.
+#
+# ⚠ This exists so that adding a served field does not force an SDK release.
+# `event_end` and `event_precision` were computed by the server, dropped by its
+# own payload, and then dropped again here: the parsers build each model from a
+# hand-picked list of keys, so `extra: "allow"` on the model was never reached.
+# A client could not read "sometime in April" even after the server sent it.
+_CONSUMED_KEYS = frozenset({
+    "id", "content", "confidence", "source", "extracted_at", "metadata",
+    "event_date", "said_at", "valid_until", "temporal_category",
+    "temporal_confidence", "source_evidence", "matched_queries", "strength",
+    "category", "occurred_at", "participants", "emotion_type", "intensity",
+    "detected_at", "context", "trigger", "valid_from",
+    "event_end", "event_precision",
+})
+
+
+def _extras(item: Dict[str, Any], model: type) -> Dict[str, Any]:
+    """Whatever the server sent that this SDK version has no field for.
+
+    The model's own declared fields are excluded as well as the source keys
+    above, which makes this self-maintaining: a hand-written exclusion list
+    missed `significance` on Episode and the parser then received it twice.
+    Any key the model already has a field for cannot collide, and a genuinely
+    new server key still comes through.
+    """
+    if not isinstance(item, dict):
+        return {}
+    skip = _CONSUMED_KEYS | set(getattr(model, "model_fields", {}))
+    return {k: v for k, v in item.items() if k not in skip}
 
 
 # Response Metadata
@@ -313,6 +444,25 @@ class ConversationSummaryModel(BaseModel):
 
 
 # Response Wrappers (Hybrid: typed + raw)
+class RetrievalHealthModel(BaseModel):
+    """Why a fetch may be thinner than the stores can support.
+
+    `degraded` says something went wrong, `level` says how thin the answer is
+    ("partial", "minimal", "failed"), and `code` says whether retrying is worth
+    it ("timeout", "overloaded", "unavailable", "internal"). The server does not
+    name which of its services broke, by design.
+
+    Absent on a healthy fetch, so `response.retrieval is None` means fine.
+    """
+
+    degraded: bool = True
+    level: Optional[str] = None
+    code: Optional[str] = None
+    warnings: List[str] = Field(default_factory=list)
+
+    model_config = {"extra": "allow"}
+
+
 class ContextResponse(BaseModel):
     """Response from context fetch operations.
 
@@ -329,6 +479,19 @@ class ContextResponse(BaseModel):
     profile: Optional["UserProfileModel"] = None
     conversations: Optional[List["ConversationSummaryModel"]] = None
     metadata: ResponseMetadata
+    # Why this response may be thinner than the stores can support. None on a
+    # healthy fetch.
+    #
+    # ⚠ This had no typed slot, and that is how a real failure stayed invisible.
+    # On 2026-10-12 a retrieval lost its embedding call, the server returned 200
+    # with ZERO items for a user holding 122 memories, and said so in the
+    # response's `retrieval` block. The server-side field was added after an
+    # identical incident in September precisely so a client could see it. But
+    # the factory below built this model from a hand-picked list of keys, so
+    # `extra: "allow"` was never reached and the block was dropped. A caller
+    # could not tell "this user has no relevant memories" from "our retrieval
+    # broke", and scored the question as a legitimate blank.
+    retrieval: Optional[RetrievalHealthModel] = None
 
     # Raw response for forward compatibility
     model_config = {"extra": "allow"}
@@ -364,10 +527,15 @@ class ContextResponse(BaseModel):
                 extracted_at=f.get("extracted_at") or datetime.now(timezone.utc),
                 metadata=f.get("metadata", {}),
                 event_date=_parse_iso_datetime(f.get("event_date")),
+                said_at=_parse_iso_datetime(f.get("said_at")),
+                event_end=_parse_iso_datetime(f.get("event_end")),
+                event_precision=f.get("event_precision"),
                 valid_until=_parse_iso_datetime(f.get("valid_until")),
                 temporal_category=f.get("temporal_category"),
                 temporal_confidence=_coerce_float(f.get("temporal_confidence"), default=0.0),
                 source_evidence=f.get("source_evidence"),
+                matched_queries=list(f.get("matched_queries") or []),
+                **_extras(f, Fact),
             ))
 
         preferences = []
@@ -380,10 +548,15 @@ class ContextResponse(BaseModel):
                 extracted_at=p.get("extracted_at") or datetime.now(timezone.utc),
                 metadata=p.get("metadata", {}),
                 event_date=_parse_iso_datetime(p.get("event_date")),
+                said_at=_parse_iso_datetime(p.get("said_at")),
+                event_end=_parse_iso_datetime(p.get("event_end")),
+                event_precision=p.get("event_precision"),
                 valid_until=_parse_iso_datetime(p.get("valid_until")),
                 temporal_category=p.get("temporal_category"),
                 temporal_confidence=_coerce_float(p.get("temporal_confidence"), default=0.0),
                 source_evidence=p.get("source_evidence"),
+                matched_queries=list(p.get("matched_queries") or []),
+                **_extras(p, Preference),
             ))
 
         episodes = []
@@ -396,10 +569,15 @@ class ContextResponse(BaseModel):
                 participants=e.get("participants", []),
                 metadata=e.get("metadata", {}),
                 event_date=_parse_iso_datetime(e.get("event_date")),
+                said_at=_parse_iso_datetime(e.get("said_at")),
+                event_end=_parse_iso_datetime(e.get("event_end")),
+                event_precision=e.get("event_precision"),
                 valid_until=_parse_iso_datetime(e.get("valid_until")),
                 temporal_category=e.get("temporal_category"),
                 temporal_confidence=_coerce_float(e.get("temporal_confidence"), default=0.0),
                 source_evidence=e.get("source_evidence"),
+                matched_queries=list(e.get("matched_queries") or []),
+                **_extras(e, Episode),
             ))
 
         emotions = []
@@ -412,21 +590,26 @@ class ContextResponse(BaseModel):
                 context=em.get("context", em.get("content", "")),
                 metadata=em.get("metadata", {}),
                 event_date=_parse_iso_datetime(em.get("event_date")),
+                said_at=_parse_iso_datetime(em.get("said_at")),
+                event_end=_parse_iso_datetime(em.get("event_end")),
+                event_precision=em.get("event_precision"),
                 valid_until=_parse_iso_datetime(em.get("valid_until")),
                 temporal_category=em.get("temporal_category"),
                 temporal_confidence=_coerce_float(em.get("temporal_confidence"), default=0.0),
                 source_evidence=em.get("source_evidence"),
+                matched_queries=list(em.get("matched_queries") or []),
+                **_extras(em, Emotion),
             ))
 
         temporal_events = []
         for t in data.get("temporal_events", []):
-            evt_date = _parse_iso_datetime(t.get("event_date"))
-            if evt_date is None:
-                continue
             temporal_events.append(TemporalEvent(
                 id=t.get("id", ""),
                 content=t.get("content", ""),
-                event_date=evt_date,
+                event_date=_parse_iso_datetime(t.get("event_date")),
+                said_at=_parse_iso_datetime(t.get("said_at")),
+                event_end=_parse_iso_datetime(t.get("event_end")),
+                event_precision=t.get("event_precision"),
                 valid_until=_parse_iso_datetime(t.get("valid_until")),
                 temporal_category=t.get("temporal_category", ""),
                 temporal_confidence=_coerce_float(t.get("temporal_confidence"), default=0.0),
@@ -435,6 +618,8 @@ class ContextResponse(BaseModel):
                 extracted_at=_parse_iso_datetime(t.get("extracted_at")),
                 metadata=t.get("metadata", {}),
                 source_evidence=t.get("source_evidence"),
+                matched_queries=list(t.get("matched_queries") or []),
+                **_extras(t, TemporalEvent),
             ))
 
         conv_ctx = None
@@ -470,6 +655,8 @@ class ContextResponse(BaseModel):
             profile=profile,
             conversations=conversations,
             metadata=metadata,
+            retrieval=(RetrievalHealthModel(**data["retrieval"])
+                       if isinstance(data.get("retrieval"), dict) else None),
             raw_data=data,
         )
 

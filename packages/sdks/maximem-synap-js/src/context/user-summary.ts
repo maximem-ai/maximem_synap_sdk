@@ -91,6 +91,7 @@ function normalise(item: Json): RawContextItem {
     detected_at: (pick(item, 'detected_at', 'extracted_at', 'created_at') ?? null) as string | null,
     metadata: (pick(item, 'metadata') ?? {}) as Json,
     event_date: (pick(item, 'event_date') ?? null) as string | null,
+    said_at: (pick(item, 'said_at') ?? null) as string | null,
     valid_until: (pick(item, 'valid_until') ?? null) as string | null,
     temporal_category: (pick(item, 'temporal_category') ?? null) as string | null,
     temporal_confidence: Number(pick(item, 'temporal_confidence') ?? 0),
