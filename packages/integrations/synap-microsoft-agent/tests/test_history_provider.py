@@ -457,3 +457,33 @@ class TestWithSharedHarness:
 
         with pytest.raises(SynapIntegrationError):
             await provider.save_messages("conv-1", msgs)
+
+
+# ---------------------------------------------------------------------------
+# compaction: the block stands in for the turns it covers
+# ---------------------------------------------------------------------------
+
+BLOCK = "## Conversation so far (compacted: turns 1-40)\n[CONTEXT COMPACTION, REFERENCE ONLY]\n\n### Where things stand\n- x"
+
+
+class TestCompaction:
+    @pytest.mark.asyncio
+    async def test_the_compaction_comes_first_as_a_system_message(self):
+        ctx_response = _make_recent_messages(("user", "and now?"))
+        ctx_response.context_block = BLOCK
+        ctx_response.history_block = "### From the earlier turns\n- turn 3, user: \"x\""
+        provider = SynapHistoryProvider(_make_sdk(get_context_result=ctx_response), user_id="alice",
+                                        conversation_id="conv-1")
+        msgs = await provider.get_messages("conv-1")
+        assert msgs[0].role == "system"
+        assert msgs[0].text == BLOCK + "\n\n### From the earlier turns\n- turn 3, user: \"x\""
+        assert [m.text for m in msgs[1:]] == ["and now?"]
+
+    @pytest.mark.asyncio
+    async def test_the_compaction_is_never_written_back_as_a_turn(self):
+        sdk = _make_sdk()
+        provider = SynapHistoryProvider(sdk, user_id="alice", conversation_id="conv-1")
+        await provider.save_messages("conv-1", [Message(role="system", contents=[BLOCK]),
+                                                Message(role="user", contents=["hi"])])
+        contents = [c.kwargs["content"] for c in sdk.conversation.record_message.await_args_list]
+        assert contents == ["hi"]

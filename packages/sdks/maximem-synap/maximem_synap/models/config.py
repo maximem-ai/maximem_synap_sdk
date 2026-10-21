@@ -44,14 +44,32 @@ class SDKConfig(BaseModel):
     timeouts: TimeoutConfig = Field(default_factory=TimeoutConfig)
     retry_policy: Optional[RetryPolicy] = Field(default_factory=RetryPolicy)
     log_level: str = "WARNING"
-    # Phase 1 rollout flag for SDK-authoritative short-term context.
-    # When true: SDK appends raw turns into a local ShortTermContextStore on
-    # record_message/send_message, applies compaction_update bundles into
-    # it, and serves get_compacted/get_context_for_prompt from cache before
-    # falling back to REST. Default off — flipped via env var or explicit
-    # config during the canary. See
+    # SDK-authoritative short-term context. When true the SDK serves
+    # get_compacted/get_context_for_prompt from its local ShortTermContextStore
+    # (the last compaction it was sent, plus the turns since), and falls back
+    # to REST whenever that store does not hold the whole conversation: the
+    # server reports its message count on every write and every compaction, and
+    # the store only answers when it accounts for all of them. Against a server
+    # that sends no counts it never answers locally.
+    #
+    # Defaults OFF, and should stay off for an application that runs more than
+    # one process against the same conversation. A process learns the server's
+    # count only when it writes. If it reads before it writes (build the prompt,
+    # then record the turn), it cannot know that another process recorded a
+    # turn in between, and it answers without that turn. Turn it on where one
+    # process owns a conversation for its whole life, such as a voice agent.
+    # SYNAP_SDK_ST_AUTHORITATIVE overrides this in either direction. See
     # docs/internal/sdk_authoritative_short_term_context_plan.md.
     sdk_st_authoritative: bool = False
+    # Local embedding model for history search after compaction and for
+    # matching fetch queries to prefetched items (cache/encoders.py): "auto"
+    # uses the default multilingual model when maximem-synap[local-search] is
+    # installed; "onnx:<repo>@<rev>/<file>", "fastembed:<name>" or
+    # "model2vec:<id>" picks another (history search only: anticipation
+    # matching keeps to the model its thresholds were tuned on); None keeps
+    # keywords only. Runs on this machine; downloaded once into
+    # ~/.synap/models, loaded in the background.
+    history_search_model: Optional[str] = "auto"
     # Read-your-writes verbatim short-term overlay (correctness, not an
     # optimization). When true: a turn the SDK has just emitted via
     # record_message/send_message is overlaid onto the next fetch's
@@ -64,6 +82,13 @@ class SDKConfig(BaseModel):
     # kill-switch via config or SYNAP_ST_VERBATIM_OVERLAY=0. See
     # docs/internal/short_term_context_freshness_plan.md.
     st_verbatim_overlay: bool = True
+    # The model the agent runs on, and optionally its context window. Sent
+    # with every recorded turn so the server sizes compaction to the agent's
+    # window (it compacts at ~11.7% of it: 15K tokens on a 128K model). A name
+    # is enough; the server knows common models' windows. Unset = 128K. See
+    # agent_model.py; record_message / send_message take per-call overrides.
+    agent_model: Optional[str] = None
+    agent_context_window: Optional[int] = None
 
 
 # Backward compatibility - deprecated dataclass-style models

@@ -188,6 +188,46 @@ describe('gRPC anticipation stream over a real server', () => {
     expect(cache.snapshot().bundles.map((b) => b.bundle_id)).toEqual(['c1']);
   });
 
+  it('carries the compaction counts on the bundle', async () => {
+    // The local short-term store prunes by these two numbers, so they have to
+    // survive the descriptor and the loader options, not just exist in the proto.
+    const cache = new AnticipationCache();
+    const seen: Array<Record<string, unknown>> = [];
+    const { server } = await connected(cache, {
+      onCompactionUpdate: (_id: string, b: Record<string, unknown>) => { seen.push(b); },
+    });
+    server.push({
+      context_bundle: bundle({
+        bundle_type: 'compaction_update',
+        bundle_id: 'c2',
+        conversation_context: {
+          conversation_id: 'conv-1',
+          summary: 's',
+          compaction_id: 'cmp-1',
+          compacted_message_count: 8,
+          total_message_count: 10,
+        },
+      }),
+    });
+    await until(() => seen.length === 1);
+    const cc = seen[0]?.['conversation_context'] as Record<string, unknown>;
+    expect(Number(cc['compacted_message_count'])).toBe(8);
+    expect(Number(cc['total_message_count'])).toBe(10);
+  });
+
+  it("reports the server's message count for a conversation", async () => {
+    const cache = new AnticipationCache();
+    const seen: Array<[string, number]> = [];
+    const { server } = await connected(cache, {
+      onConversationState: (conversationId: string, count: number) => {
+        seen.push([conversationId, count]);
+      },
+    });
+    server.push({ conversation_state: { conversation_id: 'conv-1', message_count: 7 } });
+    await until(() => seen.length === 1);
+    expect(seen).toEqual([['conv-1', 7]]);
+  });
+
   it('invokes onContext for every bundle type', async () => {
     const cache = new AnticipationCache();
     const types: string[] = [];
