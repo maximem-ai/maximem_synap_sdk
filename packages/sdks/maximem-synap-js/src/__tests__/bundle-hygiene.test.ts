@@ -22,13 +22,20 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const dist = path.resolve(here, '../../dist');
 
 const ENTRIES = ['index.js', 'index.cjs'];
-/** Only reachable through the `/grpc` subpath, never the main entry. */
-const FORBIDDEN = ['@grpc/grpc-js', '@grpc/proto-loader', 'protobufjs', 'ContextBundleProto'];
+/**
+ * Only reachable through the `/grpc` subpath or a lazy chunk, never the main
+ * entry: gRPC, and the local embedding model's native runtime and tokenizer
+ * (cache/onnx-encoder.ts).
+ */
+const FORBIDDEN = [
+  '@grpc/grpc-js', '@grpc/proto-loader', 'protobufjs', 'ContextBundleProto',
+  'onnxruntime-node', '@huggingface/tokenizers',
+];
 
 describe('published bundle hygiene', () => {
   const built = existsSync(path.join(dist, 'index.js'));
 
-  it.runIf(built).each(ENTRIES)('%s does not reference gRPC or the proto', (entry) => {
+  it.runIf(built).each(ENTRIES)('%s does not reference gRPC, the proto or the local model runtime', (entry) => {
     const source = readFileSync(path.join(dist, entry), 'utf8');
     for (const needle of FORBIDDEN) {
       expect(

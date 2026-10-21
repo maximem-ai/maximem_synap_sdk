@@ -56,6 +56,9 @@ export interface SynapMemoryOptions extends SynapIdentityOptions, SynapStreamOpt
  *   - read failures degrade gracefully (empty recall, null system message)
  *   - write failures throw so the Agent loop surfaces ingestion outages
  */
+/** Id of the system message recall() adds for the compaction block. */
+const COMPACTION_ID_PREFIX = "synap-compaction-";
+
 export class SynapMemory extends MastraMemory {
   private readonly sdk: SynapSdkLike;
   private readonly userId: string;
@@ -160,6 +163,26 @@ export class SynapMemory extends MastraMemory {
       const messages = raw
         .filter((m) => !!m && typeof m.content === "string" && m.content.trim() !== "")
         .map((m) => this.toMastraMessage(m, primaryThreadId, args.resourceId));
+      // The compaction block (and the earlier turns the SDK found for the
+      // latest message) stands in for the turns it covers: recent_messages
+      // holds only the turns after it. Older SDKs send neither.
+      const preamble = [response.context_block, response.history_block].filter((p) => !!p).join("\n\n");
+      if (preamble) {
+        const first = raw.find((m) => !!m && typeof m.timestamp === "string");
+        messages.unshift(
+          this.toMastraMessage(
+            {
+              role: "system",
+              content: preamble,
+              // Just before the first recent turn, so it sorts ahead of them.
+              timestamp: first ? new Date(Date.parse(first.timestamp) - 1).toISOString() : new Date(0).toISOString(),
+              message_id: `${COMPACTION_ID_PREFIX}${primaryThreadId}`,
+            },
+            primaryThreadId,
+            args.resourceId,
+          ),
+        );
+      }
       return {
         messages,
         total: messages.length,
@@ -201,6 +224,8 @@ export class SynapMemory extends MastraMemory {
     for (const m of args.messages ?? []) {
       const role = typeof m?.role === "string" ? m.role : "";
       if (role !== "user" && role !== "assistant" && role !== "system") continue;
+      // The compaction recall() returned, not a turn.
+      if (typeof m?.id === "string" && m.id.startsWith(COMPACTION_ID_PREFIX)) continue;
 
       const content = extractText(m);
       const threadId = typeof m?.threadId === "string" ? m.threadId : "";

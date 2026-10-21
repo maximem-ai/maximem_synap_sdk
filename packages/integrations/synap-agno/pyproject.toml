@@ -16,8 +16,8 @@ keywords = ["synap", "memory", "agno", "ai", "agents"]
 
 dependencies = [
     "maximem-synap>=0.5.3",
-    "maximem-synap-integrations-common>=0.2.1",
-    "agno>=2.0",
+    "maximem-synap-integrations-common>=0.2.2",
+    "agno>=2.5",
 ]
 
 [project.optional-dependencies]

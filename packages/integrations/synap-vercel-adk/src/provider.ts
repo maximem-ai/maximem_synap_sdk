@@ -48,6 +48,9 @@ export class SynapProvider {
     return wrapLanguageModel({
       model,
       middleware: createSynapMiddleware({
+        // Synap sizes compaction to the agent model's context window
+        // (COMPACTION_V3_PLAN.md §4.3); an explicit option wins.
+        agentModel: model.modelId,
         ...modelOptions,
         credentials: creds,
         anticipationCache: this.cache,

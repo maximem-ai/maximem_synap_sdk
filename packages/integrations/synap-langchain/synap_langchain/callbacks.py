@@ -154,6 +154,11 @@ class SynapCallbackHandler(AsyncCallbackHandler):
         # for graphs that do not set one. Per instance, not per class: two
         # conversations must not silence each other.
         self._reported_user_turns: set = set()
+        # The chat model this chain runs on, as LangChain reports it. Sent
+        # with each turn so Synap sizes compaction to that model's context
+        # window (COMPACTION_V3_PLAN.md §4.3). In metadata rather than as
+        # record_message(model=) so an older installed SDK still accepts it.
+        self._agent_model: Optional[str] = None
 
     async def _record(self, role: str, content: str) -> None:
         # Stream first, and fall back to REST only if there was no stream.
@@ -164,10 +169,12 @@ class SynapCallbackHandler(AsyncCallbackHandler):
         # stream event writes the same turn twice and extracts it twice.
         # `report_turn` returns whether it actually went out, which is what
         # makes this decidable rather than guessed.
+        model_metadata = {"agent_model": self._agent_model} if self._agent_model else None
         if await report_turn(
             self.sdk, role=role, content=content,
             conversation_id=self.conversation_id,
             user_id=self.user_id, customer_id=self.customer_id,
+            metadata=model_metadata,
         ):
             return
         try:
@@ -177,6 +184,7 @@ class SynapCallbackHandler(AsyncCallbackHandler):
                 content=content,
                 user_id=self.user_id,
                 customer_id=self.customer_id,
+                **({"metadata": model_metadata} if model_metadata else {}),
             )
         except Exception as exc:  # noqa: BLE001 — callbacks must not raise
             logger.error(
@@ -200,6 +208,7 @@ class SynapCallbackHandler(AsyncCallbackHandler):
         **kwargs: Any,
     ) -> None:
         """Record the user message when a chat model starts."""
+        self._agent_model = _model_name(serialized, kwargs.get("invocation_params"), metadata) or self._agent_model
         if not messages:
             return
         last_batch = messages[-1]
@@ -225,6 +234,12 @@ class SynapCallbackHandler(AsyncCallbackHandler):
         """Record the assistant response when the LLM finishes."""
         if not response.generations or not response.generations[0]:
             return
+        reported = (response.llm_output or {}).get("model_name") if isinstance(response.llm_output, dict) else None
+        if not reported:
+            message = getattr(response.generations[0][0], "message", None)
+            reported = (getattr(message, "response_metadata", None) or {}).get("model_name")
+        if isinstance(reported, str) and reported:
+            self._agent_model = reported
         text = _extract_text(response.generations[0][0])
         if text:
             await self._record("assistant", text)
@@ -309,3 +324,14 @@ class SynapCallbackHandler(AsyncCallbackHandler):
             conversation_id=self.conversation_id,
             user_id=self.user_id, customer_id=self.customer_id,
         )
+
+
+def _model_name(serialized: Any, invocation_params: Any, metadata: Any) -> Optional[str]:
+    """The chat model's name from what on_chat_model_start is handed, or None."""
+    for source in (invocation_params, metadata, (serialized or {}).get("kwargs") if isinstance(serialized, dict) else None):
+        if isinstance(source, dict):
+            for key in ("model", "model_name", "ls_model_name", "model_id"):
+                value = source.get(key)
+                if isinstance(value, str) and value:
+                    return value
+    return None

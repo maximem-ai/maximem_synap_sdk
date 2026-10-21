@@ -3,7 +3,9 @@
 Contract:
 - feeds conversation turns (MessageAddedEvent) and tool intent
   (BeforeToolCallEvent) onto Synap's Listen stream via sdk.instance.send_message.
-- gates every send on sdk.instance.is_listening (silent no-op when not listening).
+- user/assistant turns: on the stream when listening, otherwise over REST via
+  sdk.conversation.record_message; never both.
+- tool events are gated on sdk.instance.is_listening (silent no-op when not listening).
 - logs, never raises (must not abort the agent turn).
 - skips messages with no text (tool-result / tool-use-only turns).
 """
@@ -95,10 +97,35 @@ async def test_assistant_message_event_type(mock_sdk):
     assert sdk.instance.send_message.await_args.kwargs["event_type"] == "assistant_message"
 
 
-async def test_no_send_when_not_listening(mock_sdk):
+async def test_no_stream_writes_each_turn_over_rest_once(mock_sdk):
+    """Most apps never call listen(); the conversation must still be kept."""
     sdk = _streaming(mock_sdk, listening=False)
-    await _hook(sdk)._on_message(_msg_event("user", "hello"))
+    hook = _hook(sdk)
+    await hook._on_message(_msg_event("user", "hello"))
+    await hook._on_message(_msg_event("assistant", "hi alice"))
     sdk.instance.send_message.assert_not_awaited()
+    calls = sdk.conversation.record_message.await_args_list
+    assert [(c.kwargs["role"], c.kwargs["content"]) for c in calls] == [
+        ("user", "hello"), ("assistant", "hi alice")]
+    for c in calls:
+        assert c.kwargs["conversation_id"] == "conv_1"
+        assert c.kwargs["user_id"] == "alice"
+        assert c.kwargs["customer_id"] == "acme"
+
+
+async def test_with_a_stream_turns_go_to_it_and_not_to_rest(mock_sdk):
+    sdk = _streaming(mock_sdk)
+    hook = _hook(sdk)
+    await hook._on_message(_msg_event("user", "hello"))
+    await hook._on_message(_msg_event("assistant", "hi alice"))
+    assert sdk.instance.send_message.await_count == 2
+    sdk.conversation.record_message.assert_not_awaited()
+
+
+async def test_no_stream_and_a_failing_rest_write_does_not_raise(mock_sdk):
+    sdk = _streaming(mock_sdk, listening=False)
+    sdk.conversation.record_message = AsyncMock(side_effect=RuntimeError("down"))
+    await _hook(sdk)._on_message(_msg_event("user", "hello"))  # must not raise
 
 
 async def test_no_send_when_message_has_no_text(mock_sdk):
@@ -109,6 +136,7 @@ async def test_no_send_when_message_has_no_text(mock_sdk):
     )
     await _hook(sdk)._on_message(event)
     sdk.instance.send_message.assert_not_awaited()
+    sdk.conversation.record_message.assert_not_awaited()
 
 
 async def test_message_feed_logs_not_raises(mock_sdk):
@@ -142,6 +170,7 @@ async def test_tool_call_no_send_when_not_listening(mock_sdk):
     sdk = _streaming(mock_sdk, listening=False)
     await _hook(sdk)._on_tool_call(_tool_event())
     sdk.instance.send_message.assert_not_awaited()
+    sdk.conversation.record_message.assert_not_awaited()
 
 
 async def test_tool_call_logs_not_raises(mock_sdk):
@@ -228,6 +257,7 @@ class TestTheToolResultIsReported:
         hook = SynapStreamHook(sdk, conversation_id="c1", user_id="u1")
         await hook._on_tool_result(_after_tool(result="ok"))
         sdk.instance.record_tool_result.assert_not_awaited()
+        sdk.conversation.record_message.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_a_dead_sdk_does_not_abort_the_turn(self, mock_sdk):

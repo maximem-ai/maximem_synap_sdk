@@ -286,7 +286,21 @@ def _output_text(result: Any) -> str:
     return output if isinstance(output, str) else str(output)
 
 
-async def _report_turn(deps: SynapDeps, role: str, content: str) -> None:
+def _agent_model(agent: Any, kwargs: Dict[str, Any]) -> Optional[str]:
+    """The run's model name: ``model=`` on the call, else the agent's.
+
+    Synap sizes compaction to that model's context window
+    (COMPACTION_V3_PLAN.md §4.3). A ``Model`` has ``model_name``; a string is
+    ``"provider:name"``, of which the server's table wants the name.
+    """
+    model = kwargs.get("model") or getattr(agent, "model", None)
+    name = model if isinstance(model, str) else getattr(model, "model_name", None)
+    if not isinstance(name, str) or not name:
+        return None
+    return name.split(":", 1)[-1]
+
+
+async def _report_turn(deps: SynapDeps, role: str, content: str, model: Optional[str] = None) -> None:
     """Stream first, REST only as a fallback, never both.
 
     The server persists ``user_message`` and ``assistant_message`` from the
@@ -297,6 +311,7 @@ async def _report_turn(deps: SynapDeps, role: str, content: str) -> None:
     """
     if not content:
         return
+    model_metadata = {"agent_model": model} if model else None
     if await report_turn(
         deps.sdk,
         role=role,
@@ -304,6 +319,7 @@ async def _report_turn(deps: SynapDeps, role: str, content: str) -> None:
         conversation_id=deps.conversation_id or "",
         user_id=deps.user_id,
         customer_id=deps.customer_id,
+        metadata=model_metadata,
     ):
         return
     if not deps.conversation_id:
@@ -317,6 +333,8 @@ async def _report_turn(deps: SynapDeps, role: str, content: str) -> None:
             content=content,
             user_id=deps.user_id,
             customer_id=deps.customer_id or None,
+            # In metadata, not model=, so an older installed SDK accepts it.
+            **({"metadata": model_metadata} if model_metadata else {}),
         )
     except Exception as exc:  # noqa: BLE001 — never break the agent run
         logger.error(
@@ -394,7 +412,8 @@ async def synap_run(
     if deps is None:
         raise ValueError("synap_run requires SynapDeps (it carries the sdk)")
 
-    await _report_turn(deps, "user", _prompt_text(user_prompt))
+    model = _agent_model(agent, kwargs)
+    await _report_turn(deps, "user", _prompt_text(user_prompt), model)
 
     if "event_stream_handler" not in kwargs:
         if _accepts_event_stream_handler(agent):
@@ -415,7 +434,7 @@ async def synap_run(
 
     result = await agent.run(user_prompt, deps=deps, **kwargs)
 
-    await _report_turn(deps, "assistant", _output_text(result))
+    await _report_turn(deps, "assistant", _output_text(result), model)
     return result
 
 

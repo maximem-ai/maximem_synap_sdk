@@ -9,6 +9,7 @@
 import type { EndpointName } from '../transport/endpoints.js';
 import type { HttpTransport } from '../transport/http.js';
 import { InvalidInputError } from '../errors.js';
+import { RESPONSE_SHAPES, applyResponseShape } from './ranked.js';
 import type { FetchOptions, Json, RawContext } from './types.js';
 
 export type Scope = 'user' | 'customer' | 'client' | 'conversation';
@@ -40,6 +41,9 @@ export function buildFetchRequest(scope: Scope, options: FetchOptions): BuiltReq
   const searchQuery = opt<string[]>(options, 'search_query', 'searchQuery');
   const maxResults = opt<number>(options, 'max_results', 'maxResults') ?? 10;
   const precisionLevel = opt<string>(options, 'precision_level', 'precisionLevel') ?? 'high';
+  const queryDate = opt<string>(options, 'query_date', 'queryDate');
+  const perQuery = opt<number>(options, 'max_results_per_query', 'maxResultsPerQuery');
+  const responseShape = responseShapeOf(options);
   const mode = options.mode ?? 'fast';
 
   if (searchQuery !== undefined && !Array.isArray(searchQuery)) {
@@ -55,6 +59,9 @@ export function buildFetchRequest(scope: Scope, options: FetchOptions): BuiltReq
   //   - conversation_id is ALWAYS present, null when unset, not omitted
   //   - mode always defaults to "fast"
   //   - precision_level is sent ONLY when it differs from "high"
+  //   - query_date is sent ONLY when the caller supplied one
+  //   - max_results_per_query is sent ONLY when the caller supplied one
+  //   - response_shape is sent ONLY when "ranked"
   //   - include_conversation_context is sent ONLY when false
   // Sending an extra key, or omitting one Python always sends, is exactly the
   // kind of difference that shows up as "works in Python, empty in JS".
@@ -66,6 +73,11 @@ export function buildFetchRequest(scope: Scope, options: FetchOptions): BuiltReq
     mode,
   };
   if (precisionLevel !== 'high') body['precision_level'] = precisionLevel;
+  // Omitted at its default, for the same reason precision_level is.
+  if (queryDate) body['query_date'] = queryDate;
+  // Omitted when unset, and `0` counts as unset, as in Python.
+  if (perQuery) body['max_results_per_query'] = perQuery;
+  if (responseShape !== 'by_type') body['response_shape'] = responseShape;
   if (options.include_conversation_context === false) {
     body['include_conversation_context'] = false;
   }
@@ -132,12 +144,25 @@ export function buildFetchRequest(scope: Scope, options: FetchOptions): BuiltReq
  * the stream: it is the one place every scope's fetch goes through, and it
  * should not grow a dependency on either.
  */
+export interface AnticipatedServe {
+  response: RawContext;
+  servedItemIds: string[];
+  bundleId: string;
+  /**
+   * A semantic match below the sure bar. The server is asked too, and its
+   * answer is used if it arrives within `raceDeadlineMs`. Python:
+   * `_race_borderline`.
+   */
+  borderline?: boolean;
+  raceDeadlineMs?: number;
+}
+
 export interface FetchHooks {
   /** Returns a response to short-circuit the network, or null to continue. */
   beforeFetch?: (
     scope: Scope,
     options: FetchOptions,
-  ) => { response: RawContext; servedItemIds: string[]; bundleId: string } | null;
+  ) => AnticipatedServe | null | Promise<AnticipatedServe | null>;
   /** Called after a cache hit is served, for the learning-loop event. */
   onServedFromCache?: (
     scope: Scope,
@@ -154,6 +179,17 @@ export interface FetchHooks {
 }
 
 const VALID_CONTEXT_MODES = ['in-conversation', 'conversation-summary'];
+
+/** The shape asked for, validated as Python validates it, before any request. */
+export function responseShapeOf(options: FetchOptions): string {
+  const shape = opt<string>(options, 'response_shape', 'responseShape') ?? 'by_type';
+  if (!(RESPONSE_SHAPES as readonly string[]).includes(shape)) {
+    throw new InvalidInputError(
+      `Invalid response_shape '${shape}'. Must be one of: ${RESPONSE_SHAPES.join(', ')}`,
+    );
+  }
+  return shape;
+}
 
 /** Fetches and returns the RAW snake_case context, as the namespaced surface does. */
 export async function fetchContext(
@@ -175,17 +211,44 @@ export async function fetchContext(
     `${scope}.context.fetch`,
   );
 
-  const anticipated = hooks.beforeFetch?.(scope, options) ?? null;
+  // Validated before the cache, like customer_id above, so a bad value fails
+  // the same way whether or not a prefetched bundle would have answered.
+  const responseShape = responseShapeOf(options);
+
+  const network = async (): Promise<RawContext> => {
+    const { endpoint, body } = buildFetchRequest(scope, options);
+    const result = await transport.request<Json>(endpoint, { body });
+    // The wrapper returned `result.context || {}`; preserve that exactly.
+    return applyResponseShape((result?.['context'] as RawContext) ?? {}, responseShape);
+  };
+
+  // Awaited: matching by meaning embeds the query with the local model first.
+  const anticipated = (await hooks.beforeFetch?.(scope, options)) ?? null;
+  if (anticipated !== null && anticipated.borderline) {
+    // A borderline match races the server: its answer if in time, the cached
+    // one if not. A late server call finishes unobserved.
+    const pending = network();
+    pending.catch(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), anticipated.raceDeadlineMs ?? 250);
+    });
+    const won = await Promise.race([pending.then((r) => r, () => null), late]);
+    if (timer !== undefined) clearTimeout(timer);
+    if (won !== null) {
+      hooks.onAssembled?.(scope, options, won, startedAt);
+      return won;
+    }
+  }
   if (anticipated !== null) {
     hooks.onServedFromCache?.(scope, options, anticipated);
     hooks.onAssembled?.(scope, options, anticipated.response, startedAt);
-    return anticipated.response;
+    // A hit is items picked from several prefetched bundles, so a ranked hit
+    // is ordered by each item's own rank_score.
+    return applyResponseShape(anticipated.response, responseShape);
   }
 
-  const { endpoint, body } = buildFetchRequest(scope, options);
-  const result = await transport.request<Json>(endpoint, { body });
-  // The wrapper returned `result.context || {}`; preserve that exactly.
-  const response = (result?.['context'] as RawContext) ?? {};
+  const response = await network();
   hooks.onAssembled?.(scope, options, response, startedAt);
   return response;
 }

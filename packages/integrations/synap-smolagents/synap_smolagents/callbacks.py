@@ -2,9 +2,16 @@
 
 `create_synap_recorder` returns a callback for
 ``step_callbacks={MemoryStep: create_synap_recorder(...)}``. Smolagents fires it at
-the end of every completed step; the recorder reports the step on Synap's live
-stream and ingests the step's output into Synap so future sessions can recall
-what the agent did.
+the end of every completed step; the recorder writes the user and assistant turns
+to Synap as conversation messages and reports the rest of the step (reasoning,
+tool calls, tool results) on Synap's live stream when one is open.
+
+Turns are written with :func:`synap_integrations_common.record_turn`: on the
+stream when ``sdk.instance.listen()`` is running (the server persists the turn
+from the event), otherwise ``sdk.conversation.record_message`` over REST, never
+both. Either way the server holds a real conversation under ``conversation_id``,
+which it compacts and promotes to long-term memory, and which the SDK's local
+history search can archive.
 
 Three behaviours are load-bearing:
 
@@ -17,20 +24,23 @@ Three behaviours are load-bearing:
   arrives, and the assistant turn is the one event anticipation acts on. Use
   :func:`synap_step_callbacks` and the wiring is right by construction.
 
-- **Per-step ``document_id``.** Each step is its own memory document
-  (``smolagents-{conversation_id}-{step_number}``); a single stable id would clobber
-  each step down to the last.
+- **No per-step memory documents by default.** The recorder used to ingest every
+  step's ``model_output`` with ``memories.create``. That left no conversation on
+  the server, so compaction and history search had nothing to work on, and now
+  that the turns are recorded (and promoted to long-term memory by the server)
+  it would extract the final answer twice. ``ingest_steps=True`` still turns it
+  on, one document per step (``smolagents-{conversation_id}-{step_number}``).
 
 - **Log, never raise.** The recorder runs inside the agent loop, in a ``finally``
   with no surrounding try/except, so a raising callback would abort the whole run. A
-  failed ingest is logged at ERROR and swallowed -- same contract as the Strands
-  stream hook. The stream reports cannot raise either: ``stream_events`` swallows
-  everything by design, and the sync-to-async bridge around them is wrapped too.
+  failed write is logged and swallowed -- same contract as the Strands stream
+  hook. ``stream_events`` swallows everything by design, and the sync-to-async
+  bridge around it is wrapped too.
 
-## What goes on the stream
+## What is sent
 
-Everything here is silent unless ``sdk.instance.listen()`` is running, so adding
-it changes nothing for a caller who has not opted into streaming.
+The two turns are always written (stream or REST). Everything else is
+stream-only and silent unless ``sdk.instance.listen()`` is running.
 
 ===================  ==========================================================
 Event                Where it comes from
@@ -50,8 +60,8 @@ what the user asked. ``Agent.run()`` does set ``self.task`` before the first
 step, and the registry hands the callback ``agent=self``, so the task is read
 from there and reported once per task. That means the user turn is reported at
 the end of the first step rather than before it. Pass
-``report_user_task=False`` and report it yourself with
-``synap_integrations_common.report_turn`` if you need it earlier.
+``report_user_task=False`` and write it yourself with
+``synap_integrations_common.record_turn`` if you need it earlier.
 
 ⚠ **Parallel tool calls share one observation.** ``ToolCallingAgent`` merges every
 tool's output for a step into the single ``ActionStep.observations`` string, so
@@ -70,10 +80,10 @@ from typing import Any, Callable, Dict, Optional
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import run_async
 from synap_integrations_common.stream_events import (
+    record_turn,
     report_reasoning,
     report_tool_call,
     report_tool_result,
-    report_turn,
 )
 
 logger = logging.getLogger(__name__)
@@ -143,28 +153,31 @@ def create_synap_recorder(
     customer_id: str = "",
     report_user_task: bool = True,
     report_tool_results: bool = True,
-    ingest_steps: bool = True,
+    ingest_steps: bool = False,
 ) -> Callable[..., None]:
-    """Build a Smolagents step callback that reports each step to Synap.
+    """Build a Smolagents step callback that records each run to Synap.
 
     Args:
-        sdk: Configured :class:`MaximemSynapSDK`. Every stream report is a no-op
-            unless ``sdk.instance.listen()`` is running.
+        sdk: Configured :class:`MaximemSynapSDK`. Turns are written over REST
+            when no stream is open; every other report is a no-op unless
+            ``sdk.instance.listen()`` is running.
         user_id: Synap user scope. **Required.**
-        conversation_id: Conversation id; seeds each step's document id. **Required.**
+        conversation_id: The Synap conversation the turns are written to. Reuse
+            it across ``agent.run()`` calls that belong to one conversation.
+            **Required.**
         customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
             B2C instance (user_context_isolation=equals_customer): the server
             rejects a call carrying one with HTTP 400. Leave it unset there.
-        report_user_task: Whether the user turn is reported from ``agent.task``.
-            Turn it off if you report the user turn yourself before the run.
+        report_user_task: Whether the user turn is written from ``agent.task``.
+            Turn it off if you write the user turn yourself before the run.
         report_tool_results: Whether tool results are reported. ⚠ A tool result is
             usually your own customer's data. It is an anticipation hint and never
             becomes a long-term memory, but it does leave your process.
-        ingest_steps: Whether each step's model output is also ingested as a
-            long-term memory document. This is the recorder's original behaviour
-            and stays on by default. It is a separate write from the stream: the
-            stream carries the turn, this carries the step. Turn it off if you do
-            not want the same text extracted twice while a stream is running.
+        ingest_steps: Also ingest each step's model output as its own memory
+            document via ``memories.create``. Off by default: the recorded turns
+            already reach long-term memory through the server, so this extracts
+            the agent's intermediate thoughts and, again, its final answer. Turn
+            it on only if you want the step-by-step reasoning remembered.
 
     Returns:
         A callable ``recorder(memory_step, agent=None)`` for ``step_callbacks``.
@@ -200,7 +213,7 @@ def create_synap_recorder(
             if isinstance(task, str) and task.strip() and task != seen["task"]:
                 seen["task"] = task
                 seen["answer"] = None
-                await report_turn(sdk, role="user", content=task.strip(), **ids)
+                await record_turn(sdk, role="user", content=task.strip(), **ids)
 
         step_number = getattr(memory_step, "step_number", None)
 
@@ -244,17 +257,17 @@ def create_synap_recorder(
         answer = _final_answer_text(memory_step)
         if answer and answer != seen["answer"]:
             seen["answer"] = answer
-            await report_turn(sdk, role="assistant", content=answer, **ids)
+            await record_turn(sdk, role="assistant", content=answer, **ids)
 
     def recorder(memory_step: Any, agent: Optional[Any] = None) -> None:
-        # Stream first. Reported before the ingest so a slow or failing ingest
-        # cannot delay the assistant turn, which is what anticipation waits on.
+        # Turns and stream events first, so an opt-in step ingest cannot delay
+        # the assistant turn, which is what anticipation waits on.
         try:
             run_async(_report(memory_step, agent))
         except Exception as exc:  # noqa: BLE001: in-loop callback, log and never raise
             # stream_events swallows its own failures; this guards the bridge.
-            logger.debug(
-                "SynapStepRecorder: stream report failed error=%s", exc, exc_info=True
+            logger.warning(
+                "SynapStepRecorder: turn write failed error=%s", exc, exc_info=True
             )
 
         if not ingest_steps:
