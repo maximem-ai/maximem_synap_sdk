@@ -26,6 +26,8 @@ export {
   type CreateMemoryOptions, type CreateMemoryResult, type MemoriesInterface,
   type DocumentType, type IngestMode, type UpdateMemoryOptions, type WaitOptions,
   type CreateFromFileOptions, type BatchCreateResult,
+  FORGET_MODES, type ForgetOptions, type ForgetResult, type ForgetCandidate,
+  type ForgetMode, type ForgetStatus,
 } from './memories/interface.js';
 export type {
   ConversationNamespace, RecordMessageOptions, IngestTranscriptOptions,
@@ -58,6 +60,13 @@ export {
   mergeScopeResults, formatForPrompt, ITEM_COLLECTIONS,
   type UnifiedContext, type ItemCollection, type FormatOptions,
 } from './context/unified.js';
+
+// `response_shape: "ranked"`: the shapes, the excerpt type name, and the
+// helpers that rebuild the ranked list from five per-type lists.
+export {
+  RESPONSE_SHAPES, EXCERPT_CATEGORY, MEMORY_TYPES, applyResponseShape, rankItems,
+  wireRankScore, type ResponseShape,
+} from './context/ranked.js';
 
 // as_tool's return type. Without it a caller cannot hold the tool definition
 // in a typed variable, which is the entire point of the helper.

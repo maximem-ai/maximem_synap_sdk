@@ -30,6 +30,12 @@ export interface SynapModelOptions {
   writeMemory?: boolean;
   /** Inject context as system prompt prefix. Defaults to true. */
   injectContext?: boolean;
+  /**
+   * The wrapped model's name. `wrap()` fills it from `model.modelId`; set it
+   * only when calling `createSynapMiddleware` directly. Sent with each turn
+   * so Synap sizes compaction to the model's context window.
+   */
+  agentModel?: string;
 }
 
 // ─── Context types ────────────────────────────────────────────────────────────

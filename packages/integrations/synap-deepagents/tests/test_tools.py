@@ -80,7 +80,8 @@ async def test_store_tool_creates_memory(mock_sdk):
     kwargs = mock_sdk.memories.create.await_args.kwargs
     assert kwargs["document"] == "User prefers TypeScript"
     assert kwargs["user_id"] == "alice"
-    assert kwargs["document_type"] == "document"
+    assert kwargs["document_type"] == "ai-chat-conversation"
+    assert kwargs["mode"] == "long-range"
     assert "ing-001" in result
 
 

@@ -16,8 +16,8 @@ nothing to change in the workflow itself.
 ===================  =============================================
 NAT event            Synap event
 ===================  =============================================
-``WORKFLOW_START``   ``report_turn(role="user")``
-``WORKFLOW_END``     ``report_turn(role="assistant")``
+``WORKFLOW_START``   ``record_turn(role="user")``
+``WORKFLOW_END``     ``record_turn(role="assistant")``
 ``TOOL_START``       ``report_tool_call``
 ``TOOL_END``         ``report_tool_result``
 ``LLM_END``          ``report_reasoning`` (see below)
@@ -56,16 +56,21 @@ Without that the ``WORKFLOW_END`` turn — the one event the anticipation agent
 actually acts on — is the one most likely to be lost, because it is queued
 last and ``stop()`` follows it immediately.
 
-## Stream only
+## Turns always, everything else stream only
 
-There is deliberately no REST fallback here. The server persists
-``user_message`` and ``assistant_message`` from the stream itself, so
-reporting a turn *and* calling ``conversation.record_message`` would write it
-twice and extract it twice. With no stream running, every call in
-``stream_events`` is a silent no-op and this exporter costs nothing — which is
-the right behaviour for something a user switched on under ``telemetry``.
-A workflow that wants turns written to long-term memory has
-:class:`~synap_nemo_agent_toolkit.editor.SynapMemoryEditor` for that.
+The user and assistant turns go through ``record_turn``: on the stream when
+one is open, otherwise over REST (``conversation.record_message``), never
+both. The server persists a streamed turn from its event, so writing both
+would store and extract it twice. A turn is the conversation itself; without
+it Synap has nothing to compact and the SDK nothing to search. The REST write
+needs a conversation id: NAT's own for the run, else the configured
+``conversation_id``; with neither, no turn is written without a stream.
+
+Tool calls, tool results and reasoning stay stream-only and are silent no-ops
+without one. The YAML factory below opens the stream itself, so this fallback
+matters to callers who construct :class:`SynapStreamExporter` directly.
+:class:`~synap_nemo_agent_toolkit.editor.SynapMemoryEditor` is a separate
+path: it writes long-term memories, not conversation turns.
 """
 
 from __future__ import annotations
@@ -89,10 +94,10 @@ from nat.observability.exporter.base_exporter import BaseExporter, IsolatedAttri
 
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common.stream_events import (
+    record_turn,
     report_reasoning,
     report_tool_call,
     report_tool_result,
-    report_turn,
 )
 
 logger = logging.getLogger(__name__)
@@ -254,14 +259,14 @@ def _conversation_id_from(step: IntermediateStep) -> str:
 class SynapStreamExporter(BaseExporter):
     """Reports a NAT run's events on an open Synap gRPC stream.
 
-    Silent when no stream is running: every call in ``stream_events`` no-ops,
-    so a workflow that has not started one behaves exactly as it did before.
-    Nothing here can raise into the run.
+    With no stream running, the user and assistant turns are written over
+    REST and every other event is a no-op. Nothing here can raise into the run.
 
     Args:
-        sdk: A :class:`MaximemSynapSDK`. For the reports to go anywhere,
-            ``await sdk.instance.listen()`` must already have been called on
-            it — the YAML factory below does that for you.
+        sdk: A :class:`MaximemSynapSDK`. For tool, reasoning and live turn
+            events, ``await sdk.instance.listen()`` must already have been
+            called on it — the YAML factory below does that for you. Without
+            it, only the turns are written, over REST.
         conversation_id: Used when NAT's own conversation id is unset. NAT
             carries one per run (set by the HTTP front end, or by
             ``session.run``), and that one wins where it exists.
@@ -386,7 +391,7 @@ class SynapStreamExporter(BaseExporter):
         if event_type == IntermediateStepType.WORKFLOW_START:
             text = _user_text(step.data.input if step.data is not None else None)
             if text:
-                await report_turn(self.sdk, role="user", content=text, **ids)
+                await record_turn(self.sdk, role="user", content=text, **ids)
             return
 
         if event_type == IntermediateStepType.WORKFLOW_END:
@@ -396,7 +401,7 @@ class SynapStreamExporter(BaseExporter):
             self._pending_reasoning.clear()
             text = _assistant_text(step.data.output if step.data is not None else None)
             if text:
-                await report_turn(self.sdk, role="assistant", content=text, **ids)
+                await record_turn(self.sdk, role="assistant", content=text, **ids)
             return
 
         if event_type == IntermediateStepType.TOOL_START:
@@ -526,8 +531,8 @@ async def synap_stream_exporter(config: SynapStreamExporterConfig, builder: Buil
         _force_new=True,
     )
     await sdk.initialize()
-    # Without this there is no stream and every report is a silent no-op, so
-    # the exporter would look healthy and do nothing at all.
+    # Without this there is no stream: turns would fall back to REST and the
+    # tool and reasoning events, which anticipation reads, would be dropped.
     await sdk.instance.listen()
 
     try:

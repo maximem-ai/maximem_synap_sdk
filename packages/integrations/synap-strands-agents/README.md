@@ -80,8 +80,10 @@ Adds `search_memory(query)` and `store_memory(content)`.
 ## Anticipation feed — `SynapStreamHook`
 
 Makes the agent a participant in Synap's real-time anticipation pipeline by feeding its turns and
-tool-call intent onto the gRPC Listen stream. The **app owns the stream lifecycle**; the hook only
-feeds an already-open stream and no-ops when none is active.
+tool-call intent onto the gRPC Listen stream. The **app owns the stream lifecycle**. Without an
+open stream the hook still writes the user and assistant turns, over REST
+(`conversation.record_message`) under its `conversation_id`, so Synap keeps the conversation for
+compaction and history search; tool events are stream-only. A turn is never written both ways.
 
 ```python
 from synap_strands_agents import SynapStreamHook
@@ -94,8 +96,8 @@ await sdk.instance.stop_listening()              # app closes it on shutdown
 ```
 
 > **Run on one event loop.** The stream's background tasks bind to the loop `listen()` ran on;
-> construct the SDK, call `listen()`, and run the agent on that same asyncio loop. The hook feeds
-> real-time *signal* — it does not durably store memories (that's `SynapMemoryStore` / the tools).
+> construct the SDK, call `listen()`, and run the agent on that same asyncio loop. Beyond the turns,
+> the hook feeds real-time *signal* — it does not store long-term memories (that's `SynapMemoryStore` / the tools).
 
 ## Error policy
 

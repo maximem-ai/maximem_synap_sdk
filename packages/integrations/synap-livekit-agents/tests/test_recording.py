@@ -896,3 +896,12 @@ class TestNoneOfItTearsDownTheCall:
         session.fire("conversation_item_added", _turn("user", "hi"))
         await _settle()
         sdk.conversation.record_message.assert_awaited_once()
+
+
+def test_the_session_model_is_named_for_compaction_sizing():
+    from types import SimpleNamespace
+    from synap_livekit_agents.recording import _session_model
+
+    assert _session_model(SimpleNamespace(llm=SimpleNamespace(model="gpt-4o-mini"))) == "gpt-4o-mini"
+    assert _session_model(SimpleNamespace(llm="openai/gpt-4.1-mini")) == "openai/gpt-4.1-mini"
+    assert _session_model(SimpleNamespace(llm=None)) is None
