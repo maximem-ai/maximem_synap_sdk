@@ -9,6 +9,7 @@
  * cosmetic drift here shows up as a diff in every prompt a customer builds.
  */
 
+import { rankedLabel, sortByRankScore } from './ranked.js';
 import type { Json, RawContext, RawContextItem } from './types.js';
 
 /** The five item collections, in Python's iteration order. */
@@ -28,6 +29,13 @@ export interface UnifiedContext {
   episodes: RawContextItem[];
   emotions: RawContextItem[];
   temporal_events: RawContextItem[];
+  /**
+   * `response_shape: "ranked"` only: every item once, best first across
+   * scopes and types, renumbered from 1. Empty for a by-type fetch.
+   */
+  items: RawContextItem[];
+  /** `response_shape: "ranked"` only: the chunks (quotes from source documents). */
+  excerpts: RawContextItem[];
   /** item id -> the scope that supplied it. */
   scope_map: Record<string, string>;
   conversation_context: Json | null;
@@ -59,6 +67,7 @@ export function mergeScopeResults(
   const seen = new Set<string>();
   const out: UnifiedContext = {
     facts: [], preferences: [], episodes: [], emotions: [], temporal_events: [],
+    items: [], excerpts: [],
     scope_map: {},
     conversation_context: null,
     profile: null,
@@ -68,6 +77,9 @@ export function mergeScopeResults(
     total_items: 0,
     metadata: null,
   };
+
+  const rankedSeen = new Set<string>();
+  const rankedItems: RawContextItem[] = [];
 
   for (const [scopeName, response] of scopeResults) {
     out.scopes_queried.push(scopeName);
@@ -100,9 +112,40 @@ export function mergeScopeResults(
         out[collection].push(item);
       }
     }
+
+    // Ranked responses only, and in Python's order: excerpts share the typed
+    // lists' dedup and scope map; the ranked items have a dedup of their own,
+    // because they are the same items again, in order.
+    const excerpts = response['excerpts'];
+    if (Array.isArray(excerpts)) {
+      for (const item of excerpts as RawContextItem[]) {
+        const id = itemId(item);
+        if (id !== undefined) {
+          if (seen.has(id)) continue;
+          seen.add(id);
+          out.scope_map[id] = scopeName;
+        }
+        out.excerpts.push(item);
+      }
+    }
+    const ranked = response['items'];
+    if (Array.isArray(ranked)) {
+      for (const item of ranked as RawContextItem[]) {
+        const id = itemId(item);
+        if (id !== undefined) {
+          if (rankedSeen.has(id)) continue;
+          rankedSeen.add(id);
+        }
+        rankedItems.push(item);
+      }
+    }
   }
 
-  out.total_items = ITEM_COLLECTIONS.reduce((n, c) => n + out[c].length, 0);
+  // One order across scopes, by each item's rank_score. The sort is stable, so
+  // equal scores keep scope order, as Python's does, and unscored items go last.
+  out.items = sortByRankScore(rankedItems).map((item, n) => ({ ...item, rank: n + 1 }));
+  out.total_items =
+    ITEM_COLLECTIONS.reduce((n, c) => n + out[c].length, 0) + out.excerpts.length;
   return out;
 }
 
@@ -151,7 +194,20 @@ export function formatForPrompt(ctx: UnifiedContext, options: FormatOptions = {}
   const includeConversationContext = options.includeConversationContext ?? true;
   const sections: string[] = [];
 
-  if (ctx.facts.length > 0) {
+  // A ranked response is one numbered list in rank order, as in Python: the
+  // typed sections below would split the order back up by type.
+  const ranked = ctx.items ?? [];
+  if (ranked.length > 0) {
+    const lines = ranked.map((it, n) => {
+      let label = rankedLabel(String(it['category'] ?? ''));
+      if (includeScope) label += `, scope: ${scopeOf(ctx, it)}`;
+      return `${n + 1}. [${label}] ${String(it.content ?? '')}`;
+    });
+    sections.push(`### Memories\n${lines.join('\n')}`);
+  }
+  const typed = ranked.length === 0;
+
+  if (typed && ctx.facts.length > 0) {
     const lines = ctx.facts.map((f) => {
       let line = `- ${String(f.content ?? '')}`;
       if (includeScope) line += ` [scope: ${scopeOf(ctx, f)}]`;
@@ -160,7 +216,7 @@ export function formatForPrompt(ctx: UnifiedContext, options: FormatOptions = {}
     sections.push(`### Facts\n${lines.join('\n')}`);
   }
 
-  if (ctx.preferences.length > 0) {
+  if (typed && ctx.preferences.length > 0) {
     const lines = ctx.preferences.map((p) => {
       const extras: string[] = [];
       if (includeScope) extras.push(`scope: ${scopeOf(ctx, p)}`);
@@ -175,7 +231,7 @@ export function formatForPrompt(ctx: UnifiedContext, options: FormatOptions = {}
     sections.push(`### Preferences\n${lines.join('\n')}`);
   }
 
-  if (ctx.episodes.length > 0) {
+  if (typed && ctx.episodes.length > 0) {
     const lines = ctx.episodes.map((e) => {
       // Episodes render `summary`, not `content`.
       let line = `- ${String(e['summary'] ?? '')}`;
@@ -185,7 +241,7 @@ export function formatForPrompt(ctx: UnifiedContext, options: FormatOptions = {}
     sections.push(`### Episodes\n${lines.join('\n')}`);
   }
 
-  if (ctx.emotions.length > 0) {
+  if (typed && ctx.emotions.length > 0) {
     const lines = ctx.emotions.map((em) => {
       const extras: string[] = [];
       if (includeScope) extras.push(`scope: ${scopeOf(ctx, em)}`);
@@ -200,7 +256,7 @@ export function formatForPrompt(ctx: UnifiedContext, options: FormatOptions = {}
     sections.push(`### Emotions\n${lines.join('\n')}`);
   }
 
-  if (ctx.temporal_events.length > 0) {
+  if (typed && ctx.temporal_events.length > 0) {
     const lines = ctx.temporal_events.map((te) => {
       const extras: string[] = [];
       if (includeScope) extras.push(`scope: ${scopeOf(ctx, te)}`);

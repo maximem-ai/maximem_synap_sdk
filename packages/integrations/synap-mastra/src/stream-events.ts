@@ -137,6 +137,18 @@ export async function reportToolResult(
     toolCallId?: string;
   },
 ): Promise<boolean> {
+  // With no stream, the result is still kept in the SDK's local turn archive
+  // (never sent), so history search can find it after a compaction; with a
+  // stream, the SDK's record_tool_result archives it itself.
+  if (args.conversationId && !streamIsActive(sdk)) {
+    try {
+      const archive = (sdk as { archive_tool_result?: (c: string, r: unknown, o: { tool_name?: string }) => void } | null)
+        ?.archive_tool_result;
+      if (typeof archive === 'function') archive.call(sdk, args.conversationId, args.result, { tool_name: args.toolName });
+    } catch {
+      // A hook must never break the agent run.
+    }
+  }
   return send(sdk, 'record_tool_result', {
     result: args.result,
     tool_name: args.toolName,

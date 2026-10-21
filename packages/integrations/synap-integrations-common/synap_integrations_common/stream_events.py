@@ -65,6 +65,47 @@ async def report_turn(
     )
 
 
+async def record_turn(
+    sdk: Any,
+    *,
+    role: str,
+    content: str,
+    conversation_id: str = "",
+    user_id: str = "",
+    customer_id: str = "",
+    metadata: Optional[Mapping[str, str]] = None,
+) -> bool:
+    """Write a user or assistant turn: on the stream when one is open, over
+    REST when not. Returns whether it was written.
+
+    The one exception to "silent when there is no stream": a turn is the
+    conversation itself, not telemetry about it. Without it the server has
+    nothing to compact and the SDK nothing to search, so an integration whose
+    users never start ``listen()`` kept no conversation at all
+    (COMPACTION_HYBRID_PLAN.md P8b). Stream first, REST second, never both:
+    the server persists a streamed turn from its event. Never raises.
+    """
+    if not content or not content.strip():
+        return False
+    if await report_turn(sdk, role=role, content=content, conversation_id=conversation_id,
+                         user_id=user_id, customer_id=customer_id, metadata=metadata):
+        return True
+    if not conversation_id:
+        return False  # the REST write needs one; the stream would have minted it
+    kwargs = {"conversation_id": conversation_id, "role": "user" if role == "user" else "assistant",
+              "content": content, "user_id": user_id}
+    if customer_id:
+        kwargs["customer_id"] = customer_id
+    if metadata:
+        kwargs["metadata"] = dict(metadata)
+    try:
+        await sdk.conversation.record_message(**kwargs)
+        return True
+    except Exception:  # noqa: BLE001 — a hook must never break the agent run
+        logger.warning("synap turn write failed (conversation_id=%s)", conversation_id, exc_info=True)
+        return False
+
+
 async def report_tool_call(
     sdk: Any,
     *,
@@ -103,7 +144,18 @@ async def report_tool_result(
     anticipation hint and never becomes a long-term memory, but it does leave
     their process. An integration passes through what the framework gives it
     and does not go looking for more.
+
+    With no stream, the result is still kept in the SDK's local turn archive
+    (never sent), so history search can find it after a compaction; with a
+    stream, the SDK's ``record_tool_result`` archives it itself.
     """
+    if conversation_id and not stream_is_active(sdk):
+        archive = getattr(sdk, "archive_tool_result", None)
+        if callable(archive):
+            try:
+                archive(conversation_id, result, tool_name=tool_name or None)
+            except Exception:  # noqa: BLE001 — a hook must never break the agent run
+                logger.debug("synap tool result archive failed", exc_info=True)
     return await _send(
         sdk, "record_tool_result",
         result,

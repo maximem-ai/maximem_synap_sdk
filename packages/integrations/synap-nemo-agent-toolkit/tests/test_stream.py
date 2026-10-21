@@ -443,7 +443,7 @@ class TestReasoningIsEveryLlmOutputExceptTheLast:
 
 
 # ---------------------------------------------------------------------------
-# Stream only, never REST
+# Turns: stream when open, REST otherwise, never both
 # ---------------------------------------------------------------------------
 
 
@@ -473,15 +473,75 @@ class TestStreamOnly:
         sdk.conversation.record_message.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_with_no_stream_nothing_is_sent_anywhere(self):
+    async def test_with_no_stream_each_turn_is_written_over_rest_once(self):
+        """Most callers never start listen(); their turns must still be kept."""
         sdk = _streaming_sdk(False)
-        await _exporter(sdk)._report(
+        exporter = _exporter(sdk)
+        await exporter._report(
+            _step(
+                IntermediateStepType.WORKFLOW_START,
+                data=StreamEventData(input="where is my order"),
+            )
+        )
+        await exporter._report(
             _step(
                 IntermediateStepType.WORKFLOW_END,
                 data=StreamEventData(output="it ships tomorrow"),
             )
         )
         sdk.instance.send_message.assert_not_awaited()
+        calls = sdk.conversation.record_message.await_args_list
+        assert [(c.kwargs["role"], c.kwargs["content"]) for c in calls] == [
+            ("user", "where is my order"),
+            ("assistant", "it ships tomorrow"),
+        ]
+        assert all(c.kwargs["conversation_id"] == "conv-1" for c in calls)
+        assert all(c.kwargs["user_id"] == "user-1" for c in calls)
+
+    @pytest.mark.asyncio
+    async def test_with_a_stream_both_turns_go_to_it_and_not_to_rest(self):
+        sdk = _streaming_sdk(True)
+        exporter = _exporter(sdk)
+        await exporter._report(
+            _step(
+                IntermediateStepType.WORKFLOW_START,
+                data=StreamEventData(input="where is my order"),
+            )
+        )
+        await exporter._report(
+            _step(
+                IntermediateStepType.WORKFLOW_END,
+                data=StreamEventData(output="it ships tomorrow"),
+            )
+        )
+        assert sdk.instance.send_message.await_count == 2
+        sdk.conversation.record_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_with_no_stream_tool_and_reasoning_events_are_not_sent(self):
+        sdk = _streaming_sdk(False)
+        exporter = _exporter(sdk)
+        await exporter._report(
+            _step(IntermediateStepType.LLM_END, data=StreamEventData(output="think"))
+        )
+        await exporter._report(_step(IntermediateStepType.TOOL_START, name="t"))
+        await exporter._report(
+            _step(IntermediateStepType.TOOL_END, name="t", data=StreamEventData(output="r"))
+        )
+        sdk.instance.record_thinking.assert_not_awaited()
+        sdk.instance.record_tool_call.assert_not_awaited()
+        sdk.instance.record_tool_result.assert_not_awaited()
+        sdk.conversation.record_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_with_no_stream_and_no_conversation_id_no_turn_is_written(self):
+        sdk = _streaming_sdk(False)
+        await _exporter(sdk, conversation_id="")._report(
+            _step(
+                IntermediateStepType.WORKFLOW_START,
+                data=StreamEventData(input="where is my order"),
+            )
+        )
         sdk.conversation.record_message.assert_not_awaited()
 
 

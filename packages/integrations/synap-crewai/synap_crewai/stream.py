@@ -37,10 +37,13 @@ captured when you build the listener; see ``loop`` and :meth:`bind_loop`.
 
 Two rules hold throughout, and they come from ``stream_events``.
 
-*Silent without a stream.* Everything here needs an active
-``sdk.instance.listen()``. Most callers do not have one, and for them every
-handler returns immediately. Adding this listener must not change behaviour
-for someone who has not opted into streaming.
+*Turns are always written; the rest needs a stream.* The user and assistant
+turns go on the ``sdk.instance.listen()`` stream when one is open and over
+REST (``sdk.conversation.record_message``) when not, so Synap keeps the
+conversation either way. Without a stream the REST write runs on the captured
+loop when there is one (the loop the SDK's HTTP client lives on), and
+otherwise on the handler's own thread. Tool calls, tool results and reasoning
+are stream-only: without a stream those handlers return immediately.
 
 *Never raises.* A handler runs inside CrewAI's own dispatch. Nothing here
 raises into it, and nothing here blocks it: the report is handed to the
@@ -67,10 +70,10 @@ from crewai.events import (
 
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
+    record_turn,
     report_reasoning,
     report_tool_call,
     report_tool_result,
-    report_turn,
     stream_is_active,
 )
 
@@ -95,8 +98,10 @@ class SynapCrewAIListener(BaseEventListener):
     undo it.
 
     Args:
-        sdk: A configured :class:`MaximemSynapSDK`. Without an active
-            ``listen()`` stream every handler is a no-op.
+        sdk: A configured :class:`MaximemSynapSDK`. User and assistant turns
+            are written with or without an active ``listen()`` stream (REST
+            when there is none); the tool and reasoning handlers are no-ops
+            without one.
         user_id: Synap user scope. **Required.**
         conversation_id: The conversation these runs belong to. **Required.**
             Without it the server cannot say which conversation an event is
@@ -254,14 +259,12 @@ class SynapCrewAIListener(BaseEventListener):
 
         def on_kickoff_started(source: Any, event: Any) -> None:
             self._step = 0
-            if not self._report_kickoff_inputs or not self._live():
+            if not self._report_kickoff_inputs:
                 return
             text = _inputs_text(getattr(event, "inputs", None))
             if not text:
                 return
-            self._dispatch(
-                report_turn(self._sdk, role="user", content=text, **self._ids())
-            )
+            self._write_turn("user", text)
 
         def on_kickoff_completed(source: Any, event: Any) -> None:
             self._report_answer(getattr(event, "output", None))
@@ -332,14 +335,34 @@ class SynapCrewAIListener(BaseEventListener):
         again. An integration that reports tools and not this gets no
         anticipation at all.
         """
-        if not self._live():
-            return
         text = _output_text(output)
         if not text:
             return
-        self._dispatch(
-            report_turn(self._sdk, role="assistant", content=text, **self._ids())
-        )
+        self._write_turn("assistant", text)
+
+    def _write_turn(self, role: str, text: str) -> None:
+        """Write a turn: on the stream when one is open, over REST when not.
+
+        With a stream open this is :meth:`_dispatch`, as for every other
+        report. Without one the REST write still needs a loop. The captured
+        loop is preferred, because the SDK's HTTP client belongs to it; with
+        none captured the write runs to completion on this handler's thread
+        (CrewAI's worker, so the crew itself does not wait). Never raises.
+        """
+        coro = record_turn(self._sdk, role=role, content=text, **self._ids())
+        loop = self._loop
+        if self._live() or (loop is not None and not loop.is_closed()):
+            self._dispatch(coro)
+            return
+        try:
+            running = _running_loop()
+            if running is not None:
+                running.create_task(coro).add_done_callback(_swallow)
+            else:
+                asyncio.run(coro)
+        except Exception:  # noqa: BLE001 — a handler must never raise
+            coro.close()
+            logger.debug("synap_crewai: a turn write failed", exc_info=True)
 
     def _report_tool_outcome(self, event: Any, result: Any) -> None:
         if not self._report_tool_results or not self._live():
@@ -381,7 +404,10 @@ async def report_user_turn(
     user_id: str,
     customer_id: str = "",
 ) -> bool:
-    """Report what the user actually said, before you kick the crew off.
+    """Write what the user actually said, before you kick the crew off.
+
+    Goes on the ``listen()`` stream when one is open and over REST when not,
+    so the turn is kept either way. Returns whether it was written.
 
     CrewAI has no user turn. A crew is kicked off with ``inputs``, which are
     template variables rather than a message, and
@@ -390,7 +416,7 @@ async def report_user_turn(
     the real request, send it with this instead and build the listener with
     ``report_kickoff_inputs=False``.
     """
-    return await report_turn(
+    return await record_turn(
         sdk,
         role="user",
         content=content or "",
