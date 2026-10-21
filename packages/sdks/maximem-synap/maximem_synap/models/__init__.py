@@ -28,6 +28,7 @@ from .context import (
     Fact,
     Preference,
     ProfileAttributeModel,
+    RankedItem,
     ResponseMetadata,
     UnifiedContextResponse,
     UserProfileModel,
@@ -96,6 +97,7 @@ __all__ = [
     "UnifiedContextResponse",
     "UserProfileModel",
     "ProfileAttributeModel",
+    "RankedItem",
     "ConversationSummaryModel",
     # Conversation ingest
     "TranscriptTurn",

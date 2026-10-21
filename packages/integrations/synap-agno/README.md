@@ -15,21 +15,30 @@ Requires `agno>=2.0`, `maximem-synap>=0.2.0`.
 ```python
 from agno.agent import Agent
 from agno.models.openai import OpenAIChat
+import asyncio
+
 from maximem_synap import MaximemSynapSDK
 from synap_agno import SynapDb, create_synap_hooks
 
 sdk = MaximemSynapSDK(api_key="sk-...")
+asyncio.run(sdk.initialize())  # required: without it every Synap call fails
 
 agent = Agent(
     db=SynapDb(sdk, customer_id="acme"),
     model=OpenAIChat(id="gpt-4o-mini"),
-    enable_user_memories=True,
+    update_memory_on_run=True,  # Agno 2.5+; enable_user_memories was removed in Agno 3.0
     **create_synap_hooks(sdk, customer_id="acme"),
 )
 
 agent.run("Remember that I prefer tea over coffee", user_id="alice")
 agent.run("What do you remember about me?", user_id="alice")
 ```
+
+For async agents (`await agent.arun(...)`) use `AsyncSynapDb` instead of `SynapDb`.
+
+Synap retrieval answers a question; it cannot list everything stored for a user.
+`get_user_memories(user_id, search_content="...")` returns what matches that topic; with no
+search term it asks `default_query` and returns a best-effort sample.
 
 ## Reporting the turn
 
@@ -47,9 +56,11 @@ is what the anticipation agent reads:
 
 Notes:
 
-- **Silent without a stream, and never over REST.** No `listen()`, no events. This
-  package has never recorded conversation turns over the REST API and these hooks do
-  not start: writing the turn twice would extract it twice.
+- **Turns are written with or without a stream.** Without `listen()`, the user and
+  assistant turns go over REST (`conversation.record_message`) under Agno's
+  `session_id` (or your `conversation_id=`), so Synap keeps the conversation for
+  compaction and history search. With a stream they go on the stream instead, never
+  both. Tool calls, tool results and reasoning are stream-only.
 - **Tool events land at the end of the run, not during it.** Agno's `tool_hooks` fire
   around each call, but the arguments Agno passes them carry no call id
   (`function_call` is bound to the next link in the middleware chain, not to the

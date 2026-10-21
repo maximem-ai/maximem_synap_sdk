@@ -22,13 +22,20 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const dist = path.resolve(here, '../../dist');
 
 const ENTRIES = ['index.js', 'index.cjs'];
-/** Only reachable through the `/grpc` subpath, never the main entry. */
-const FORBIDDEN = ['@grpc/grpc-js', '@grpc/proto-loader', 'protobufjs', 'ContextBundleProto'];
+/**
+ * Only reachable through the `/grpc` subpath or a lazy chunk, never the main
+ * entry: gRPC, and the local embedding model's native runtime and tokenizer
+ * (cache/onnx-encoder.ts).
+ */
+const FORBIDDEN = [
+  '@grpc/grpc-js', '@grpc/proto-loader', 'protobufjs', 'ContextBundleProto',
+  'onnxruntime-node', '@huggingface/tokenizers',
+];
 
 describe('published bundle hygiene', () => {
   const built = existsSync(path.join(dist, 'index.js'));
 
-  it.runIf(built).each(ENTRIES)('%s does not reference gRPC or the proto', (entry) => {
+  it.runIf(built).each(ENTRIES)('%s does not reference gRPC, the proto or the local model runtime', (entry) => {
     const source = readFileSync(path.join(dist, entry), 'utf8');
     for (const needle of FORBIDDEN) {
       expect(
@@ -51,10 +58,12 @@ describe('published bundle hygiene', () => {
   });
 
   it.runIf(built)('keeps the main entry well under the pre-regression ceiling', () => {
-    // 463KB was the accident. 120KB leaves headroom for real features while
+    // 463KB was the accident. 200KB leaves headroom for real features while
     // still failing loudly if a heavy transitive dep gets bundled again.
+    // (Raised from 120KB: 0.5.8 shipped at 124KB and history search, ranked
+    // results and semantic matching took the entry to 170KB.)
     const bytes = readFileSync(path.join(dist, 'index.js'), 'utf8').length;
-    expect(bytes / 1024).toBeLessThan(120);
+    expect(bytes / 1024).toBeLessThan(200);
   });
 
   it.runIf(built)('still exposes gRPC through the subpath', () => {

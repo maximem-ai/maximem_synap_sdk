@@ -27,6 +27,9 @@ from synap_integrations_common import wrap_sdk_errors_async
 
 from synap_microsoft_agent.stream import report_message_turn
 
+# How the server's compaction block starts (v3/render.py).
+COMPACTION_PREFIX = "## Conversation so far (compacted"
+
 logger = logging.getLogger(__name__)
 
 
@@ -94,6 +97,15 @@ class SynapHistoryProvider(HistoryProvider):
 
         recent = getattr(response, "recent_messages", None) or []
         messages: list[Message] = []
+        # The compaction block (and the earlier turns the SDK found for the
+        # latest message) stands in for the turns it covers: recent_messages
+        # holds only the turns after it. Older SDKs send neither.
+        preamble = "\n\n".join(
+            part for part in (getattr(response, "context_block", None),
+                              getattr(response, "history_block", None)) if isinstance(part, str) and part
+        )
+        if preamble:
+            messages.append(Message(role="system", contents=[preamble]))
         for rm in recent:
             role = getattr(rm, "role", None)
             content = getattr(rm, "content", None)
@@ -128,6 +140,8 @@ class SynapHistoryProvider(HistoryProvider):
                 text = getattr(message, "text", "") or ""
                 if not text.strip():
                     continue
+                if role == "system" and text.startswith(COMPACTION_PREFIX):
+                    continue  # the compaction get_messages returned, not a turn
                 # Stream first, REST only as a fallback, never both. A
                 # `system` message has no stream event, so it takes the REST
                 # path it always did rather than being filed as something the

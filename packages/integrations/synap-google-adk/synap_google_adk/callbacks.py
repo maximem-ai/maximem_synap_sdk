@@ -16,9 +16,11 @@ takes::
 
 Two rules hold throughout.
 
-*Silent without a stream.* Everything here needs an active
-``sdk.instance.listen()``. Without one every callback is a no-op, so adding
-them changes nothing for someone who has not opted in.
+*Turns are always written; the rest needs a stream.* The model's reply and
+the user's turn go on the ``sdk.instance.listen()`` stream when one is open and
+over REST (``sdk.conversation.record_message``) when not, so Synap keeps the
+conversation either way (REST needs a ``conversation_id``). Tool calls and
+tool results are stream-only: without a stream those callbacks are no-ops.
 
 *Never raises.* A callback runs inside the agent's own loop, and ADK treats a
 returned value as an override of the model or tool result — so these return
@@ -33,8 +35,8 @@ from typing import Any, Dict, Optional
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
     report_tool_call,
+    record_turn,
     report_tool_result,
-    report_turn,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,13 +53,15 @@ def create_synap_callbacks(
     """Return ``before_tool_callback`` / ``after_tool_callback`` / ``after_model_callback``.
 
     Args:
-        sdk: A configured SDK. Without an active ``listen()`` stream every
-            callback is a no-op.
+        sdk: A configured SDK. The reply is written with or without an active
+            ``listen()`` stream (REST when there is none); the tool callbacks
+            are no-ops without one.
         user_id: Synap user scope. Required.
         customer_id: B2B only. Not accepted on a B2C instance.
         conversation_id: The conversation these runs belong to. Required for
             the events to mean anything: without it the server cannot say which
-            conversation they belong to, and no session is opened.
+            conversation they belong to, no session is opened, and with no
+            stream the reply is not written at all.
         report_tool_results: Whether tool results are reported. ⚠ A tool result
             is usually your own customer's data. It is an anticipation hint and
             never becomes a long-term memory, but it does leave your process.
@@ -112,9 +116,14 @@ def create_synap_callbacks(
         again. An integration that reports tools and not this gets no
         anticipation at all.
         """
+        # A streamed (SSE) run calls this once per partial chunk and once more
+        # with the whole reply. Only the whole reply is a turn: writing the
+        # chunks would store the reply several times over.
+        if getattr(llm_response, "partial", None) is True:
+            return None
         text = _response_text(llm_response)
         if text:
-            await report_turn(sdk, role="assistant", content=text, **ids)
+            await record_turn(sdk, role="assistant", content=text, **ids)
         return None
 
     return {
@@ -132,14 +141,17 @@ async def report_user_turn(
     user_id: str,
     customer_id: str = "",
 ) -> bool:
-    """Report the user's turn before you run the agent.
+    """Write the user's turn before you run the agent.
+
+    Goes on the ``listen()`` stream when one is open and over REST when not,
+    so the turn is kept either way. Returns whether it was written.
 
     ``before_agent_callback`` fires with a context, not with what the user
     said, and the run's input is yours rather than ADK's. One line before the
     run is the whole cost, and without it the conversation Synap sees has
     answers and no questions.
     """
-    return await report_turn(
+    return await record_turn(
         sdk, role="user", content=content or "",
         conversation_id=conversation_id, user_id=user_id, customer_id=customer_id,
     )
@@ -158,6 +170,7 @@ def _response_text(llm_response: Any) -> str:
     parts = getattr(content, "parts", None) or []
     texts = [
         str(getattr(part, "text", "") or "") for part in parts
-        if getattr(part, "text", None)
+        # A thought part is the model's reasoning, not its reply.
+        if getattr(part, "text", None) and getattr(part, "thought", None) is not True
     ]
     return "".join(texts).strip()

@@ -124,11 +124,15 @@ class _SessionReporter:
         conversation_id: str,
         user_id: str,
         customer_id: str,
+        session: Any = None,
     ) -> None:
         self.sdk = sdk
         self.conversation_id = conversation_id
         self.user_id = user_id
         self.customer_id = customer_id
+        # Read per turn, not here: AgentSession.llm can be set or swapped
+        # after the listeners are attached.
+        self._session = session
         # Turns already reported, keyed on the item id LiveKit stamps.
         self._seen_items: dict = {}
         # Tool calls / results already reported, keyed on `call_id`. A call
@@ -289,10 +293,13 @@ class _SessionReporter:
         # both: the server persists the turn from the stream itself, so a
         # `record_message` on top of a delivered event stores it twice and
         # extracts it twice.
+        model = _session_model(self._session)
+        model_metadata = {"agent_model": model} if model else None
         if await report_turn(
             self.sdk, role=role, content=content,
             conversation_id=self.conversation_id,
             user_id=self.user_id, customer_id=self.customer_id,
+            metadata=model_metadata,
         ):
             return
         async with wrap_sdk_errors_async(
@@ -308,6 +315,8 @@ class _SessionReporter:
                 content=content,
                 user_id=self.user_id,
                 customer_id=self.customer_id,
+                # In metadata, not model=, so an older installed SDK accepts it.
+                **({"metadata": model_metadata} if model_metadata else {}),
             )
 
     async def _report_call(self, name: str, args: dict, call_id: str) -> None:
@@ -368,7 +377,7 @@ def attach_synap_recording(
         )
 
     conv_id = conversation_id or f"livekit-{uuid.uuid4().hex[:12]}"
-    reporter = _SessionReporter(sdk, conv_id, user_id, customer_id)
+    reporter = _SessionReporter(sdk, conv_id, user_id, customer_id, session=session)
 
     # `EventEmitter.on` stores by event name and never validates it, so
     # registering an event a older LiveKit does not emit is inert rather than
@@ -378,6 +387,18 @@ def attach_synap_recording(
     session.on("function_tools_executed", reporter.on_function_tools_executed)
     session.on("close", reporter.on_close)
     return conv_id
+
+
+def _session_model(session: Any) -> Optional[str]:
+    """The session LLM's model name, or None.
+
+    Synap sizes compaction to that model's context window
+    (COMPACTION_V3_PLAN.md §4.3). ``AgentSession.llm`` is an LLM object with
+    ``.model``, or a ``"provider/model"`` string for LiveKit inference.
+    """
+    llm = getattr(session, "llm", None)
+    name = llm if isinstance(llm, str) else getattr(llm, "model", None)
+    return name if isinstance(name, str) and name else None
 
 
 def _log_write_failure(task: "asyncio.Task[Any]") -> None:
