@@ -51,6 +51,19 @@ graph = [
     "neo4j>=5.0.0",
     "pyyaml>=6.0",
 ]
+# Local embedding model (cache/encoders.py): history search after compaction,
+# and matching fetch queries to prefetched items. One int8 ONNX file, the one
+# the JS SDK runs too.
+local-search = [
+    "onnxruntime>=1.20",
+    "tokenizers>=0.20",
+    "huggingface_hub>=0.24",
+    "numpy>=1.24",
+]
+# Other encoders history_search_model can name (cache/encoders.py). Not part of
+# local-search: the default model does not need them.
+local-search-fastembed = ["fastembed>=0.9"]
+local-search-model2vec = ["model2vec>=0.3"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",

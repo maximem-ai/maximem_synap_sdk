@@ -31,5 +31,12 @@ export default defineConfig({
   // proto-loader AND protobufjs into the main entry and took dist/index.js
   // from 72KB to 463KB, which is exactly the cost the subpath split exists to
   // avoid. `npm run size` guards the number now.
-  external: ['@grpc/grpc-js', '@grpc/proto-loader', 'protobufjs', 'undici'],
+  //
+  // onnxruntime-node and @huggingface/tokenizers (the local embedding model,
+  // cache/onnx-encoder.ts) are optionalDependencies reached the same way: a
+  // native Node addon cannot be bundled, and an Edge build must never see it.
+  external: [
+    '@grpc/grpc-js', '@grpc/proto-loader', 'protobufjs', 'undici',
+    'onnxruntime-node', '@huggingface/tokenizers',
+  ],
 });

@@ -89,7 +89,7 @@ function makeDoGenerate(text = 'test response') {
   });
 }
 
-function makeStreamDoStream(parts: Array<{ type: string; textDelta?: string }>) {
+function makeStreamDoStream(parts: Array<{ type: string; textDelta?: string; [k: string]: unknown }>) {
   return vi.fn().mockResolvedValue({
     stream: new ReadableStream({
       start(controller) {

@@ -293,10 +293,15 @@ function baseEvent(opts: SynapModelOptions) {
     user_id: opts.userId ?? '',
     customer_id: opts.customerId ?? '',
     session_id: '',
-    metadata: {} as Record<string, string>,
+    metadata: modelMetadata(opts),
     search_queries: [] as string[],
     context_types: [] as string[],
   };
+}
+
+/** `{ agent_model }` for the server's compaction sizing, or nothing. */
+function modelMetadata(opts: SynapModelOptions): Record<string, string> {
+  return opts.agentModel ? { agent_model: opts.agentModel } : {};
 }
 
 async function emitConversationEvents(
@@ -313,7 +318,7 @@ async function emitConversationEvents(
     user_id: opts.userId ?? '',
     customer_id: opts.customerId ?? '',
     session_id: '',
-    metadata: {} as Record<string, string>,
+    metadata: modelMetadata(opts),
     search_queries: [] as string[],
     context_types: [] as string[],
     tool_name: '',

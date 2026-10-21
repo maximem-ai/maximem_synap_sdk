@@ -117,8 +117,8 @@ class SynapStoreTool(BaseTool):
     sdk: MaximemSynapSDK
     user_id: Optional[str] = None
     customer_id: Optional[str] = None
-    document_type: str = "document"
-    ingest_mode: str = "fast"
+    document_type: str = "ai-chat-conversation"
+    ingest_mode: str = "long-range"
 
     def _run(self, content: str, **kwargs: Any) -> str:
         return run_async(self._arun(content, **kwargs))

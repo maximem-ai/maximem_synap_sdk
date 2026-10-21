@@ -225,13 +225,13 @@ describe('the rung reaches the cache from a fetch', () => {
     }
   });
 
-  it('is honoured by tryServeFromCache', () => {
+  it('is honoured by tryServeFromCache', async () => {
     const cache = seeded(PAYMENTS);
     expect(
-      tryServeFromCache(cache, 'user', { searchQuery: QUERY, entityId: 'dana', scopeRung: SECURITY }, 10).response,
+      (await tryServeFromCache(cache, 'user', { searchQuery: QUERY, entityId: 'dana', scopeRung: SECURITY }, 10)).response,
     ).toBeNull();
     expect(
-      tryServeFromCache(cache, 'user', { searchQuery: QUERY, entityId: 'dana', scopeRung: PAYMENTS }, 10).response,
+      (await tryServeFromCache(cache, 'user', { searchQuery: QUERY, entityId: 'dana', scopeRung: PAYMENTS }, 10)).response,
     ).not.toBeNull();
   });
 

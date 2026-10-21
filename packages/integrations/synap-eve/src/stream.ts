@@ -31,13 +31,18 @@
 //   import { sdk } from "../lib/synap.js";
 //   export default createSynapStreamHooks({ sdk });
 //
-// ⚠ **Stream only, and that is deliberate.** Unlike the other integrations
-// there is no REST fallback here, because this package has never written
-// conversation turns: `SynapSdkLike` has no `conversation.record_message` and
-// an eve agent's turns have never reached Synap as conversation. Adding a REST
-// write would change what happens for someone who has not opted into
-// streaming, which is the one thing this work must not do. Without an active
-// `sdk.instance.listen()` every handler below is a no-op.
+// **Turns are always written; everything else is stream only.** The user and
+// assistant turns go on the stream while `sdk.instance.listen()` is running,
+// and otherwise over REST through `sdk.conversation.record_message`, never
+// both: the server persists a streamed turn from its event, so a REST write
+// on top would store and extract it twice. A turn is the conversation itself;
+// without it Synap has nothing to compact and the SDK nothing to search, and
+// most apps never start `listen()`. Reasoning, tool calls, tool results and
+// the session end are stream-only and a no-op without a stream.
+//
+// The REST fallback lives here (`writeTurn`), not in `stream-events.ts`: that
+// file is vendored byte-for-byte from `synap-claude-agent-ts`, and its
+// contract is to be silent without a stream.
 //
 // The second rule is the same one everywhere: *never throws*. A hook runs
 // inside eve's own accepted-event path, and an exception from telemetry there
@@ -52,6 +57,7 @@ import {
   reportToolResult,
   reportTurn,
   streamIsActive,
+  type StreamScope,
   type SynapStreamSdkLike,
 } from "./stream-events.js";
 import {
@@ -67,11 +73,12 @@ type EveActionResult = HookEvent<"action.result">["data"]["result"];
 
 export interface SynapStreamHooksOptions {
   /**
-   * Configured Synap SDK. Only its `instance` namespace is used, so the full
-   * SDK, or anything carrying that namespace, is accepted. Without an active
-   * `listen()` stream every handler is a no-op.
+   * Configured Synap SDK. Its `instance` namespace carries the stream events,
+   * and `conversation.record_message` writes the user and assistant turns
+   * when no `listen()` stream is active. Everything else is a no-op without a
+   * stream, and an SDK without `conversation` simply writes no turns then.
    */
-  sdk: SynapStreamSdkLike;
+  sdk: SynapTurnSdkLike;
   /**
    * Explicit Synap user scope. Required on unauthenticated channels, where
    * `ctx.session.auth.current` is `null`.
@@ -110,6 +117,50 @@ export interface SynapStreamHooksOptions {
    * has.
    */
   endSessionOnComplete?: boolean;
+}
+
+/**
+ * The SDK slice this module uses: the stream namespace, plus the REST
+ * conversation write the turns fall back to. Duck-typed and optional, like
+ * everything else here.
+ */
+export type SynapTurnSdkLike = SynapStreamSdkLike & {
+  conversation?: {
+    record_message?: (options: Record<string, unknown>) => Promise<unknown>;
+  };
+};
+
+/**
+ * Write one user or assistant turn: on the stream when one is open, otherwise
+ * over REST. Never both, never throws. Resolves to whether it was written.
+ *
+ * The REST write needs a conversation id; the callers here always have one,
+ * because `scope()` refuses a turn without it.
+ */
+export async function writeTurn(
+  sdk: SynapTurnSdkLike,
+  args: StreamScope & { role: "user" | "assistant"; content: string },
+): Promise<boolean> {
+  if (!args.content || !args.content.trim()) return false;
+  if (await reportTurn(sdk, args)) return true;
+  if (!args.conversationId) return false;
+  try {
+    const record = sdk?.conversation?.record_message;
+    if (typeof record !== "function") return false;
+    const payload: Record<string, unknown> = {
+      conversation_id: args.conversationId,
+      role: args.role,
+      content: args.content,
+    };
+    if (args.userId) payload.user_id = args.userId;
+    // Refused on a B2C instance, so an empty one is left out, not sent as "".
+    if (args.customerId) payload.customer_id = args.customerId;
+    await record.call(sdk.conversation, payload);
+    return true;
+  } catch {
+    // A hook must never break the run.
+    return false;
+  }
 }
 
 /**
@@ -175,15 +226,17 @@ export function createSynapStreamHooks(options: SynapStreamHooksOptions) {
    * what it does, but reading the event's shape is ours, and a throw here
    * lands in eve's accepted-event path.
    *
-   * The `streamIsActive` check is first so that a caller with no stream — which
-   * is every caller who has not opted in — does no work at all.
+   * The `streamIsActive` check is first so that a caller with no stream does
+   * no work at all for a stream-only event. Turns pass `alwaysWrite`, because
+   * they fall back to REST.
    */
   async function guard(
     ctx: HookContext,
     body: (scoped: Scope) => Promise<void>,
+    alwaysWrite = false,
   ): Promise<void> {
     try {
-      if (!streamIsActive(sdk)) return;
+      if (!alwaysWrite && !streamIsActive(sdk)) return;
       const scoped = scope(ctx);
       if (!scoped) return;
       await body(scoped);
@@ -205,10 +258,10 @@ export function createSynapStreamHooks(options: SynapStreamHooksOptions) {
           if (!content) return;
           const key = `user:${event.data.turnId}:${event.data.sequence}`;
           if (!first(key)) return;
-          if (await reportTurn(sdk, { ...scoped, role: "user", content })) {
+          if (await writeTurn(sdk, { ...scoped, role: "user", content })) {
             sent.add(key);
           }
-        }),
+        }, true),
 
       "reasoning.completed": (event, ctx) =>
         guard(ctx, async (scoped) => {
@@ -274,10 +327,10 @@ export function createSynapStreamHooks(options: SynapStreamHooksOptions) {
           // `assistant_message` that tells anticipation the turn has ended.
           const key = `assistant:${event.data.turnId}:${event.data.sequence}`;
           if (!first(key)) return;
-          if (await reportTurn(sdk, { ...scoped, role: "assistant", content })) {
+          if (await writeTurn(sdk, { ...scoped, role: "assistant", content })) {
             sent.add(key);
           }
-        }),
+        }, true),
 
       "session.completed": (_event, ctx) =>
         guard(ctx, async (scoped) => {

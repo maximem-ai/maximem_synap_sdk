@@ -7,6 +7,7 @@
  * and a static import fails the BUILD there, not the call.
  */
 
+import { agentModelOf, withAgentModel, type AgentModel } from '../agent-model.js';
 import {
   ListeningAlreadyActiveError, ListeningNotActiveError, SynapError,
 } from '../errors.js';
@@ -52,6 +53,10 @@ export interface SendMessageOptions {
   event_type?: string;
   eventType?: string;
   metadata?: Record<string, string>;
+  /** The agent's model, as on `conversation.record_message`. Python's `model=`. */
+  model?: string;
+  context_window?: number;
+  contextWindow?: number;
   /**
    * Report a tool call on the stream. Python's `send_message` takes both, and
    * the proto has `tool_name` / `tool_args_json`; the JS surface simply never
@@ -155,6 +160,18 @@ export interface InstanceInternals {
   onCompactionUpdate(conversationId: string, bundle: Record<string, unknown>): void;
   /** Set by the client so a compaction can prune the locally buffered tail. */
   setCompactionApplier(apply: (bundle: Record<string, unknown>) => void): void;
+  /**
+   * Set by the client: called when `listen()` starts, which is when prefetched
+   * bundles begin to arrive, so the local embedding model loads then.
+   */
+  setOnListen(handle: () => void): void;
+  /**
+   * Set by the client. Receives the server's message count for a conversation
+   * after each streamed write has been stored.
+   */
+  setConversationStateHandler(
+    handle: (conversationId: string, messageCount: number) => void,
+  ): void;
   /** Learning-loop event, fired after a fetch is served from the cache. */
   sendContextUsed(event: Record<string, unknown>): void;
   /** Audit event, fired after every fetch resolves. */
@@ -269,6 +286,10 @@ export function createInstanceNamespace(
   cache: AnticipationCache,
   /** Buffers a stream-sent turn locally, same as the HTTP write paths. */
   onTurn?: (turn: { conversationId: string; role: string; content: string }) => void,
+  /** The client's `agent_model` / `agent_context_window`, folded into each event's metadata. */
+  agentModel: () => AgentModel = () => ({}),
+  /** Keeps a reported tool result in the local turn archive (`archive_tool_result`). */
+  onToolResult?: (r: { conversationId: string; result: unknown; toolName: string }) => void,
 ): InstanceNamespace {
   let client: StreamClient | null = null;
   // conversationId -> sessionId, for conversations this stream has opened a
@@ -280,6 +301,9 @@ export function createInstanceNamespace(
     | null = null;
 
   let applyCompaction: ((bundle: Record<string, unknown>) => void) | null = null;
+  let onListen: (() => void) | null = null;
+  let onConversationState: ((conversationId: string, messageCount: number) => void) | null =
+    null;
 
   const internals: InstanceInternals = {
     onCompactionUpdate(conversationId, bundle) {
@@ -290,6 +314,12 @@ export function createInstanceNamespace(
     },
     setCompactionApplier(apply) {
       applyCompaction = apply;
+    },
+    setOnListen(handle) {
+      onListen = handle;
+    },
+    setConversationStateHandler(handle) {
+      onConversationState = handle;
     },
     sendContextUsed(event) {
       // Fire-and-forget: the stream drops it silently when disconnected, which
@@ -355,6 +385,11 @@ export function createInstanceNamespace(
         throw new ListeningAlreadyActiveError('Listening is already active on this instance');
       }
 
+      try {
+        onListen?.();
+      } catch {
+        /* loading the local model must never stop the stream */
+      }
       const { GrpcStreamClient } = await import('../grpc/stream-client.js');
       const onContext = options.on_context ?? options.onContext;
       const onDisconnect = options.on_disconnect ?? options.onDisconnect;
@@ -372,6 +407,9 @@ export function createInstanceNamespace(
         ...(onContext !== undefined ? { onContext } : {}),
         onCompactionUpdate: (conversationId, bundle) => {
           internals.onCompactionUpdate(conversationId, bundle);
+        },
+        onConversationState: (conversationId, messageCount) => {
+          onConversationState?.(conversationId, messageCount);
         },
         onStateChange: (state: StreamState) => {
           // Any state change away from connected retires the sessions this
@@ -479,7 +517,7 @@ export function createInstanceNamespace(
         customer_id: options.customer_id ?? options.customerId ?? '',
         session_id: options.session_id ?? options.sessionId
           ?? openSessions.get(conversationId) ?? '',
-        metadata: options.metadata ?? {},
+        metadata: withAgentModel(options.metadata, agentModelOf(options), agentModel(), true) ?? {},
         timestamp_ms: Date.now(),
         tool_name: options.tool_name ?? options.toolName ?? '',
         // Python serialises tool_args with json.dumps into tool_args_json.
@@ -520,6 +558,10 @@ export function createInstanceNamespace(
       // ⚠ A tool result is usually the caller's customer data. It is an
       // anticipation hint and is not written into long-term memory, but it does
       // reach us: send what the agent needs, not the whole row.
+      const conversationId = options.conversation_id ?? options.conversationId ?? '';
+      if (conversationId) {
+        onToolResult?.({ conversationId, result: options.result, toolName: options.tool_name ?? options.toolName ?? '' });
+      }
       await namespace.send_message({
         content: '',
         role: 'tool',

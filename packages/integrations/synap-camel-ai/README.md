@@ -28,8 +28,11 @@ of that live history it:
 
 - **recalls** Synap's long-term memories and prepends them as a system context block
   (using the latest user turn as the query);
-- **persists** each completed turn's accumulated transcript to Synap for server-side
-  extraction, under a stable document id.
+- **records** every user and assistant turn as a Synap conversation message, under
+  `conversation_id` (default `camel-{agent_id}`; pass your own to continue a
+  conversation across agents or processes). The server compacts that
+  conversation and promotes it to long-term memory, and the SDK's local history
+  search can find old turns after compaction.
 
 ```python
 from camel.agents import ChatAgent
@@ -38,7 +41,9 @@ from maximem_synap import MaximemSynapSDK
 from synap_camel_ai import SynapAgentMemory
 
 sdk = MaximemSynapSDK(api_key="sk-...")
-memory = SynapAgentMemory(sdk, user_id="alice", customer_id="acme")
+memory = SynapAgentMemory(
+    sdk, user_id="alice", customer_id="acme", conversation_id="conv_abc",
+)
 
 agent = ChatAgent(
     system_message="You are a concise, friendly support agent.",
@@ -91,12 +96,17 @@ on it so Synap's anticipation agent can watch the turn unfold:
 | a `FUNCTION` record | the `tool_result`, under that same id |
 | an `ASSISTANT` record with `reasoning_content` | the reasoning step, then the assistant turn |
 
-**Stream first, REST only as a fallback, never both.** The server persists the
-streamed turns itself and extracts memories from the conversation it builds, so
-the transcript ingest stands down for any turn the stream carried. With no
-stream open — which is every caller who has not opted in — nothing changes:
-the transcript is ingested exactly as before, and the async bridge is not even
-entered.
+**Stream first, REST otherwise, never both.** With a stream open the user and
+assistant turns go out as stream events and the server persists them from the
+event. With no stream they are written with `sdk.conversation.record_message`.
+Tool calls, tool results and reasoning are stream-only; without a stream, a
+write that carries no turn does not enter the async bridge at all.
+
+> Previously, turns were ingested as a transcript document
+> (`memories.create`). That left no conversation on the server, so compaction and
+> history search had nothing to work on. It is replaced, not kept alongside: the
+> server promotes recorded messages to long-term memory, so both would extract
+> the same text twice.
 
 ```python
 sdk = MaximemSynapSDK(api_key="sk-...")
@@ -104,7 +114,7 @@ await sdk.instance.listen()
 
 memory = SynapAgentMemory(
     sdk, user_id="alice", customer_id="acme",
-    conversation_id="conv_abc",   # defaults to the document id
+    conversation_id="conv_abc",   # defaults to camel-{agent_id}
 )
 ```
 
@@ -115,9 +125,9 @@ answers.
 
 - **Reads** (`search_memory`, memory recall) degrade — a Synap blip returns no recall
   and the turn continues.
-- **The persistence write** inside the agent loop is best-effort by default
+- **The turn write** inside the agent loop is best-effort by default
   (`on_error="fallback"`) so a transient outage never discards a model response; set
-  `on_error="raise"` for strict environments.
+  `on_error="raise"` to raise `SynapIntegrationError` when a turn was not written.
 - **The explicit `store_memory` tool** raises `SynapIntegrationError` on failure.
 
 Requires Python 3.11+ and `camel-ai>=0.2.90`.

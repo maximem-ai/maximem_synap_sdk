@@ -9,19 +9,20 @@ could not answer. ``ChatHistoryMemory`` already keeps the live conversation;
 
 - ``retrieve()``: the real conversation, with Synap's long-term memories prepended as
   a system context block (fetched using the latest user turn as the query).
-- ``write_records()``: reports the turn on Synap's live stream when one is open, and
-  otherwise ingests the accumulated transcript for server-side extraction.
+- ``write_records()``: writes each user and assistant turn as a conversation
+  message (on Synap's live stream when one is open, over REST otherwise), and
+  reports tool calls, tool results and reasoning on the stream.
 
 Error policy:
 - recall (read) degrades: a Synap failure logs at ERROR and returns the plain local
   history — the turn still runs.
 - persistence (write) is best-effort by default (``on_error="fallback"``): it runs
-  inside the agent loop, so a transient ingestion failure must not discard the
+  inside the agent loop, so a transient write failure must not discard the
   model's just-produced response. Set ``on_error="raise"`` for strict environments.
 - ``clear()`` is a silent local reset — Synap has no public delete API, and CAMEL
   calls ``clear()`` on every construction/summarization, so warning would be noise.
 
-## Reporting the turn on the live stream
+## What a write sends
 
 CAMEL has no callback protocol. ``ChatAgent`` exposes exactly one usage hook
 (``on_request_usage``) and nothing for turns, tools or reasoning, so the memory's
@@ -40,15 +41,22 @@ what CAMEL writes          what goes on the stream
 ``reasoning_content``      one) and then the assistant turn
 =========================  =================================================
 
-**Stream first, REST only as a fallback, never both.** The server persists
-``user_message`` and ``assistant_message`` from the stream itself
-(``grpc/servicer.py``) and extracts memories from the conversation it builds. The
-transcript ingest below does the same job over REST, so doing both writes the
-conversation twice and extracts it twice.
-:func:`~synap_integrations_common.stream_events.report_turn` returns whether the
-event actually went out, which is what makes the choice decidable rather than
-guessed: with no stream open, or with a send that failed, ``_persist`` runs exactly
-as it always has.
+**Turns are conversation messages, written once.** Each user and assistant
+turn goes through :func:`~synap_integrations_common.record_turn`: on the stream
+when ``listen()`` is running (the server persists ``user_message`` /
+``assistant_message`` from the event itself), otherwise
+``sdk.conversation.record_message`` over REST. Never both. Because the server
+keeps a real conversation either way, it compacts it, promotes it to long-term
+memory ingestion, and the SDK's local history search can archive it.
+
+This replaced a REST ``memories.create`` of the accumulated transcript. That
+path fed extraction directly but left no conversation behind, so compaction and
+history search had nothing to work on. It is gone rather than kept alongside:
+the server already promotes recorded messages to long-term ingestion, so
+writing both would extract the same text twice.
+
+Tool calls, tool results and reasoning are stream-only: they are anticipation
+hints, not turns, and are silent no-ops without a stream.
 
 Two shapes in the table above are traps, and both fail *silently* rather than
 loudly:
@@ -83,17 +91,14 @@ from synap_integrations_common import (
     SynapIntegrationError,
     report_reasoning,
     report_tool_call,
+    record_turn,
     report_tool_result,
-    report_turn,
     run_async,
     stream_is_active,
-    wrap_sdk_errors_async,
 )
 
 logger = logging.getLogger(__name__)
 
-# Metadata marker on every Synap doc this memory creates.
-_MARKER = "camel_ai_conversation"
 _OPEN = "<synap_long_term_memory>"
 _CLOSE = "</synap_long_term_memory>"
 
@@ -168,14 +173,15 @@ class SynapAgentMemory(ChatHistoryMemory):
         customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
             B2C instance (user_context_isolation=equals_customer): the server
             rejects a call carrying one with HTTP 400. Leave it unset there.
-        conversation_id: Synap conversation this agent's turns belong to, used
-            only when a live stream is open. Defaults to the document id, which
-            is derived from the CAMEL agent id and is stable for the life of the
-            agent. Pass the same id you gave
+        conversation_id: Synap conversation this agent's turns are written to.
+            Defaults to ``camel-{agent_id}`` (a random ``camel-<hex>`` until
+            ``ChatAgent`` assigns its id), which is stable for the life of the
+            agent but new for every agent — pass your own id to continue one
+            conversation across agents or processes. Pass the same id you gave
             :func:`~synap_camel_ai.synap_st_system_message` to keep short-term
             context and the reported turns on one conversation.
         agent_id: Optional CAMEL agent id. ``ChatAgent`` overwrites this with its
-            own id after construction; it seeds the Synap document id.
+            own id after construction; it seeds the default conversation id.
         mode: Synap fetch mode — ``"accurate"`` (default) or ``"fast"``.
         max_results: Cap on recalled memories per turn.
         token_limit: Context-window token budget for CAMEL's context creator.
@@ -183,8 +189,9 @@ class SynapAgentMemory(ChatHistoryMemory):
             ``OpenAITokenCounter`` for GPT-4o-mini (no API key needed).
         window_size: CAMEL recency window over local history (``None`` = unbounded).
         storage: CAMEL key-value storage for local history (``None`` = in-memory).
-        on_error: ``"fallback"`` (default) makes the persistence write best-effort;
-            ``"raise"`` propagates :class:`SynapIntegrationError`.
+        on_error: ``"fallback"`` (default) makes the turn write best-effort;
+            ``"raise"`` raises :class:`SynapIntegrationError` when a turn could
+            not be written.
 
     Attach via ``ChatAgent(memory=SynapAgentMemory(...))`` — the constructor path
     only. Do **not** assign ``agent.memory = ...`` after construction; that setter
@@ -231,20 +238,19 @@ class SynapAgentMemory(ChatHistoryMemory):
         self.mode = mode
         self.max_results = max_results
         self.on_error = on_error
-        self._turns: List[dict] = []
         self._fallback_doc = f"camel-{uuid4().hex}"
-        # ⚠ Which memory records have already gone out on the stream.
+        # ⚠ Which memory records have already been written.
         #
         # ``write_records`` is normally called once per message, so a turn is
-        # reported once. ``ChatAgent.load_memory`` is the exception: it replays
+        # written once. ``ChatAgent.load_memory`` is the exception: it replays
         # another memory's records into this one, and without this guard every
-        # historical turn would be reported again — and extracted again — as if
+        # historical turn would be written again — and extracted again — as if
         # the user had just said it. Keyed on the record uuid CAMEL stamps, and
         # kept across ``clear()`` because a replay can happen after one. Per
         # instance, not per class: two agents must not silence each other.
         self._reported: set = set()
 
-    # ── document id (lazy: ChatAgent sets agent_id AFTER __init__) ───────────
+    # ── default conversation id (lazy: ChatAgent sets agent_id AFTER __init__)
 
     @property
     def _doc_id(self) -> str:
@@ -260,67 +266,59 @@ class SynapAgentMemory(ChatHistoryMemory):
     def write_records(self, records: List[MemoryRecord]) -> None:
         # Local history first — the agent's own context depends on it.
         super().write_records(records)
-
-        for record in records:
-            if record.role_at_backend in _CONVERSATIONAL:
-                role = (
-                    "user"
-                    if record.role_at_backend == OpenAIBackendRole.USER
-                    else "assistant"
-                )
-                self._turns.append(
-                    {"role": role, "content": record.message.content or ""}
-                )
-
-        # Report the whole write on the live stream, if one is open. Returns
-        # whether the stream took responsibility for it.
-        streamed = self._report(records)
-
-        # Persist the accumulated transcript once per completed turn (triggered by
-        # the assistant message). Never per-message to a stable doc (that would
-        # clobber), and never at construction (system messages are skipped above).
-        #
-        # ⚠ Not when the stream already carried the turn. The server persists
-        # `user_message` / `assistant_message` from the stream itself and
-        # extracts from the conversation it builds, so doing both writes this
-        # conversation twice and extracts it twice.
-        if (
-            any(r.role_at_backend == OpenAIBackendRole.ASSISTANT for r in records)
-            and not streamed
-        ):
-            self._persist()
-
-    # ── the live stream ──────────────────────────────────────────────────────
-
-    def _report(self, records: List[MemoryRecord]) -> bool:
-        """Report a write on Synap's live stream.
-
-        Returns whether the stream has taken responsibility for this write, and
-        therefore whether the REST transcript ingest should stand down. ``False``
-        whenever there is no stream, so a caller who never opened one behaves
-        exactly as they did before.
-
-        Never raises: this runs inside ``ChatAgent.step``, and no amount of
-        telemetry is worth ending somebody's agent run.
-        """
-        if not stream_is_active(self.sdk):
-            return False
-        coro = self._areport(records)
+        if not self._has_work(records):
+            return
+        coro = self._awrite(records)
         try:
-            return bool(run_async(coro))
-        except Exception as exc:  # noqa: BLE001 — a write must never break a step
+            failed = run_async(coro)
+        except Exception as exc:  # noqa: BLE001 — the bridge, not the SDK
+            # ⚠ `run_async` can fail on its own: there is a loop running that
+            # `nest_asyncio` cannot patch, and no coroutine ever starts. That is
+            # not a `SynapIntegrationError`, so it would travel straight out of
+            # `write_records` into `ChatAgent.step` and end the run — the one
+            # thing `on_error="fallback"` exists to prevent.
             close = getattr(coro, "close", None)
             if callable(close):
                 # A coroutine the bridge never started would warn on GC.
                 close()
-            logger.debug(
-                "SynapAgentMemory: stream report failed: %s", exc, exc_info=True
+            logger.error(
+                "SynapAgentMemory: could not write the turn "
+                "conversation_id=%s user_id=%s error=%s",
+                self._conversation_id,
+                self.user_id,
+                exc,
+                exc_info=True,
             )
-            return False
+            if self.on_error == "raise":
+                raise
+            return
+        if failed and self.on_error == "raise":
+            raise SynapIntegrationError(
+                "camel_ai.write_records",
+                f"{failed} turn(s) were not written to Synap",
+                {"conversation_id": self._conversation_id, "user_id": self.user_id},
+            )
 
-    async def _areport(self, records: List[MemoryRecord]) -> bool:
-        """Send one write's events. Returns whether every turn in it went out."""
-        owned = True
+    def _has_work(self, records: List[MemoryRecord]) -> bool:
+        """Whether this write needs the async bridge at all.
+
+        ``run_async`` applies ``nest_asyncio`` to whatever loop it finds, which
+        patches that loop's class globally. With no stream open, only a user or
+        assistant turn has anywhere to go (REST); a system prompt or a tool lap
+        does not, so it never reaches the bridge.
+        """
+        if stream_is_active(self.sdk):
+            return True
+        return any(
+            record.uuid not in self._reported
+            and record.role_at_backend in _CONVERSATIONAL
+            and (getattr(record.message, "content", "") or "").strip()
+            for record in records
+        )
+
+    async def _awrite(self, records: List[MemoryRecord]) -> int:
+        """Write one batch of records. Returns how many turns were not written."""
+        failed = 0
         for record in records:
             if record.uuid in self._reported:
                 continue
@@ -329,13 +327,13 @@ class SynapAgentMemory(ChatHistoryMemory):
             message = record.message
             if role == OpenAIBackendRole.USER:
                 text = (getattr(message, "content", "") or "").strip()
-                if text:
-                    owned = await self._report_turn("user", text) and owned
+                if text and not await self._record_turn("user", text):
+                    failed += 1
             elif role == OpenAIBackendRole.ASSISTANT:
                 await self._report_assistant(message)
                 text = (getattr(message, "content", "") or "").strip()
-                if text:
-                    owned = await self._report_turn("assistant", text) and owned
+                if text and not await self._record_turn("assistant", text):
+                    failed += 1
             elif role in _TOOL_ROLES:
                 await report_tool_result(
                     self.sdk,
@@ -346,11 +344,12 @@ class SynapAgentMemory(ChatHistoryMemory):
                     user_id=self.user_id,
                     customer_id=self.customer_id,
                 )
-        return owned
+        return failed
 
     async def _report_assistant(self, message: Any) -> None:
         """The reasoning and the tool calls carried on one assistant message.
 
+        Stream only: both are silent no-ops without ``listen()``.
         Reasoning first: it is what the model did before it decided anything.
         The tool calls then go out under the provider's own ``id``, which is the
         same id CAMEL puts on the ``FunctionCallingMessage`` holding the result,
@@ -378,8 +377,8 @@ class SynapAgentMemory(ChatHistoryMemory):
                 customer_id=self.customer_id,
             )
 
-    async def _report_turn(self, role: str, content: str) -> bool:
-        return await report_turn(
+    async def _record_turn(self, role: str, content: str) -> bool:
+        return await record_turn(
             self.sdk,
             role=role,
             content=content,
@@ -387,67 +386,6 @@ class SynapAgentMemory(ChatHistoryMemory):
             user_id=self.user_id,
             customer_id=self.customer_id,
         )
-
-    def _persist(self) -> None:
-        transcript = self._render_transcript()
-        if not transcript:
-            return
-        coro = self._apersist(transcript)
-        try:
-            run_async(coro)
-        except SynapIntegrationError:
-            # wrap_sdk_errors_async already logged at ERROR. In-loop write: swallow
-            # by default so a transient outage doesn't discard the model response.
-            if self.on_error == "raise":
-                raise
-        except Exception as exc:  # noqa: BLE001 — the bridge, not the SDK
-            # ⚠ `run_async` can fail on its own: there is a loop running that
-            # `nest_asyncio` cannot patch, and no coroutine ever starts. That is
-            # not a `SynapIntegrationError`, so it used to travel straight out
-            # of `write_records` into `ChatAgent.step` and end the run — the one
-            # thing `on_error="fallback"` exists to prevent. Same policy as an
-            # ingestion failure: logged, and propagated only when the caller
-            # asked for strict.
-            close = getattr(coro, "close", None)
-            if callable(close):
-                # A coroutine the bridge never started would warn on GC.
-                close()
-            logger.error(
-                "SynapAgentMemory: could not run the transcript ingest "
-                "doc_id=%s user_id=%s error=%s",
-                self._doc_id,
-                self.user_id,
-                exc,
-                exc_info=True,
-            )
-            if self.on_error == "raise":
-                raise
-
-    async def _apersist(self, transcript: str) -> None:
-        async with wrap_sdk_errors_async(
-            "camel_ai.write_records",
-            logger,
-            doc_id=self._doc_id,
-            user_id=self.user_id,
-        ):
-            await self.sdk.memories.create(
-                document=transcript,
-                user_id=self.user_id,
-                customer_id=self.customer_id or None,
-                document_type="ai-chat-conversation",
-                document_id=self._doc_id,
-                metadata={_MARKER: True},
-            )
-
-    def _render_transcript(self) -> str:
-        lines = []
-        for turn in self._turns:
-            content = (turn["content"] or "").strip()
-            if not content:
-                continue
-            label = "User" if turn["role"] == "user" else "Assistant"
-            lines.append(f"{label}: {content}")
-        return "\n\n".join(lines)
 
     # ── reads: local conversation + prepended Synap recall ───────────────────
 
@@ -509,8 +447,5 @@ class SynapAgentMemory(ChatHistoryMemory):
                 return i
         return len(records)
 
-    # ── clear: silent local reset (Synap has no public delete API) ───────────
-
-    def clear(self) -> None:
-        super().clear()
-        self._turns.clear()
+    # clear(): inherited. A silent local reset — Synap has no public delete
+    # API, and CAMEL calls clear() on every construction/summarization.
