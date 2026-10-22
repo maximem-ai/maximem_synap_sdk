@@ -77,7 +77,7 @@ Full detail: `reference/streaming.md`.
 
 ## Webhooks (optional, recommended)
 
-- [ ] If you need to know when ingestion completes, configure webhooks instead of polling. See `https://docs.maximem.ai/dashboard/webhooks`.
+- [ ] If you need to know when ingestion completes, configure webhooks instead of polling.
 - [ ] Webhook handler is idempotent — same event may arrive twice.
 - [ ] Webhook signature is verified before processing.
 
@@ -102,7 +102,7 @@ Full detail: `reference/streaming.md`.
 
 - [ ] SDK version is pinned in `requirements.txt` / `package.json`. Don't auto-update on production.
 - [ ] Read the changelog before bumping: `https://docs.maximem.ai/resources/changelog`.
-- [ ] Migration guide consulted on major version changes: `https://docs.maximem.ai/migration/overview`.
+- [ ] Migration guide consulted on major version changes: `https://docs.maximem.ai/migrations/overview`.
 
 ## Live doc
 

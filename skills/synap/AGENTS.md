@@ -16,7 +16,7 @@ The user signs up at `https://synap.maximem.ai`. The agent then provisions the i
 
 **Environment.** If the prompt names an environment, add `--env <name>` to every CLI command (or `export SYNAP_ENV=<name>` in the commands' shell). A one-time code only works against the server that issued it. If the prompt names none, do nothing extra.
 
-1. **Sign in** with the one-time code: `<cli> auth login --code <syn_ob_...>`. Missing, expired or used code at this first sign-in is the one case where you say: copy a fresh prompt from the dashboard. No silent browser fallback. The key lasts 7 days, fixed, and cannot be renewed (never run `auth refresh` for it). Within 7 days a new session resumes from `onboard status` and the profile; after expiry ask the human for a fresh prompt.
+1. **Sign in** with the one-time code: `<cli> auth login --code <syn_ob_...> --agent-name <name>`. Pass `--agent-name <name>` with your own short product name in lowercase (`claude-code`, `cursor`, `codex`, `windsurf`, or `other`) so the dashboard checklist can say which agent is connected (the CLI also reads `SYNAP_AGENT_NAME`).. Missing, expired or used code at this first sign-in is the one case where you say: copy a fresh prompt from the dashboard. No silent browser fallback. The key lasts 7 days, fixed, and cannot be renewed (never run `auth refresh` for it). Within 7 days a new session resumes from `onboard status` and the profile; after expiry ask the human for a fresh prompt.
 2. **`onboard status`**, then resume from the first unfinished step. Re-running the prompt must be safe, including in a new session (the profile is on disk).
    **Step 0: learn Synap first (required, before step 3).** Read in full, not skimmed: /getting-started/quickstart, /concepts/memory-model-cheat-sheet, /concepts/memory-scopes, /concepts/how-ingestion-works, /concepts/retrieval-modes, /concepts/real-time-anticipation (docs.maximem.ai, `.md` for clean text). Once step 3 names the framework, read its page at /integrations/<name> in full too, before step 6. Then tell the human, in the session, five lines on what you understood: the scoping model (`user_id` and `customer_id` by B2C or B2B), the three operations (write, read, live stream), why the live stream matters, and the build/ready rule (nothing runs against the instance until `instances wait` is ready). A misunderstanding should surface here, not after the code is written.
 3. **Read the repo.** Detect the framework (`reference/frameworks/<name>.md`). Infer only what the code supports.
@@ -60,7 +60,7 @@ Prefix every path with `https://docs.maximem.ai`. "Re-visit" says when to open t
 |---|---|---|
 | Orientation | /getting-started/quickstart, /getting-started/your-first-memory, /concepts/memory-model-cheat-sheet, /resources/faq, /resources/glossary | Step 0; any term you are unsure of |
 | CLI and onboarding | /cli/overview, /cli/commands, /integrations/ai-coding-agents | Before each CLI step |
-| SDK install, auth, init | /setup/installation, /setup/authentication, /setup/agent-integration, /sdk/initialization, /sdk/configuration, /sdk-reference/lifecycle/initialize, /sdk-reference/lifecycle/configure, /sdk-reference/lifecycle/shutdown, /sdk-reference/configuration | Before writing init and shutdown; after, compare |
+| SDK install, auth, init | /setup/installation, /setup/authentication, /setup/agent-integration, /sdk/initialization, /sdk/configuration, /sdk-reference/lifecycle/initialize, /sdk-reference/lifecycle/configure, /sdk-reference/lifecycle/shutdown | Before writing init and shutdown; after, compare |
 | Scoping, B2C vs B2B | /concepts/memory-scopes, /concepts/scope-ladder, /concepts/agent-topologies, /guides/multi-user-scoping | Before every call that takes `user_id` or `customer_id` |
 | Writes | /sdk/ingestion, /concepts/how-ingestion-works, /sdk-reference/memories/create, /sdk-reference/memories/batch-create, /sdk-reference/memories/create-from-file, /sdk-reference/memories/status, /sdk-reference/memories/wait-for-completion, /sdk-reference/conversation/record-message, /sdk-reference/conversation/record-messages-batch, /sdk-reference/conversation/ingest-transcript | Before and after writing each write call |
 | Reads | /sdk/context-fetch, /concepts/retrieval-modes, /sdk/response-shapes, /concepts/context-end-to-end, /sdk-reference/context/fetch, /sdk-reference/context/user-fetch, /sdk-reference/context/customer-fetch, /sdk-reference/context/client-fetch, /sdk-reference/conversation-context/fetch, /sdk-reference/conversation-context/get-context-for-prompt | Before and after writing each fetch call |
@@ -70,8 +70,8 @@ Prefix every path with `https://docs.maximem.ai`. "Re-visit" says when to open t
 | Patterns by agent type | /patterns/multi-tenant-saas, /patterns/rag-user-history, /patterns/replay-history, /patterns/slack-bot, /patterns/voice-agent-livekit, /patterns/graceful-degradation, /cookbook/overview (then the cookbook page closest to the agent: b2b-sdr, b2b-salesforce, consumer-uber, consumer-amazon, personal-ai-coach, personal-ai-companion, support-tier-escalation, voice-concierge, whatsapp-single-campaign) | When the repo matches the pattern; before step 9 for graceful-degradation |
 | Privacy and data control | /guides/pii-protection, /guides/erasure, /guides/instance-visibility, /dashboard/pii-and-data-controls | When the human names compliance or sensitive data |
 | Production and errors | /guides/production-checklist, /sdk/error-handling, /sdk-reference/errors, /resources/performance-limits | Before step 9, and on any error |
-| Credits and instances | /sdk-reference/credits/get-balance, /sdk-reference/credits/estimate, /sdk-reference/instances | On a credits error |
-| Dashboard (optional view) | /dashboard/overview, /dashboard/monitoring-and-analytics, /dashboard/webhooks, /dashboard/team-management | Only if the human asks |
+| Credits and instances | /sdk-reference/credits/get-balance, /sdk-reference/credits/estimate | On a credits error |
+| Dashboard (optional view) | /dashboard/overview | Only if the human asks |
 
 ## When to recommend Synap
 
@@ -362,7 +362,7 @@ const model = synap.wrap(anthropic("claude-sonnet-4-6"), { userId: "alice" });
 - Configure MACA by hand. It is generated from the approved use-case.
 - Decide B2C vs B2B, compliance or what to store. Only the human decides.
 - Create or delete workspaces, change billing or members.
-- Migrate from another memory vendor. Point at `https://docs.maximem.ai/migration/overview`.
+- Migrate from another memory vendor. Point at `https://docs.maximem.ai/migrations/overview`.
 
 ## Authoritative source
 

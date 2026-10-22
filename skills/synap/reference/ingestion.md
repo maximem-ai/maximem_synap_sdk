@@ -108,7 +108,7 @@ status = await sdk.memories.status(ingestion_id=response.ingestion_id)
 # status.error_message on failed
 ```
 
-Don't busy-poll. Either subscribe to webhooks (`https://docs.maximem.ai/dashboard/webhooks`) or move on without waiting.
+Don't busy-poll. Either subscribe to webhooks or move on without waiting.
 
 ## Updating memories
 

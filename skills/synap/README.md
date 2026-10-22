@@ -158,6 +158,12 @@ For high-leverage discovery beyond marketplaces:
 
 ## Keeping it up to date
 
+Two checks on the docs links the skill cites:
+
+- `python scripts/check_docs_source.py` (offline): every cited path exists as an `.mdx` under `synap/docs/devdocs`.
+- `python scripts/check_docs_live.py` (needs network): every cited path returns HTTP 200 on the live docs site. The live deploy can lag the source.
+
+
 The skill is grounded in `https://docs.maximem.ai`. To regenerate from current docs:
 
 ```bash

@@ -17,7 +17,7 @@ answers it. Exit codes: 0 ok, 1 generic, 2 usage, 3 auth, 4 not found, 5 permiss
 
 | Step | Command | Notes |
 |---|---|---|
-| Sign in | `auth login --code <syn_ob_...>` | Code also accepted as env `SYNAP_ONBOARDING_CODE`. Single use, expires in 10 minutes. The key it stores lasts exactly 7 days, cannot be renewed (after that, ask the human for a fresh prompt), and cannot touch billing, members or deletes. |
+| Sign in | `auth login --code <syn_ob_...> --agent-name <name>` | Code also accepted as env `SYNAP_ONBOARDING_CODE`. Single use, expires in 10 minutes. The key it stores lasts exactly 7 days, cannot be renewed (after that, ask the human for a fresh prompt), and cannot touch billing, members or deletes. |
 | State | `onboard status` | Shows the lifecycle state and what the agent has reported. Use it to resume. |
 | Template | `instances template --output-file usecase.md` | The current use-case template. See `use-case-markdown.md`. |
 | Ask | `onboard ask "<question>"` / `onboard ask --clear` | Lets an open dashboard show that your agent is waiting. Always ask the human in the session too. |
