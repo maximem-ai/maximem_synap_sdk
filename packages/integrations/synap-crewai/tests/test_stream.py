@@ -17,9 +17,10 @@ The rest of the contract, from ``stream_events``:
   ``user_message`` and ``assistant_message`` from the stream itself, so an
   integration that reports a turn on the stream and also calls
   ``sdk.conversation.record_message`` writes the turn twice and extracts it
-  twice. This integration is stream-only, so ``record_message`` must never be
-  called at all.
-- **Silent when no stream is running.**
+  twice. So with a stream open ``record_message`` is never called.
+- **Turns without a stream go over REST.** With no ``listen()`` running the
+  user and assistant turns are written once each through
+  ``sdk.conversation.record_message``; tools and reasoning go nowhere.
 - **Never raises, and never blocks**, because a handler runs inside CrewAI's
   own dispatch.
 """
@@ -235,19 +236,34 @@ class TestStreamFirstAndNeverBoth:
         )
 
     @pytest.mark.asyncio
-    async def test_with_no_stream_nothing_goes_out_anywhere(self):
-        """Someone who never called listen() must see no change at all."""
+    async def test_with_no_stream_only_the_turns_go_out_over_rest(self):
+        """A turn is the conversation itself; it must not depend on listen().
+        Tools and reasoning stay stream-only."""
         sdk = _streaming_sdk(False)
         listener = _listener(sdk)
         try:
             _emit(CrewKickoffStartedEvent(crew_name="c", inputs={"q": "hi"}))
+            await _settle(lambda: sdk.conversation.record_message.await_count)
             _emit(_started())
             _emit(_finished())
+            _emit(AgentReasoningCompletedEvent(
+                agent_role="a", task_id="t", plan="look it up", ready=True,
+            ))
             _emit(CrewKickoffCompletedEvent(crew_name="c", output="done"))
-            await _settle(timeout=0.4)
+            await _settle(lambda: sdk.conversation.record_message.await_count >= 2)
+            await _settle(timeout=0.3)
             sdk.instance.send_message.assert_not_awaited()
             sdk.instance.record_tool_call.assert_not_awaited()
-            sdk.conversation.record_message.assert_not_awaited()
+            sdk.instance.record_tool_result.assert_not_awaited()
+            sdk.instance.record_thinking.assert_not_awaited()
+            calls = sdk.conversation.record_message.await_args_list
+            assert [(c.kwargs["role"], c.kwargs["content"]) for c in calls] == [
+                ("user", "hi"), ("assistant", "done"),
+            ]
+            for c in calls:
+                assert c.kwargs["conversation_id"] == "conv-1"
+                assert c.kwargs["user_id"] == "user-1"
+                assert c.kwargs["customer_id"] == "cust-1"
         finally:
             listener.stop()
 
@@ -457,9 +473,13 @@ class TestTheWholeTurn:
         assert kw["content"] == "where is my order"
 
     @pytest.mark.asyncio
-    async def test_report_user_turn_with_no_stream_sends_nothing(self):
+    async def test_report_user_turn_with_no_stream_writes_over_rest(self):
         sdk = _streaming_sdk(False)
-        assert await report_user_turn(sdk, "hi", conversation_id="c", user_id="u") is False
+        assert await report_user_turn(sdk, "hi", conversation_id="c", user_id="u") is True
+        sdk.conversation.record_message.assert_awaited_once()
+        kw = sdk.conversation.record_message.await_args.kwargs
+        assert (kw["role"], kw["content"], kw["conversation_id"]) == ("user", "hi", "c")
+        sdk.instance.send_message.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -521,18 +541,23 @@ class TestItReportsOnTheListeningLoop:
             listener.stop()
 
     @pytest.mark.asyncio
-    async def test_a_listener_with_no_loop_and_no_stream_says_nothing(self, caplog):
-        """No warning for someone who never opted into streaming: there is
-        nothing to report, so nothing is wrong."""
+    async def test_a_listener_with_no_loop_and_no_stream_still_writes_the_turn(
+        self, caplog
+    ):
+        """No warning for someone who never opted into streaming, and the
+        turn still goes over REST, run on the handler's own thread."""
         sdk = _streaming_sdk(False)
         listener = await asyncio.to_thread(
             SynapCrewAIListener, sdk, "user-1", "conv-1"
         )
         try:
+            assert listener._loop is None
             with caplog.at_level(logging.WARNING, logger="synap_crewai.stream"):
                 _emit(CrewKickoffCompletedEvent(crew_name="c", output="done"))
-                await _settle(timeout=0.4)
+                await _settle(lambda: sdk.conversation.record_message.await_count)
             assert caplog.records == []
+            sdk.conversation.record_message.assert_awaited_once()
+            assert sdk.conversation.record_message.await_args.kwargs["role"] == "assistant"
         finally:
             listener.stop()
 

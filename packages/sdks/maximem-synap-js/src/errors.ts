@@ -34,6 +34,7 @@ export type SynapErrorCode =
   | 'invalid_input'
   | 'invalid_instance_id'
   | 'invalid_conversation_id'
+  | 'customer_id_not_accepted'
   | 'authentication'
   | 'context_not_found'
   | 'conflict'
@@ -234,6 +235,31 @@ export class InvalidConversationIdError extends InvalidInputError {
   static override readonly errorCode: SynapErrorCode = 'invalid_conversation_id';
 }
 
+/**
+ * A customer_id passed on a B2C instance, refused before any request.
+ * Python raises the same class (`maximem_synap.CustomerIdNotAcceptedError`),
+ * also a subclass of InvalidInputError, with the same three fields.
+ */
+export class CustomerIdNotAcceptedError extends InvalidInputError {
+  static override readonly errorCode: SynapErrorCode = 'customer_id_not_accepted';
+  readonly where: string;
+  readonly customerId: string;
+  readonly instanceId: string | null;
+
+  constructor(where: string, customerId: string, instanceId?: string | null) {
+    super(
+      `${where}: customer_id is not accepted on this instance` +
+        `${instanceId ? ` (${instanceId})` : ''}, which is B2C ` +
+        `(user_context_isolation='equals_customer'). Send user_id only; it is the ` +
+        `whole identity, and the server files and reads your data under it. ` +
+        `Received customer_id=${JSON.stringify(customerId)}.`,
+    );
+    this.where = where;
+    this.customerId = customerId;
+    this.instanceId = instanceId ?? null;
+  }
+}
+
 export class AuthenticationError extends SynapPermanentError {
   static override readonly errorCode: SynapErrorCode = 'authentication';
 }
@@ -275,6 +301,7 @@ const PARENT: Partial<Record<SynapErrorCode, SynapErrorCode>> = {
   invalid_input: 'permanent',
   invalid_instance_id: 'invalid_input',
   invalid_conversation_id: 'invalid_input',
+  customer_id_not_accepted: 'invalid_input',
   authentication: 'permanent',
   context_not_found: 'permanent',
   conflict: 'permanent',

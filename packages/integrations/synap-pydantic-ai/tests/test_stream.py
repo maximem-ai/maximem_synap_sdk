@@ -726,3 +726,13 @@ class TestSynapRunSync:
         assert [c.kwargs["event_type"]
                 for c in sdk.instance.send_message.await_args_list] == [
             "user_message", "assistant_message"]
+
+
+def test_the_runs_model_is_named_for_compaction_sizing():
+    from types import SimpleNamespace
+    from synap_pydantic_ai.stream import _agent_model
+
+    assert _agent_model(SimpleNamespace(model="openai:gpt-4o"), {}) == "gpt-4o"
+    assert _agent_model(SimpleNamespace(model=SimpleNamespace(model_name="claude-sonnet-4-5")), {}) == "claude-sonnet-4-5"
+    assert _agent_model(SimpleNamespace(model="openai:gpt-4o"), {"model": "groq:llama-3.3-70b-versatile"}) == "llama-3.3-70b-versatile"
+    assert _agent_model(SimpleNamespace(model=None), {}) is None
