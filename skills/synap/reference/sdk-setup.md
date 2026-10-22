@@ -1,17 +1,36 @@
 # SDK setup — install, init, lifecycle, errors
 
+> **Read this next:** [Installation](https://docs.maximem.ai/setup/installation.md); [Authentication](https://docs.maximem.ai/setup/authentication.md); [SDK initialization](https://docs.maximem.ai/sdk/initialization.md); [SDK configuration](https://docs.maximem.ai/sdk/configuration.md); [initialize](https://docs.maximem.ai/sdk-reference/lifecycle/initialize.md); [configure](https://docs.maximem.ai/sdk-reference/lifecycle/configure.md); [shutdown](https://docs.maximem.ai/sdk-reference/lifecycle/shutdown.md); [Errors](https://docs.maximem.ai/sdk-reference/errors.md); [Error handling](https://docs.maximem.ai/sdk/error-handling.md); [Agent integration walkthrough](https://docs.maximem.ai/setup/agent-integration.md). **Checkpoint:** open the method's page before writing each call, re-read it after and compare every parameter, scope rule and error; if the docs and this file disagree, the docs win and tell the human.
+
 The same `MaximemSynapSDK` is the foundation of every framework integration. Get this right once and everything else slots in.
 
-## Prerequisites — do this in the dashboard, not in code
+## Prerequisites: an instance and an API key
 
-The user must do these manually at `https://synap.maximem.ai`:
+Before any code runs you need a **Client** (workspace, `cli_<hex16>`), an **Instance** (`inst_<hex16>`) and an
+**API key** (`synap_...`, shown once). The onboarding procedure in `SKILL.md` creates the instance and key
+through the CLI (`reference/dashboard-setup.md`); a developer with no coding agent can create them by hand in the dashboard at
+`https://synap.maximem.ai`. The use-case file that seeds the memory architecture is described in
+`reference/use-case-markdown.md`. Never provision from application code.
 
-1. Create a **Client** (their organization). Get the `cli_<hex16>`.
-2. Create an **Instance** for the agent they're building. Get the `inst_<hex16>`.
-3. (Recommended) Upload a **Use-Case Markdown** describing what the agent does — Synap uses this to auto-generate an optimized MACA. Template + guidance: `reference/use-case-markdown.md`.
-4. Generate an **API Key** under the instance's API Keys section. **The key is shown once.** Format: `synap_...`.
+## While the memory architecture is building: `instance_not_ready`
 
-Never attempt to provision instances or keys from code in this skill.
+For about 14 minutes after `instances create`, the instance rejects runtime writes and context fetches with
+HTTP 409 `{"error":"instance_not_ready","message":"...","state":"building","retry_after_seconds":N,"instance_id":"..."}`
+and a `Retry-After` header. This applies to the user's own app too, not just to you.
+
+**How the Python SDK shows it:** a `ConflictError` (a permanent error, never retried by the SDK) whose message
+begins "This instance's memory architecture is still being built". The code and `retry_after_seconds` are
+dropped, so detect it by that message text on a `ConflictError`, and treat it as "not ready, retry later",
+never as a real conflict (other 409s, such as "compaction already in progress", are real). The SDK will not
+retry it for you, so your code must. Write the integration so that:
+
+- a **read** (`fetch`) that gets it logs and continues without memory (degrade, do not crash);
+- a **write** (`memories.create`, recorded turns) that gets it is **retried later** (wait about 30 seconds, or
+  `retry_after_seconds` if you have it), not dropped and not retried in a tight loop. Error-handling patterns:
+  [Error handling](https://docs.maximem.ai/sdk/error-handling.md).
+
+How the JS SDK surfaces it is not confirmed in this skill: check the status code and message rather than
+assuming an error class. `scripts/verify_synap.py` already does the Python detection and a bounded retry.
 
 ## Install
 

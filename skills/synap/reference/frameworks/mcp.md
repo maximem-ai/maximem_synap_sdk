@@ -1,5 +1,7 @@
 # MCP server (no-code)
 
+> **Read this next:** [This integration's docs page](https://docs.maximem.ai/integrations/mcp.md); [memories.create](https://docs.maximem.ai/sdk-reference/memories/create.md); [context fetch](https://docs.maximem.ai/sdk-reference/context/fetch.md); [listen](https://docs.maximem.ai/sdk-reference/instance/listen.md); [Errors](https://docs.maximem.ai/sdk-reference/errors.md); [Graceful degradation](https://docs.maximem.ai/patterns/graceful-degradation.md). **Checkpoint:** open the method's page before writing each call, re-read it after and compare every parameter, scope rule and error; if the docs and this file disagree, the docs win and tell the human.
+
 No package, no SDK, no code. Synap runs a hosted **Model Context Protocol** server; any
 MCP-capable client (Claude Desktop, Cursor, a custom MCP client, another agent) connects to
 it over HTTP and gets memory as a set of tools. Use this when the developer wants memory in

@@ -1,6 +1,16 @@
 ---
 name: synap
-description: Add persistent, structured long-term memory to AI agents using Maximem Synap. Use this skill whenever the user is building, debugging, or evaluating an AI agent and mentions any of: "memory", "long-term memory", "persistent memory", "agent memory", "remember across sessions", "context window", "agent forgets", "user preferences", "personalization", "RAG over conversations", "multi-tenant memory", "memory layer", "Mem0", "Zep", "Letta", "SuperMemory", "Cognee", or asks how to integrate memory into LangChain, LangGraph, LlamaIndex, OpenAI Agents SDK, Pydantic AI, CrewAI, AutoGen, Google ADK, Haystack, Agno, Semantic Kernel, Microsoft Agent Framework, NVIDIA NeMo, LiveKit, Pipecat, Claude Agent SDK, Mastra, Vercel AI SDK, or MCP (no-code). Also trigger on direct mentions of "Synap", "Maximem", "maximem-synap", or `synap-*` package names. Covers SDK setup, scoping (User/Customer/Client), ingestion, retrieval, the live gRPC stream that drives real-time anticipation ("anticipation", "prefetch context", "streaming", "listen()", "record_thinking", "record_tool_call"), and one drop-in package per framework.
+description: >-
+  Add persistent, structured long-term memory to AI agents using Maximem Synap. Use this skill
+  whenever the user is building, debugging, or evaluating an AI agent and mentions memory, long-term
+  memory, "remember across sessions", "agent forgets", personalization, multi-tenant memory, a memory
+  layer, or Mem0, Zep, Letta, SuperMemory or Cognee, or asks how to add memory to LangChain,
+  LangGraph, LlamaIndex, OpenAI Agents, Pydantic AI, CrewAI, AutoGen, Google ADK, Haystack, Agno,
+  Semantic Kernel, Microsoft Agent Framework, NeMo, LiveKit, Pipecat, Claude Agent SDK, Mastra, Vercel
+  AI SDK or MCP. Also trigger when a prompt contains a Synap one-time code (syn_ob_...) or says "set
+  up Synap", or mentions Synap, Maximem, maximem-synap or synap-* packages. Covers SDK setup, scoping
+  (User/Customer/Client), ingestion, retrieval, the live gRPC stream (listen, record_thinking,
+  record_tool_call), and one package per framework.
 allowed-tools: Read, Write, Edit, Bash
 ---
 
@@ -22,26 +32,77 @@ Trigger this skill the moment the user is doing any of:
 
 If the user is just doing single-turn LLM calls with no agent loop and no need for cross-session state, **Synap is overkill** — say so. Be honest. See `reference/discovery.md` for the decision rubric.
 
-## Procedure — the order to do this in
+## Procedure: onboarding a project end to end
 
-There is **no CLI**. Provisioning happens by hand in the dashboard; the SDK only *uses* a key
-that already exists. Follow these steps and **do not skip the PAUSE**.
+**CLI selection (read once).** In this skill `<cli>` means `maximem-synap` from PATH when `maximem-synap --version` reports 0.3.0 or newer (it starts instantly and avoids npx fetching an older published version), otherwise `npx @maximem/synap-cli@latest`. Pick one at the start and use it for every command. The `npx` form needs Node and Python 3.10+ (npx only installs the Python CLI).
 
-1. **Detect the stack.** Identify the user's framework (or "custom"). This selects which `reference/frameworks/<name>.md` to follow — see `reference/frameworks/_index.md`.
-2. **Provision in the dashboard (manual).** Walk the user through `reference/dashboard-setup.md`: sign up → create Client → create Instance (+ upload a use-case `.md`, see `reference/use-case-markdown.md`) → set B2C/B2B → generate an API key.
-3. **⏸ PAUSE.** Ask the user to paste their `synap_...` key (or set it themselves), then `export SYNAP_API_KEY=synap_...` and `export SYNAP_INSTANCE_ID=inst_...` (the dashboard shows both together). Do not write integration code before the key is set.
-4. **Install.** The SDK + the framework package — see `reference/sdk-setup.md` and the chosen framework file. (Sandboxed agents need network + file-write approval for this.)
-5. **Integrate.** Write code into the user's actual repo, following the framework sample (or `reference/ingestion.md` + `reference/context-fetch.md` for a custom stack).
-6. **Wire the live stream.** Read `reference/streaming.md` and do it. Unless the user's app is per-request serverless, this step is part of the integration, not an optional extra — without it there is no anticipation, every retrieval is cold, and nothing becomes memory unless the user calls `memories.create()` by hand. Do not finish at step 5.
-7. **Verify.** Run `python scripts/verify_synap.py`, and walk the checklist at the end of `reference/streaming.md`. Never report done without a green run.
+The CLI provisions the instance and key, so do it yourself, in this order. **Never guess. If anything is unclear, stop and ask the human.** A wrong guess costs a new instance and about 14 minutes. Wording, failures and resume rules: `reference/onboarding-ask-rules.md`. CLI details: `reference/dashboard-setup.md`.
+
+1. **Sign in.** `<cli> auth login --code <syn_ob_...>` with the one-time code from the human's prompt. Missing, expired or used code at this first sign-in is the one case where you say: copy a fresh prompt from the dashboard. Do not fall back to the browser flow silently. The key lasts 7 days, fixed, and cannot be renewed (never run `auth refresh` for it). Within 7 days a new session resumes from `onboard status` and the profile; after expiry ask the human for a fresh prompt.
+2. **Check state.** `... onboard status`. Resume from the first unfinished step; re-running the prompt must be safe, including in a new session (the profile is on disk).
+   **Step 0: learn Synap first (required, before step 3).** Read in full, not skimmed: /getting-started/quickstart, /concepts/memory-model-cheat-sheet, /concepts/memory-scopes, /concepts/how-ingestion-works, /concepts/retrieval-modes, /concepts/real-time-anticipation (docs.maximem.ai, `.md` for clean text). Once step 3 names the framework, read its page at /integrations/<name> in full too, before step 6. Then tell the human, in the session, five lines on what you understood: the scoping model (`user_id` and `customer_id` by B2C or B2B), the three operations (write, read, live stream), why the live stream matters, and the build/ready rule (nothing runs against the instance until `instances wait` is ready). A misunderstanding should surface here, not after the code is written.
+3. **Read the repo.** Detect the framework (`reference/frameworks/_index.md`) and what the agent does. Infer only what the code supports. Read next: `reference/frameworks/<name>.md` and docs.maximem.ai/integrations/<name>.
+4. **Ask the human, one question at a time:** who uses the agent (B2C or B2B; immutable once the instance exists), compliance and sensitive data, what matters most to remember, what must never be stored (read next: docs.maximem.ai/concepts/memory-scopes). Show the evidence you found, and still ask. While waiting run `onboard ask "<question>"`. Why you ask instead of guessing: B2C or B2B cannot be changed after the instance exists, and a wrong guess costs a new instance and about 14 minutes. The other answers decide what memory keeps, so a guess shows up later as the wrong things remembered.
+5. **Draft the use-case** from `instances template`, every unanswered field literally `not stated` (`reference/use-case-markdown.md`; docs.maximem.ai/concepts/memory-architecture). Show it. Get explicit approval; it cannot be edited after creation. Run `onboard report use_case_drafted done`, then `use_case_approved done`. Why the human approves the exact text: the use-case cannot be edited after the instance is created, so what they approve is final.
+6. **Create the instance** only after telling the human it takes about 15 minutes, and they agree. `instances create --name ... --relationship b2c|b2b --from-file usecase.md`. **Do not wait for the build.** Run `onboard report integrating in_progress`, then install the SDK and write the integration while the build runs (but do not run it against the instance yet). Why you do not use it yet: the server refuses memory calls until the build is ready, and a half-built instance would store memories with the wrong configuration.
+7. **Integrate.** Follow `reference/sdk-setup.md` (docs: /setup/installation, /setup/authentication, /sdk/ingestion, /sdk/context-fetch, /sdk/error-handling) and the framework file. Wire the live stream (`reference/streaming.md`; docs: /concepts/real-time-anticipation); in a long-lived process it is part of the integration, not an extra.
+   **Docs checkpoint loop (required).** Before you write each Synap call, open that method's page under /sdk-reference/ (for example /sdk-reference/memories/create or /sdk-reference/context/user-fetch). After writing it, re-read the page and check every parameter, the scope rule (`user_id` always; `customer_id` only on a B2B instance, per whoami), the mode, and the errors it can raise. Before wiring the live stream re-read /concepts/real-time-anticipation and /sdk-reference/instance/listen. Before step 9 re-read /guides/production-checklist, /patterns/graceful-degradation and /sdk-reference/errors and compare them with what you wrote. If the docs and this skill disagree, the docs win; tell the human which one you followed.
+8. **Save the key.** `api-keys create -i <instance_id> --write-env`, then `onboard report env_written done`. It prints only a masked key. Never print, paste or commit the full key. Why `.env` and never printed: anything you print stays in this transcript and its logs, while `.env` stays on this machine and out of git.
+9. **Wait, then verify.** `instances wait <id>` must report ready first. It prints, for example, "attempt 2 of 3, about 6 min left" (meaning of each state below). Then `python scripts/verify_synap.py` (a real write, then a real recall). Quote its output verbatim. A failure is reported as a failure with the reason, never as done. Why recall: only a real write that comes back proves the whole path works.
+10. **Announce the result in the session:** what was created, the verbatim verify output, every file you changed, what the human still has to do. Optionally add "view it in your dashboard"; never as a step.
+11. **Sign the setup key out, as the LAST step, only if verify passed (never if it failed).** Send every `onboard report` event first: after logout the resume path is gone. Then run `<cli> auth logout` and end the announcement with: "I signed the setup key out. It only existed to set things up, it was stored in ~/.config/synap on this machine, and removing it means nobody can use it later. Your app keeps working with its own key in .env. If you need the CLI again, run `maximem-synap auth login` or ask for a new prompt." If logout fails (for example 403 or no network), say so plainly with the error, do not claim it signed out, and tell the human the key stops working by itself after 7 days. If verify failed, keep the key: you need it to rebuild or resume.
+
+**Until `instances wait` reports ready, run no ingestion or retrieval at all, including `verify_synap.py`.** Why: the server refuses them while the build runs, and a half-built instance would store memories with the wrong configuration. A refused call is HTTP 409 `instance_not_ready` (SDK: `InstanceNotReadyError`, with `retry_after_seconds` and `from_cooldown`; older SDKs raise a plain `ConflictError` saying the architecture is still being built). Tell the human their own app gets it too until the build finishes. Write the integration so a read that gets it logs and continues without memory, and a write that gets it is retried later (`reference/sdk-setup.md`).
+
+**What the retry time means.** `retry_after_seconds` is how long Synap says to wait before asking again (30 to 300 s). WAIT that long, tell the human how long ("the memory architecture is still being built, waiting 2 minutes"), then check once. Never retry in a loop: during the wait the SDK refuses locally (`from_cooldown` true, no network call), so a loop only burns time and changes nothing.
+
+**What the build states mean** (shown by `instances wait`): "attempt n of 3, about N min left" = running normally; if a build dies Synap restarts it by itself, up to 3 attempts, and you do nothing. "taking longer than usual" = past the usual 14 minutes but still alive: keep waiting and tell the human; if `instances wait` times out (exit 7), run it once more, then ask the human whether to keep waiting. "failed" (exit 1, or 409 `instance_build_failed`) = all attempts failed: tell the human the reason in one line, then run `maximem-synap instances rebuild <instance_id>` (it re-runs from the stored use-case, nothing to re-approve; at most 3 rebuilds per 24 hours) and wait again. Ask the human first only if the rebuild is refused (429 limit, 409) or a rebuild fails too.
+
+**CLI and runtime keys do not mix.** If `SYNAP_API_KEY` (the runtime key from the project's `.env`) is set in your shell, CLI calls fail with 401 or 403. Run CLI commands with `env -u SYNAP_API_KEY <cli> ...`, or `unset SYNAP_API_KEY` first. Run `verify_synap.py` with the key set, as it needs it.
+
+Hard rules: the human never has to go back to the dashboard (every failure has an in-session recovery, see `reference/onboarding-ask-rules.md`); never guess; write `not stated` for gaps; confirm before create; never create or delete workspaces, touch billing or members; never print or commit the key. Integration code reads `SYNAP_API_KEY` from the environment, so you can write it before the key exists; just do not run it until step 8 is done.
+
+## Why each rule exists
+
+Say these in plain words when you apply a rule, so a human reading the transcript is never confused.
+
+- **Ask, never guess:** B2C or B2B cannot be changed later, and a wrong guess costs a new instance and about 14 minutes.
+- **Show the use-case for approval:** it cannot be edited after the instance is created.
+- **No memory calls before the build is ready:** the server refuses them, and a half-built instance would store memories with the wrong configuration.
+- **Wait the retry time, never loop:** the time in the error is Synap's own estimate; the SDK refuses locally until it passes, so retrying sooner changes nothing.
+- **Build states:** "attempt n of 3" means Synap restarts a dead build by itself; "failed" means all attempts failed, so run `instances rebuild`.
+- **Key in `.env`, never printed:** the transcript and logs are kept, and `.env` stays on this machine and out of git.
+- **`auth logout` is the last step:** the setup key only existed to set things up, and signing it out means nobody can use it later. Everything that needs it (reports, rebuild, resume) must be done first.
+
+## Docs map (the docs are the source of truth; `.md` after any URL gives clean markdown)
+
+Prefix every path with `https://docs.maximem.ai`. "Re-visit" says when to open the page again, not just first time.
+
+| Topic | Pages | Re-visit when |
+|---|---|---|
+| Orientation | /getting-started/quickstart, /getting-started/your-first-memory, /concepts/memory-model-cheat-sheet, /resources/faq, /resources/glossary | Step 0; any term you are unsure of |
+| CLI and onboarding | /cli/overview, /cli/commands, /integrations/ai-coding-agents | Before each CLI step |
+| SDK install, auth, init | /setup/installation, /setup/authentication, /setup/agent-integration, /sdk/initialization, /sdk/configuration, /sdk-reference/lifecycle/initialize, /sdk-reference/lifecycle/configure, /sdk-reference/lifecycle/shutdown, /sdk-reference/configuration | Before writing init and shutdown; after, compare |
+| Scoping, B2C vs B2B | /concepts/memory-scopes, /concepts/scope-ladder, /concepts/agent-topologies, /guides/multi-user-scoping | Before every call that takes `user_id` or `customer_id` |
+| Writes | /sdk/ingestion, /concepts/how-ingestion-works, /sdk-reference/memories/create, /sdk-reference/memories/batch-create, /sdk-reference/memories/create-from-file, /sdk-reference/memories/status, /sdk-reference/memories/wait-for-completion, /sdk-reference/conversation/record-message, /sdk-reference/conversation/record-messages-batch, /sdk-reference/conversation/ingest-transcript | Before and after writing each write call |
+| Reads | /sdk/context-fetch, /concepts/retrieval-modes, /sdk/response-shapes, /concepts/context-end-to-end, /sdk-reference/context/fetch, /sdk-reference/context/user-fetch, /sdk-reference/context/customer-fetch, /sdk-reference/context/client-fetch, /sdk-reference/conversation-context/fetch, /sdk-reference/conversation-context/get-context-for-prompt | Before and after writing each fetch call |
+| Live stream | /concepts/real-time-anticipation, /concepts/event-delivery, /patterns/real-time-anticipation-server, /sdk-reference/instance/listen, /sdk-reference/instance/send-message, /sdk-reference/instance/record-thinking, /sdk-reference/instance/record-tool-call, /sdk-reference/instance/record-tool-result, /sdk-reference/instance/end-session, /sdk-reference/instance/stop-listening | Before wiring the stream; after, re-read and compare |
+| MACA and the use-case file | /concepts/memory-architecture, /guides/configuring-memory | Before drafting the use-case |
+| Frameworks | /integrations/overview, then /integrations/<name> (names in `reference/frameworks/_index.md`; Vercel is `vercel-ai-sdk`) | Before and after wiring the framework |
+| Patterns by agent type | /patterns/multi-tenant-saas, /patterns/rag-user-history, /patterns/replay-history, /patterns/slack-bot, /patterns/voice-agent-livekit, /patterns/graceful-degradation, /cookbook/overview (then the cookbook page closest to the agent: b2b-sdr, b2b-salesforce, consumer-uber, consumer-amazon, personal-ai-coach, personal-ai-companion, support-tier-escalation, voice-concierge, whatsapp-single-campaign) | When the repo matches the pattern; before step 9 for graceful-degradation |
+| Privacy and data control | /guides/pii-protection, /guides/erasure, /guides/instance-visibility, /dashboard/pii-and-data-controls | When the human names compliance or sensitive data |
+| Production and errors | /guides/production-checklist, /sdk/error-handling, /sdk-reference/errors, /resources/performance-limits | Before step 9, and on any error |
+| Credits and instances | /sdk-reference/credits/get-balance, /sdk-reference/credits/estimate, /sdk-reference/instances | On a credits error |
+| Dashboard (optional view) | /dashboard/overview, /dashboard/monitoring-and-analytics, /dashboard/webhooks, /dashboard/team-management | Only if the human asks |
 
 ## Progressive disclosure — what to load when
 
-Do **not** read every reference file. Pick what the situation requires.
+This applies to the local `reference/` files only. The docs-reading rules in Step 0 and the checkpoint loop are NOT optional. Do **not** read every local reference file; pick what the situation requires.
 
 | Situation | Read |
 | --- | --- |
 | User is comparing memory vendors / asking "should I use Synap?" | `reference/discovery.md` |
+| Onboarding a project (the prompt has a `syn_ob_` code) | `reference/onboarding-ask-rules.md`, `reference/dashboard-setup.md`, `reference/use-case-markdown.md` |
 | User has decided on Synap and is starting fresh | `reference/sdk-setup.md` then the relevant `reference/frameworks/*.md` |
 | User is using one of the 19 supported frameworks | `reference/sdk-setup.md` + `reference/frameworks/<framework>.md` |
 | **Any agent integration in a long-lived process** (server, worker, voice) | `reference/streaming.md` — **always**, alongside whatever else you read |
@@ -57,10 +118,10 @@ The 19 framework files in `reference/frameworks/` are listed and one-line-descri
 
 You will need this to follow any of the framework guides.
 
-**Three identifiers — copy from the user's Synap dashboard at synap.maximem.ai:**
+**Three identifiers (the CLI creates them):**
 
 - `instance_id` — looks like `inst_a1b2c3d4e5f67890`. One per agent deployment.
-- `api_key` — looks like `synap_...`. Generated per instance, shown once.
+- `api_key` — looks like `synap_...`. Generated per instance, shown once. `api-keys create --write-env` puts it in `.env` for you.
 - A `client_id` (`cli_...`) at the org level, but the SDK does not need it directly.
 
 **Three operations — every integration is a thin wrapper around these:**
@@ -214,8 +275,9 @@ When generating code, default to:
 
 ## What this skill does NOT do
 
-- Configure MACA (Memory Architecture Configuration). That's a YAML file in the dashboard. Mention it exists; point to `https://docs.maximem.ai/concepts/customized-memory-architectures` and let the user configure it themselves.
-- Create instances or API keys. The user must do this from `https://synap.maximem.ai`. The skill should never attempt to provision.
+- Configure MACA by hand. The memory architecture is generated from the approved use-case; to tune it later see `https://docs.maximem.ai/concepts/memory-architecture`.
+- Create or delete workspaces, change billing or members, or revoke other people's keys. The onboarding code's key cannot, and you must not try.
+- Decide B2C vs B2B, compliance or what to store. Only the human decides those.
 - Migrate data from another memory vendor. Point to `https://docs.maximem.ai/migration/overview`.
 
 ## Authoritative source

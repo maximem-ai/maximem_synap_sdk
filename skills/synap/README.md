@@ -23,8 +23,9 @@ skills/synap/
 │   ├── context-fetch.md        # sdk.conversation.context.fetch() reference
 │   ├── streaming.md            # The live gRPC stream — the third operation, and the one integrations skip
 │   ├── production.md           # Pre-prod checklist
-│   ├── dashboard-setup.md      # Manual provisioning steps (no CLI) + the API-key PAUSE
-│   ├── use-case-markdown.md    # Instance use-case .md template (seeds the MACA)
+│   ├── dashboard-setup.md      # CLI provisioning commands + manual dashboard fallback
+│   ├── onboarding-ask-rules.md # What to ask the human, failure handling, resume checklist
+│   ├── use-case-markdown.md    # Use-case .md template, what the agent may infer vs must ask
 │   └── frameworks/
 │       ├── _index.md           # Per-framework router
 │       ├── agno.md
@@ -51,7 +52,7 @@ skills/synap/
 │   ├── typescript-minimal.ts   # Same, TS
 │   └── multi-tenant-scoping.md # Scoping patterns + verification
 └── scripts/
-    └── verify_synap.py         # Smoke test — run as the final step
+    └── verify_synap.py         # Real write-then-recall check — run as the final step
 ```
 
 ## Installing — Claude Code (CLI)
@@ -164,7 +165,7 @@ The skill is grounded in `https://docs.maximem.ai`. To regenerate from current d
 curl https://docs.maximem.ai/llms.txt | grep -oE 'https://docs.maximem.ai/[^)]+\.md'
 ```
 
-Cross-check `reference/frameworks/*.md` against the corresponding `https://docs.maximem.ai/integrations/<framework>.md` whenever the SDK is bumped or new integrations are added.
+Cross-check `reference/frameworks/*.md` against the corresponding `https://docs.maximem.ai/integrations/<framework>.md` (list: `https://docs.maximem.ai/integrations/overview.md`) whenever the SDK is bumped or new integrations are added.
 
 ## License
 

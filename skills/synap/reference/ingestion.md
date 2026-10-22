@@ -1,5 +1,7 @@
 # Ingestion — `sdk.memories.create()` and friends
 
+> **Read this next:** [Ingestion (SDK)](https://docs.maximem.ai/sdk/ingestion.md); [How ingestion works](https://docs.maximem.ai/concepts/how-ingestion-works.md); [memories.create](https://docs.maximem.ai/sdk-reference/memories/create.md); [batch-create](https://docs.maximem.ai/sdk-reference/memories/batch-create.md); [create-from-file](https://docs.maximem.ai/sdk-reference/memories/create-from-file.md); [status](https://docs.maximem.ai/sdk-reference/memories/status.md); [wait-for-completion](https://docs.maximem.ai/sdk-reference/memories/wait-for-completion.md); [record-message](https://docs.maximem.ai/sdk-reference/conversation/record-message.md); [record-messages-batch](https://docs.maximem.ai/sdk-reference/conversation/record-messages-batch.md); [ingest-transcript](https://docs.maximem.ai/sdk-reference/conversation/ingest-transcript.md); [Errors](https://docs.maximem.ai/sdk-reference/errors.md). **Checkpoint:** open the method's page before writing each call, re-read it after and compare every parameter, scope rule and error; if the docs and this file disagree, the docs win and tell the human.
+
 The write side. Use this when no integration package fits, or when you need a primitive the integration doesn't expose.
 
 ## The single most common call
@@ -145,3 +147,5 @@ await sdk.memories.delete(memory_id=memory_id)
 
 ---
 *Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+
+> While a new instance is still building, writes get HTTP 409 `instance_not_ready`: retry later, see `sdk-setup.md`.

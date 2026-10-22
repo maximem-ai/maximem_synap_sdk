@@ -1,5 +1,7 @@
 # Context fetch — `sdk.conversation.context.fetch()` and scoped variants
 
+> **Read this next:** [Context fetch (SDK)](https://docs.maximem.ai/sdk/context-fetch.md); [Retrieval modes](https://docs.maximem.ai/concepts/retrieval-modes.md); [Response shapes](https://docs.maximem.ai/sdk/response-shapes.md); [fetch](https://docs.maximem.ai/sdk-reference/context/fetch.md); [user-fetch](https://docs.maximem.ai/sdk-reference/context/user-fetch.md); [customer-fetch](https://docs.maximem.ai/sdk-reference/context/customer-fetch.md); [client-fetch](https://docs.maximem.ai/sdk-reference/context/client-fetch.md); [conversation-context fetch](https://docs.maximem.ai/sdk-reference/conversation-context/fetch.md); [get-context-for-prompt](https://docs.maximem.ai/sdk-reference/conversation-context/get-context-for-prompt.md); [Errors](https://docs.maximem.ai/sdk-reference/errors.md). **Checkpoint:** open the method's page before writing each call, re-read it after and compare every parameter, scope rule and error; if the docs and this file disagree, the docs win and tell the human.
+
 The read side. This sits in the agent's hot path; latency matters.
 
 ## The single most common call
@@ -70,6 +72,32 @@ types=["all"]                    # explicit equivalent of omitting
 ```
 
 Valid: `"facts"`, `"preferences"`, `"episodes"`, `"emotions"`, `"temporal"`, `"all"`.
+
+## Ranked results
+
+Pass `response_shape="ranked"` and read `context.items`: one list, most relevant
+memory first across every type, ready to hand to the model in that order.
+
+```python
+context = await sdk.user.context.fetch(
+    user_id=user_id,
+    search_query=["refund for a cancelled ride"],
+    response_shape="ranked",
+)
+for item in context.items:
+    item.rank         # 1 is the most relevant
+    item.category     # "facts" | "preferences" | "episodes" | "emotions" | "temporal_events" | "excerpts"
+    item.content
+    item.rank_score   # higher is better; the order is already sorted on it
+```
+
+`"excerpts"` are quotes from the source conversations and documents, placed by
+their own score. The typed lists below are still filled, as views of the same
+items, except that excerpts are not in `facts`. When the token budget is exceeded the
+cut keeps whole memory types in a fixed order, so the list is in rank order but may
+not keep the best items overall. Without `response_shape` you get the typed lists only, which lose the
+order across types. Needs an SDK release that has `response_shape`; older SDKs
+reject the argument.
 
 ## Response structure
 
@@ -200,3 +228,5 @@ This is what most integrations do under the hood.
 
 ---
 *Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+
+> While a new instance is still building, fetches get HTTP 409 `instance_not_ready`: degrade to no memory and continue, see `sdk-setup.md`.

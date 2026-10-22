@@ -1,5 +1,7 @@
 # The live stream — the third operation
 
+> **Read this next:** [Real-time anticipation](https://docs.maximem.ai/concepts/real-time-anticipation.md); [Event delivery](https://docs.maximem.ai/concepts/event-delivery.md); [Server pattern](https://docs.maximem.ai/patterns/real-time-anticipation-server.md); [listen](https://docs.maximem.ai/sdk-reference/instance/listen.md); [send-message](https://docs.maximem.ai/sdk-reference/instance/send-message.md); [record-thinking](https://docs.maximem.ai/sdk-reference/instance/record-thinking.md); [record-tool-call](https://docs.maximem.ai/sdk-reference/instance/record-tool-call.md); [record-tool-result](https://docs.maximem.ai/sdk-reference/instance/record-tool-result.md); [end-session](https://docs.maximem.ai/sdk-reference/instance/end-session.md); [stop-listening](https://docs.maximem.ai/sdk-reference/instance/stop-listening.md). **Checkpoint:** open the method's page before writing each call, re-read it after and compare every parameter, scope rule and error; if the docs and this file disagree, the docs win and tell the human.
+
 **Read this before you finish any agent integration.** Ingestion and retrieval
 are the two operations every guide in this skill starts with. There is a third,
 and skipping it is the single most common way a Synap integration ends up

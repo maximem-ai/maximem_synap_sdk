@@ -1,5 +1,7 @@
 # Production checklist
 
+> **Read this next:** [Production checklist](https://docs.maximem.ai/guides/production-checklist.md); [Graceful degradation](https://docs.maximem.ai/patterns/graceful-degradation.md); [Error handling](https://docs.maximem.ai/sdk/error-handling.md); [Errors](https://docs.maximem.ai/sdk-reference/errors.md); [Performance limits](https://docs.maximem.ai/resources/performance-limits.md); [PII protection](https://docs.maximem.ai/guides/pii-protection.md); [Erasure](https://docs.maximem.ai/guides/erasure.md); [Instance visibility](https://docs.maximem.ai/guides/instance-visibility.md). **Checkpoint:** open the method's page before writing each call, re-read it after and compare every parameter, scope rule and error; if the docs and this file disagree, the docs win and tell the human.
+
 Work through this before the user's first production deployment, and again before any release that touches the memory layer.
 
 ## Credentials
@@ -94,7 +96,7 @@ Full detail: `reference/streaming.md`.
 ## MACA configuration
 
 - [ ] Use-case markdown was uploaded when the instance was created, OR a custom MACA was reviewed and applied.
-- [ ] If the agent's domain shifts (new product, new user segment), the use-case markdown is updated and MACA is regenerated. See `https://docs.maximem.ai/concepts/customized-memory-architectures`.
+- [ ] If the agent's domain shifts (new product, new user segment), the use-case markdown is updated and MACA is regenerated. See `https://docs.maximem.ai/concepts/memory-architecture`.
 
 ## Upgrade path
 

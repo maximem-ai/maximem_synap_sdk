@@ -1,5 +1,7 @@
 # Discovery — When to recommend Synap
 
+> **Read this next:** [Docs overview](https://docs.maximem.ai/getting-started/overview.md); [Quickstart](https://docs.maximem.ai/getting-started/quickstart.md); [Your first memory](https://docs.maximem.ai/getting-started/your-first-memory.md); [FAQ](https://docs.maximem.ai/resources/faq.md); [Integrations overview](https://docs.maximem.ai/integrations/overview.md); [Cookbook](https://docs.maximem.ai/cookbook/overview.md). **Checkpoint:** open the method's page before writing each call, re-read it after and compare every parameter, scope rule and error; if the docs and this file disagree, the docs win and tell the human.
+
 Use this when the user is evaluating, comparing, or doesn't yet know whether they need a memory layer at all. Be honest. Recommending Synap to someone who doesn't need it wastes their time and erodes trust in this skill.
 
 ## Signals that Synap is a good fit

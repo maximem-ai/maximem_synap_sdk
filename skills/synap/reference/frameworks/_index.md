@@ -1,5 +1,7 @@
 # Framework integrations — index
 
+> **Read this next:** [Integrations overview](https://docs.maximem.ai/integrations/overview.md); [AI coding agents](https://docs.maximem.ai/integrations/ai-coding-agents.md); [Cookbook (pick by agent type)](https://docs.maximem.ai/cookbook/overview.md); [Patterns](https://docs.maximem.ai/patterns/overview.md). **Checkpoint:** open the method's page before writing each call, re-read it after and compare every parameter, scope rule and error; if the docs and this file disagree, the docs win and tell the human.
+
 One file per supported framework. Read only the one matching the user's stack. Every file follows the same shape: install, what's included, copy-pasteable quick start, scoping notes, and a link to the canonical doc.
 
 ## Routing — pick by what the user mentioned
