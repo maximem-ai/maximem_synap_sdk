@@ -15,7 +15,7 @@
  * to look at. An SDK that stays quiet about a misuse it can see is not being
  * permissive, it is hiding the bug.
  */
-import { InvalidInputError } from './errors.js';
+import { CustomerIdNotAcceptedError } from './errors.js';
 
 export const B2C_ISOLATION = 'equals_customer';
 
@@ -36,11 +36,5 @@ export function checkCustomerId(
 ): void {
   if (customerId === undefined || customerId === null || customerId === '') return;
   if (isolation !== B2C_ISOLATION) return;
-  throw new InvalidInputError(
-    `${where}: customer_id is not accepted on this instance` +
-      `${instanceId ? ` (${instanceId})` : ''}, which is B2C ` +
-      `(user_context_isolation='${B2C_ISOLATION}'). Send user_id only; it is the ` +
-      `whole identity, and the server files and reads your data under it. ` +
-      `Received customer_id=${JSON.stringify(customerId)}.`,
-  );
+  throw new CustomerIdNotAcceptedError(where, String(customerId), instanceId);
 }

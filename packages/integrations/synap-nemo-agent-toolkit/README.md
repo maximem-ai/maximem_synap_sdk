@@ -20,7 +20,7 @@ memory:
 pip install synap-nemo-agent-toolkit
 ```
 
-Depends on `maximem-synap>=0.2.0`, `synap-integrations-common>=0.1.0`,
+Depends on `maximem-synap>=0.2.0`, `maximem-synap-integrations-common>=0.2.2`,
 and `nvidia-nat-core>=1.0`.
 
 ## Use (programmatic)
@@ -96,13 +96,16 @@ still one user message and one assistant message. The last LLM output of a
 run is the answer and goes out as the assistant turn, so it is never also
 reported as a thought.
 
-Nothing is written over REST. The server persists the turn from the stream
-itself, so reporting it and also calling `record_message` would store and
-extract it twice. To write turns into long-term memory, use
-`SynapMemoryEditor` above.
+The user and assistant turns are written whether or not a stream is open:
+on the stream when there is one, otherwise over REST with
+`conversation.record_message` (needs a conversation id, NAT's own or the
+configured `conversation_id`). Never both, since the server persists a
+streamed turn itself. Tool calls, tool results and reasoning are stream-only.
+To write long-term memories, use `SynapMemoryEditor` above.
 
 To report from your own code instead of from YAML, construct the exporter
-with an SDK you have already called `listen()` on:
+with an SDK you have already called `listen()` on (without it, only the turns
+are written, over REST):
 
 ```python
 from synap_nemo_agent_toolkit import SynapStreamExporter

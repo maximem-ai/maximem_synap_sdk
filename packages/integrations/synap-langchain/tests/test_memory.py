@@ -247,3 +247,61 @@ def test_clear_delegates_to_cache(history, mock_sdk):
 async def test_aclear_delegates_to_cache(history, mock_sdk):
     await history.aclear()
     mock_sdk.cache.clear.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# compaction: the block stands in for the turns it covers
+# ---------------------------------------------------------------------------
+
+BLOCK = "## Conversation so far (compacted: turns 1-40)\n[CONTEXT COMPACTION, REFERENCE ONLY]\n\n### Where things stand\n- x"
+
+
+@pytest.mark.asyncio
+async def test_aget_messages_puts_the_compaction_first_as_a_system_message(history, mock_sdk):
+    from langchain_core.messages import SystemMessage
+
+    mock_sdk.conversation.context.get_context_for_prompt.return_value = MagicMock(
+        recent_messages=[MagicMock(role="user", content="and now?")],
+        context_block=BLOCK, history_block="### From the earlier turns\n- turn 3, user: \"x\"",
+    )
+    msgs = await history.aget_messages()
+    assert isinstance(msgs[0], SystemMessage)
+    assert msgs[0].content == BLOCK + "\n\n### From the earlier turns\n- turn 3, user: \"x\""
+    assert [m.content for m in msgs[1:]] == ["and now?"]
+
+
+@pytest.mark.asyncio
+async def test_aget_messages_returns_the_compaction_even_with_no_recent_turns(history, mock_sdk):
+    mock_sdk.conversation.context.get_context_for_prompt.return_value = MagicMock(
+        recent_messages=[], context_block=BLOCK, history_block=None)
+    msgs = await history.aget_messages()
+    assert [m.content for m in msgs] == [BLOCK]
+
+
+@pytest.mark.asyncio
+async def test_the_compaction_is_never_written_back_as_a_turn(history, mock_sdk):
+    from langchain_core.messages import SystemMessage
+
+    await history.aadd_messages([SystemMessage(content=BLOCK), HumanMessage(content="hi")])
+    calls = mock_sdk.conversation.record_message.await_args_list
+    assert [c.kwargs["content"] for c in calls] == ["hi"]
+
+
+# ---------------------------------------------------------------------------
+# Tool messages (20 Oct): archived locally, never recorded as the user's words
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_tool_message_is_archived_not_recorded_as_a_user_turn(history, mock_sdk):
+    from langchain_core.messages import ToolMessage
+
+    await history.aadd_messages([
+        HumanMessage(content="What's my order status?"),
+        AIMessage(content="", tool_calls=[{"name": "get_order", "args": {"id": "ORD-1"}, "id": "t1"}]),
+        ToolMessage(content='{"status": "shipped"}', tool_call_id="t1", name="get_order"),
+        AIMessage(content="It shipped."),
+    ])
+    roles = [c.kwargs["role"] for c in mock_sdk.conversation.record_message.await_args_list]
+    assert roles == ["user", "assistant"]
+    mock_sdk.archive_tool_result.assert_called_once_with(
+        history.conversation_id, '{"status": "shipped"}', tool_name="get_order")
