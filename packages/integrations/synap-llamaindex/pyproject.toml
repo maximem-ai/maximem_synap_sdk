@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maximem-synap-llamaindex"
-version = "0.2.1"
+version = "0.2.2"
 description = "Synap memory integration for LlamaIndex"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,7 +16,7 @@ keywords = ["synap", "memory", "llamaindex", "rag", "ai"]
 
 dependencies = [
     "maximem-synap>=0.5.3",
-    "maximem-synap-integrations-common>=0.2.1",
+    "maximem-synap-integrations-common>=0.2.3",
     "llama-index-core>=0.10",
 ]
 

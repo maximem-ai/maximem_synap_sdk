@@ -6,10 +6,11 @@ The contract these pin, from ``stream_events`` and from the module docstring:
   ``user_message`` and ``assistant_message`` from the stream itself, so an
   integration that reports a turn on the stream and also calls
   ``sdk.conversation.record_message`` writes the turn twice and extracts it
-  twice. This integration is stream-only, so ``record_message`` must never be
-  called at all.
-- **Silent when no stream is running.** Adding this context must not change
-  behaviour for someone who never called ``sdk.instance.listen()``.
+  twice. So with a stream open ``record_message`` is never called.
+- **Turns without a stream go over REST.** With no ``listen()`` running, user
+  and assistant turns are written once each through
+  ``sdk.conversation.record_message``; tool calls, results and thoughts are
+  stream-only and go nowhere.
 - **Never raises.** ``add_message`` runs inside the agent's own loop, and an
   exception there ends the run.
 - **A tool call and its result share an id**, which for AutoGen is
@@ -49,6 +50,8 @@ requires_agentchat = pytest.mark.skipif(
     reason="needs a real AssistantAgent (autogen-agentchat, in the [dev] extra)",
 )
 
+from synap_integrations_common import set_auto_listen
+
 from synap_autogen.stream import (
     SynapStreamingChatContext,
     _reply_text,
@@ -63,6 +66,9 @@ from synap_autogen.stream import (
 
 
 def _streaming_sdk(is_listening: bool = True):
+    """``is_listening=False`` is an SDK on which the stream cannot be used:
+    ``set_auto_listen(sdk, False)``, as a user who opted out has it. The default
+    (auto-open) path has its own tests in ``test_default_path.py``."""
     sdk = MagicMock()
     sdk.instance.is_listening = is_listening
     sdk.instance.send_message = AsyncMock()
@@ -70,6 +76,11 @@ def _streaming_sdk(is_listening: bool = True):
     sdk.instance.record_tool_call = AsyncMock()
     sdk.instance.record_tool_result = AsyncMock()
     sdk.conversation.record_message = AsyncMock()
+    sdk.conversation.context.get_context_for_prompt = AsyncMock(
+        return_value=MagicMock(context_block=None)
+    )
+    if not is_listening:
+        set_auto_listen(sdk, False)
     return sdk
 
 
@@ -151,13 +162,36 @@ class TestStreamFirstAndNeverBoth:
         assert kw["role"] == "assistant"
 
     @pytest.mark.asyncio
-    async def test_with_no_stream_nothing_goes_out_anywhere(self):
-        """Someone who never called listen() must see no change at all."""
+    async def test_with_no_stream_turns_go_over_rest_once_each(self):
+        """A turn is the conversation itself; it must not depend on listen()."""
         sdk = _streaming_sdk(False)
         ctx = _ctx(sdk)
         await ctx.add_message(UserMessage(content="hello", source="u"))
         await ctx.add_message(AssistantMessage(content="hi", source="a"))
         sdk.instance.send_message.assert_not_awaited()
+        calls = sdk.conversation.record_message.await_args_list
+        assert [(c.kwargs["role"], c.kwargs["content"]) for c in calls] == [
+            ("user", "hello"), ("assistant", "hi"),
+        ]
+        for c in calls:
+            assert c.kwargs["conversation_id"] == "conv-1"
+            assert c.kwargs["user_id"] == "user-1"
+            assert c.kwargs["customer_id"] == "cust-1"
+
+    @pytest.mark.asyncio
+    async def test_with_no_stream_tools_and_thoughts_go_nowhere(self):
+        sdk = _streaming_sdk(False)
+        ctx = _ctx(sdk)
+        await ctx.add_message(AssistantMessage(
+            content=[FunctionCall(id="c1", name="t", arguments="{}")],
+            thought="look it up", source="a",
+        ))
+        await ctx.add_message(FunctionExecutionResultMessage(content=[
+            FunctionExecutionResult(call_id="c1", content="ok", name="t", is_error=False),
+        ]))
+        sdk.instance.record_tool_call.assert_not_awaited()
+        sdk.instance.record_tool_result.assert_not_awaited()
+        sdk.instance.record_thinking.assert_not_awaited()
         sdk.conversation.record_message.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -369,11 +403,16 @@ class TestTheGapAutogenLeaves:
         assert sdk.instance.send_message.await_count == 1
 
     @pytest.mark.asyncio
-    async def test_report_reply_with_no_stream_sends_nothing(self):
+    async def test_report_reply_with_no_stream_writes_over_rest(self):
         sdk = _streaming_sdk(False)
         result = MagicMock()
         result.messages = [MagicMock(to_text=MagicMock(return_value="shipped"))]
-        assert await _ctx(sdk).report_reply(result) is False
+        ctx = _ctx(sdk)
+        assert await ctx.report_reply(result) is True
+        assert await ctx.report_reply(result) is False  # never twice
+        sdk.conversation.record_message.assert_awaited_once()
+        assert sdk.conversation.record_message.await_args.kwargs["role"] == "assistant"
+        sdk.instance.send_message.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_report_reply_on_nothing_reports_nothing(self):
@@ -672,10 +711,11 @@ class TestAgainstARealAssistantAgent:
         )
 
     @pytest.mark.asyncio
-    async def test_the_default_run_loses_the_assistant_turn_without_report_reply(self):
+    async def test_the_default_run_has_no_assistant_message_until_the_turn_is_closed(self):
         """AutoGen's own default. The tool-call summary never reaches the
-        model context, so the turn ends with no assistant_message — which is
-        the one event anticipation acts on."""
+        model context, so the run itself ends with no assistant_message;
+        report_reply sends the exact one right away (the context otherwise
+        stands in for it at the next user message, see test_default_path)."""
         sdk = _streaming_sdk(True)
         ctx = _ctx(sdk)
         agent = AssistantAgent(
@@ -699,7 +739,7 @@ class TestAgainstARealAssistantAgent:
         )
 
     @pytest.mark.asyncio
-    async def test_a_run_with_no_stream_reports_nothing(self):
+    async def test_a_run_with_no_stream_writes_only_the_turns_over_rest(self):
         sdk = _streaming_sdk(False)
         ctx = _ctx(sdk)
         agent = AssistantAgent(
@@ -712,4 +752,8 @@ class TestAgainstARealAssistantAgent:
         result = await agent.run(task="where is my order")
         assert result.messages[-1].to_text() == "Your order ships tomorrow."
         sdk.instance.send_message.assert_not_awaited()
-        sdk.conversation.record_message.assert_not_awaited()
+        sdk.instance.record_tool_call.assert_not_awaited()
+        calls = sdk.conversation.record_message.await_args_list
+        assert [(c.kwargs["role"], c.kwargs["content"]) for c in calls] == [
+            ("user", "where is my order"), ("assistant", "Your order ships tomorrow."),
+        ]

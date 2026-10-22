@@ -1,9 +1,11 @@
 """Tests for create_synap_recorder — Smolagents step-callback turn recorder."""
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from synap_integrations_common import set_auto_listen
 from synap_smolagents import create_synap_recorder
 from synap_smolagents.callbacks import _as_text
 
@@ -32,11 +34,45 @@ def test_requires_conversation_id(mock_sdk):
         create_synap_recorder(mock_sdk, "alice", "")
 
 
-# ── recording ────────────────────────────────────────────────────────────────
+# ── recording: turns are conversation messages ──────────────────────────────
 
 
-def test_records_action_step_with_per_step_doc_id(mock_sdk):
-    recorder = create_synap_recorder(mock_sdk, "alice", "conv1", customer_id="acme")
+def _no_stream(sdk):
+    sdk.instance = MagicMock()
+    sdk.instance.is_listening = False
+    set_auto_listen(sdk, False)  # these tests are about the REST path
+    return sdk
+
+
+def test_turns_are_recorded_as_messages_without_a_stream(mock_sdk):
+    sdk = _no_stream(mock_sdk)
+    recorder = create_synap_recorder(sdk, "alice", "conv1", customer_id="acme")
+    agent = SimpleNamespace(task="where is my order")
+    recorder(step("Thought: look it up", step_number=1), agent=agent)
+    recorder(SimpleNamespace(output="it ships tomorrow"), agent=agent)
+    calls = sdk.conversation.record_message.await_args_list
+    assert [(c.kwargs["role"], c.kwargs["content"]) for c in calls] == [
+        ("user", "where is my order"),
+        ("assistant", "it ships tomorrow"),
+    ]
+    for c in calls:
+        assert c.kwargs["conversation_id"] == "conv1"
+        assert c.kwargs["user_id"] == "alice"
+        assert c.kwargs["customer_id"] == "acme"
+    sdk.memories.create.assert_not_called()
+
+
+def test_steps_are_not_ingested_by_default(mock_sdk):
+    recorder = create_synap_recorder(_no_stream(mock_sdk), "alice", "conv1")
+    recorder(step("agent did a thing", step_number=2), agent=None)
+    mock_sdk.memories.create.assert_not_called()
+    mock_sdk.conversation.record_message.assert_not_called()  # a step is not a turn
+
+
+def test_opt_in_ingest_uses_per_step_doc_id(mock_sdk):
+    recorder = create_synap_recorder(
+        _no_stream(mock_sdk), "alice", "conv1", customer_id="acme", ingest_steps=True
+    )
     recorder(step("agent did a thing", step_number=2), agent=None)
     mock_sdk.memories.create.assert_called_once()
     kwargs = mock_sdk.memories.create.call_args.kwargs
@@ -48,38 +84,42 @@ def test_records_action_step_with_per_step_doc_id(mock_sdk):
     assert kwargs["metadata"]["step"] == 2
 
 
-def test_per_step_ids_differ_across_steps(mock_sdk):
-    recorder = create_synap_recorder(mock_sdk, "alice", "conv1")
+def test_opt_in_per_step_ids_differ_across_steps(mock_sdk):
+    recorder = create_synap_recorder(mock_sdk, "alice", "conv1", ingest_steps=True)
     recorder(step("s1", step_number=1))
     recorder(step("s2", step_number=2))
     ids = [c.kwargs["document_id"] for c in mock_sdk.memories.create.call_args_list]
     assert ids == ["smolagents-conv1-1", "smolagents-conv1-2"]
 
 
-def test_skips_error_steps(mock_sdk):
-    recorder = create_synap_recorder(mock_sdk, "alice", "conv1")
+def test_opt_in_skips_error_steps(mock_sdk):
+    recorder = create_synap_recorder(mock_sdk, "alice", "conv1", ingest_steps=True)
     recorder(step("output", error=ValueError("boom")))
     mock_sdk.memories.create.assert_not_called()
 
 
-def test_skips_empty_output(mock_sdk):
-    recorder = create_synap_recorder(mock_sdk, "alice", "conv1")
+def test_opt_in_skips_empty_output(mock_sdk):
+    recorder = create_synap_recorder(mock_sdk, "alice", "conv1", ingest_steps=True)
     recorder(step(""))
     recorder(step(None))
     recorder(step("   "))
     mock_sdk.memories.create.assert_not_called()
 
 
-def test_coerces_list_model_output(mock_sdk):
-    recorder = create_synap_recorder(mock_sdk, "alice", "conv1")
+def test_opt_in_coerces_list_model_output(mock_sdk):
+    recorder = create_synap_recorder(mock_sdk, "alice", "conv1", ingest_steps=True)
     recorder(step([{"type": "text", "text": "hello"}, {"text": "world"}]))
     assert mock_sdk.memories.create.call_args.kwargs["document"] == "hello\nworld"
 
 
 def test_failure_is_logged_not_raised(failing_sdk):
-    recorder = create_synap_recorder(failing_sdk, "alice", "conv1")
+    recorder = create_synap_recorder(
+        _no_stream(failing_sdk), "alice", "conv1", ingest_steps=True
+    )
     # must NOT raise — a raising callback would abort the agent run
-    recorder(step("something"))
+    recorder(step("something"), agent=SimpleNamespace(task="hi"))
+    recorder(SimpleNamespace(output="hello"), agent=SimpleNamespace(task="hi"))
+    assert failing_sdk.conversation.record_message.await_count == 2
 
 
 # ── field-name guard against upstream renames ────────────────────────────────
@@ -102,13 +142,12 @@ def test_as_text_helper():
 # Stream reporting — the five events the recorder never put on the wire
 #
 # Contract (from callbacks.py and stream_events.py):
-# - silent when no stream is running, so nothing changes for a caller who
-#   has not opted in;
+# - with the stream opted out (set_auto_listen(sdk, False)) the stream events
+#   are dropped and turns go over REST; opened by default: see test_history.py;
 # - never raises, because a raising step callback aborts the agent run;
 # - a tool call and its result share a tool_call_id.
 # ───────────────────────────────────────────────────────────────────────────
 
-from unittest.mock import AsyncMock, MagicMock  # noqa: E402
 
 
 def _streaming_sdk(is_listening=True):
@@ -119,6 +158,9 @@ def _streaming_sdk(is_listening=True):
     sdk.instance.record_tool_call = AsyncMock()
     sdk.instance.record_tool_result = AsyncMock()
     sdk.memories.create = AsyncMock()
+    sdk.conversation.record_message = AsyncMock()
+    if not is_listening:
+        set_auto_listen(sdk, False)  # these tests are about the REST path
     return sdk
 
 
@@ -150,37 +192,49 @@ def _final_answer_step(output):
     return SimpleNamespace(output=output)
 
 
-class TestStreamOnlyNoRestDoubleWrite:
-    def test_no_stream_means_no_events_at_all(self):
+class TestTurnsStreamFirstRestOtherwise:
+    def test_no_stream_means_no_stream_events(self):
         sdk = _streaming_sdk(is_listening=False)
         _recorder_for(sdk)(_action_step(), agent=None)
         sdk.instance.send_message.assert_not_awaited()
         sdk.instance.record_thinking.assert_not_awaited()
 
-    def test_the_step_ingest_still_happens_without_a_stream(self):
-        """The recorder's original behaviour is untouched."""
+    def test_no_stream_writes_each_turn_once_over_rest(self):
         sdk = _streaming_sdk(is_listening=False)
-        _recorder_for(sdk)(_action_step(), agent=None)
-        sdk.memories.create.assert_called_once()
-
-    def test_ingest_steps_can_be_turned_off_without_touching_the_stream(self):
-        """A caller who does not want the same text extracted twice while a
-        stream is running turns the document ingest off, not the reporting."""
-        sdk = _streaming_sdk()
-        _recorder_for(sdk, ingest_steps=False)(_action_step(), agent=None)
+        rec = _recorder_for(sdk)
+        agent = SimpleNamespace(task="where is my order")
+        rec(_action_step(), agent=agent)
+        rec(_action_step(step_number=2), agent=agent)
+        rec(_final_answer_step("it ships tomorrow"), agent=agent)
+        assert [
+            (c.kwargs["role"], c.kwargs["content"])
+            for c in sdk.conversation.record_message.await_args_list
+        ] == [("user", "where is my order"), ("assistant", "it ships tomorrow")]
         sdk.memories.create.assert_not_called()
-        sdk.instance.record_thinking.assert_awaited_once()
 
-    def test_the_recorder_never_calls_record_message(self):
-        """Stream first, and never a REST conversation write on top of it:
-        the server persists user_message/assistant_message from the stream,
-        so a record_message here would store and extract the turn twice."""
+    def test_with_a_stream_turns_go_on_the_stream_not_rest(self):
+        """The server persists user_message/assistant_message from the stream,
+        so a record_message too would store and extract the turn twice."""
         sdk = _streaming_sdk()
-        sdk.conversation.record_message = AsyncMock()
         rec = _recorder_for(sdk)
         rec(_action_step(), agent=SimpleNamespace(task="where is my order"))
         rec(_final_answer_step("it ships tomorrow"), agent=None)
+        assert sdk.instance.send_message.await_count == 2
         sdk.conversation.record_message.assert_not_awaited()
+        sdk.memories.create.assert_not_called()
+
+    def test_a_failed_stream_send_falls_back_to_rest(self):
+        sdk = _streaming_sdk()
+        sdk.instance.send_message.side_effect = RuntimeError("stream died")
+        rec = _recorder_for(sdk)
+        rec(_final_answer_step("it ships tomorrow"), agent=SimpleNamespace(task="q"))
+        assert sdk.conversation.record_message.await_count == 2
+
+    def test_ingest_steps_opt_in_does_not_touch_the_stream(self):
+        sdk = _streaming_sdk()
+        _recorder_for(sdk, ingest_steps=True)(_action_step(), agent=None)
+        sdk.memories.create.assert_called_once()
+        sdk.instance.record_thinking.assert_awaited_once()
 
 
 class TestTheFiveEvents:

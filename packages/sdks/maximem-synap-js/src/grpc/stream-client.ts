@@ -81,6 +81,11 @@ export interface StreamClientOptions {
   /** Fires only for `compaction_update` bundles. Backs the compaction subscriptions. */
   onCompactionUpdate?: (conversationId: string, bundle: Record<string, unknown>) => void;
   /**
+   * The server's message count for a conversation, sent after it has written a
+   * streamed message. See `ConversationState` in the proto.
+   */
+  onConversationState?: (conversationId: string, messageCount: number) => void;
+  /**
    * Where the outbox journal lives, so buffered events survive a restart.
    * Defaults to `~/.synap`, the same root Python uses. `''` turns it off, and
    * it is off anyway wherever there is no filesystem.
@@ -667,6 +672,17 @@ export class GrpcStreamClient {
     if (msg['heartbeat_pong']) {
       this.#lastPongAt = Date.now();
       this.#missedHeartbeats = 0;
+      return;
+    }
+    const state = msg['conversation_state'] as
+      | { conversation_id?: string; message_count?: number | string }
+      | undefined;
+    if (state) {
+      // int64 arrives as a string or a number depending on the loader options.
+      const count = Number(state.message_count ?? 0);
+      if (state.conversation_id && Number.isFinite(count)) {
+        this.#options.onConversationState?.(state.conversation_id, count);
+      }
       return;
     }
     const signal = msg['signal'] as { signal_type?: string } | undefined;

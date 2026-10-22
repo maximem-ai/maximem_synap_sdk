@@ -53,6 +53,10 @@ export interface SynapPromptContext {
   recent_messages: SynapRecentMessage[];
   recent_message_count: number;
   total_message_count: number;
+  /** The framed compaction block; absent before the first compaction and on older SDKs. */
+  context_block?: string | null;
+  /** Earlier turns the SDK found for the latest message, rendered. */
+  history_block?: string | null;
 }
 
 export interface SynapSdkLike {

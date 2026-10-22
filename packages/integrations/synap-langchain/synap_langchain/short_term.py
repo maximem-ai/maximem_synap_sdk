@@ -3,7 +3,10 @@
 Two composable surfaces, both wrapping
 ``sdk.conversation.context.get_context_for_prompt`` (cache-first via the
 ``SYNAP_SDK_ST_AUTHORITATIVE`` flag — see
-``docs/internal/sdk_authoritative_short_term_context_plan.md``):
+``docs/internal/sdk_authoritative_short_term_context_plan.md``). Both add
+Synap's **compaction** of the conversation and nothing else: the turns after it
+are the ones your chain already sends, and adding them here too showed each
+recent turn twice. Until the conversation has been compacted they add nothing.
 
 - :func:`synap_st_runnable` — returns an LCEL ``Runnable`` that emits the
   Synap short-term context **string**. Compose into a prompt template
@@ -27,8 +30,7 @@ Quality contract (matches the LangGraph adapter):
   Runnable returns ``""`` and the SystemMessage factory returns the
   bare user system content. ``on_error="raise"`` available for strict
   use.
-- An empty short-term result (no compaction yet **and** no recent turns)
-  is a no-op — must not wipe the user's system prompt.
+- No compaction yet is a no-op — must not wipe the user's system prompt.
 """
 
 from __future__ import annotations
@@ -85,6 +87,14 @@ async def _fetch_st_block(
     on_error: _OnError,
     site: str,
 ) -> str:
+    """Synap's compaction of the conversation, or ``""`` when there is none.
+
+    Only the compaction (and the earlier turns history search found), never
+    the recent turns: the framework sends those itself, and Synap's
+    ``formatted_context`` carries them too, so a block built from it showed
+    every recent turn twice. ``style`` shapes that formatted context, so it no
+    longer changes what comes back; the argument stays for compatibility.
+    """
     try:
         async with wrap_sdk_errors_async(
             site,
@@ -101,10 +111,16 @@ async def _fetch_st_block(
             raise
         return ""
 
-    if not getattr(response, "available", False):
+    if getattr(response, "available", True) is False:
         return ""
-    formatted = getattr(response, "formatted_context", None)
-    return (formatted or "").strip()
+    compaction = getattr(response, "context_block", None)
+    if not isinstance(compaction, str) or not compaction.strip():
+        return ""  # not compacted yet: the framework's own messages are the record
+    parts = [compaction.strip()]
+    found = getattr(response, "history_block", None)
+    if isinstance(found, str) and found.strip():
+        parts.append(found.strip())
+    return "\n\n".join(parts)
 
 
 def _compose_system_prompt(

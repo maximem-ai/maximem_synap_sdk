@@ -5,12 +5,15 @@ Four surfaces, each mapped onto a native Strands extension point:
 - :class:`SynapMemoryStore` — implements Strands' ``MemoryStore`` protocol so
   ``MemoryManager`` uses Synap as the agent's long-term memory backend
   (recall + automatic prompt injection + server-side extraction).
-- :class:`SynapShortTermHook` — a ``HookProvider`` that injects Synap
-  short-term / working-memory context before each invocation.
+- :class:`SynapShortTermHook` — a ``HookProvider`` that puts Synap's
+  compaction in place of the earlier turns the model is sent, once Synap has
+  compacted the conversation (model-call middleware; ``agent.messages`` is not
+  rewritten).
 - :func:`create_synap_tools` — explicit ``search_memory`` / ``store_memory``
   ``@tool`` functions for agents that don't adopt ``MemoryManager``.
-- :class:`SynapStreamHook` — a ``HookProvider`` that feeds the agent's turns
-  and tool-call intent onto Synap's gRPC Listen / anticipation stream.
+- :class:`SynapStreamHook` — a ``HookProvider`` that writes the agent's turns,
+  tool calls and results to Synap on its gRPC stream (opened on the first turn;
+  ``SYNAP_AUTO_LISTEN=false`` keeps it on REST).
 
 Typical wiring::
 
@@ -29,7 +32,7 @@ Typical wiring::
     )
 
 See each surface's docstring for its error policy and the ``stream.py`` module
-for the gRPC Listen participation contract (the app owns ``sdk.instance.listen()``).
+for the gRPC stream contract.
 """
 
 from synap_strands_agents.short_term import SynapShortTermHook

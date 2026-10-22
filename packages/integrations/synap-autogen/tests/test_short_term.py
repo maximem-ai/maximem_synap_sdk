@@ -2,8 +2,9 @@
 
 Covers:
 - Construction validation (sdk, conversation_id, style, on_error).
-- Happy path: ST prepended as SystemMessage, preamble tags, style forwarded.
-- Empty / unavailable ST: no prepend, inner messages returned unchanged.
+- Happy path: once Synap has compacted, the compaction replaces the turns before
+  the current one (SystemMessage with preamble tags, style forwarded).
+- No compaction: inner messages returned unchanged.
 - SDK failure paths: fallback (silent) and raise (SynapIntegrationError).
 - Delegation: add_message / clear forwarded to inner context.
 - State persistence: save_state / load_state round-trip.
@@ -33,22 +34,28 @@ from synap_integrations_common import SynapIntegrationError
 # ---------------------------------------------------------------------------
 
 
-def _make_response(formatted: str | None, available: bool):
+def _make_response(formatted: str | None, available: bool, recent=()):
     resp = MagicMock()
     resp.available = available
-    resp.formatted_context = formatted
+    resp.context_block = formatted if available else None
+    resp.history_block = None
+    resp.recent_messages = [
+        MagicMock(role=role, content=content) for role, content in recent
+    ]
+    resp.compaction_id = "cmp-1"
     return resp
 
 
 def _fake_sdk(
     formatted: str | None = "User asked about pricing twice.",
     available: bool = True,
+    recent=(),
 ):
     sdk = MagicMock()
     sdk.conversation = MagicMock()
     sdk.conversation.context = MagicMock()
     sdk.conversation.context.get_context_for_prompt = AsyncMock(
-        return_value=_make_response(formatted, available)
+        return_value=_make_response(formatted, available, recent)
     )
     return sdk
 
@@ -191,15 +198,17 @@ class TestGetMessagesHappyPath:
         assert _DEFAULT_OPEN not in messages[0].content
 
     @pytest.mark.asyncio
-    async def test_none_preamble_returns_raw_st_content(self):
-        """Both preamble tags None → content is the raw ST string."""
+    async def test_none_preamble_leaves_only_the_sdk_tags(self):
+        """Both preamble tags None → no extra wrapper around the compaction."""
         sdk = _fake_sdk(formatted="raw st")
         ctx = SynapShortTermChatContext(
             sdk, "conv_abc", preamble_open=None, preamble_close=None
         )
         messages = await ctx.get_messages()
         assert isinstance(messages[0], SystemMessage)
-        assert messages[0].content == "raw st"
+        assert messages[0].content.startswith("<synap_conversation_history>")
+        assert "raw st" in messages[0].content
+        assert _DEFAULT_OPEN not in messages[0].content
 
     @pytest.mark.asyncio
     async def test_forwards_conversation_id_to_sdk(self):
@@ -248,12 +257,71 @@ class TestGetMessagesHappyPath:
 
     @pytest.mark.asyncio
     async def test_mock_sdk_fixture_happy_path(self, mock_sdk):
-        """Shared mock_sdk fixture wired with ContextForPromptResponse(available=True)."""
+        """The shared mock_sdk has no compaction block: messages stay as they are."""
         ctx = SynapShortTermChatContext(mock_sdk, "conv_abc")
         await ctx.add_message(UserMessage(content="hello", source="user"))
         messages = await ctx.get_messages()
-        # Should prepend a system message because mock_sdk returns available=True
-        assert any(isinstance(m, SystemMessage) for m in messages)
+        assert [m.content for m in messages] == ["hello"]
+
+
+# ---------------------------------------------------------------------------
+# The splice: Synap's compaction replaces the framework's earlier turns
+# ---------------------------------------------------------------------------
+
+
+class TestCompactionReplacesEarlierTurns:
+    @pytest.mark.asyncio
+    async def test_earlier_turns_are_replaced_and_none_is_sent_twice(self):
+        sdk = _fake_sdk(
+            formatted="## Conversation so far (compacted)\nthe user likes tea",
+            recent=[("user", "post-compaction question"), ("assistant", "post-compaction answer")],
+        )
+        ctx = SynapShortTermChatContext(sdk, "conv_abc")
+        for role, text in [
+            ("user", "OLD-Q1"), ("assistant", "OLD-A1"),
+            ("user", "post-compaction question"), ("assistant", "post-compaction answer"),
+            ("user", "current question"),
+        ]:
+            await ctx.add_message(
+                UserMessage(content=text, source="user") if role == "user"
+                else AssistantMessage(content=text, source="assistant")
+            )
+        messages = await ctx.get_messages()
+        texts = [m.content for m in messages]
+        assert "OLD-Q1" not in " ".join(texts) and "OLD-A1" not in " ".join(texts)
+        assert isinstance(messages[0], SystemMessage)
+        assert "the user likes tea" in messages[0].content
+        assert texts[1:] == [
+            "post-compaction question", "post-compaction answer", "current question",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_current_turn_keeps_its_tool_calls_and_results(self):
+        from autogen_core import FunctionCall
+        from autogen_core.models import FunctionExecutionResult, FunctionExecutionResultMessage
+
+        sdk = _fake_sdk(formatted="## Conversation so far (compacted)\nsummary")
+        ctx = SynapShortTermChatContext(sdk, "conv_abc")
+        await ctx.add_message(UserMessage(content="old", source="user"))
+        await ctx.add_message(UserMessage(content="now", source="user"))
+        call = AssistantMessage(
+            content=[FunctionCall(id="c1", name="t", arguments="{}")], source="a"
+        )
+        result = FunctionExecutionResultMessage(content=[
+            FunctionExecutionResult(call_id="c1", content="ok", name="t", is_error=False)
+        ])
+        await ctx.add_message(call)
+        await ctx.add_message(result)
+        messages = await ctx.get_messages()
+        assert messages[-2:] == [call, result]
+        assert "old" not in [m.content for m in messages]
+
+    @pytest.mark.asyncio
+    async def test_without_a_compaction_the_messages_are_untouched(self):
+        sdk = _fake_sdk(formatted=None, available=False)
+        ctx = SynapShortTermChatContext(sdk, "conv_abc")
+        await _seed_inner(ctx)
+        assert [m.content for m in await ctx.get_messages()] == ["hi", "hello!"]
 
 
 # ---------------------------------------------------------------------------
