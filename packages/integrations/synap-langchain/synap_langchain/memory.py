@@ -17,10 +17,13 @@ import logging
 from typing import List, Sequence
 
 from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import run_async, wrap_sdk_errors_async
+
+# How the server's compaction block starts (v3/render.py).
+COMPACTION_PREFIX = "## Conversation so far (compacted"
 
 logger = logging.getLogger(__name__)
 
@@ -91,11 +94,20 @@ class SynapChatMessageHistory(BaseChatMessageHistory):
             )
             return []
 
-        if not prompt_ctx or not prompt_ctx.recent_messages:
+        if not prompt_ctx:
             return []
 
         msgs: List[BaseMessage] = []
-        for rm in prompt_ctx.recent_messages:
+        # The compaction block (and the earlier turns the SDK found for the
+        # latest message) stands in for the turns it covers: recent_messages
+        # holds only the turns after it. Older SDKs send neither.
+        preamble = "\n\n".join(
+            part for part in (getattr(prompt_ctx, "context_block", None),
+                              getattr(prompt_ctx, "history_block", None)) if isinstance(part, str) and part
+        )
+        if preamble:
+            msgs.append(SystemMessage(content=preamble))
+        for rm in prompt_ctx.recent_messages or []:
             role = getattr(rm, "role", None) or "user"
             content = getattr(rm, "content", "") or ""
             if role == "assistant":
@@ -110,6 +122,17 @@ class SynapChatMessageHistory(BaseChatMessageHistory):
     async def aadd_messages(self, messages: Sequence[BaseMessage]) -> None:
         """Write messages. Surfaces SDK errors (caller invoked this explicitly)."""
         for msg in messages:
+            if isinstance(msg, SystemMessage) and str(msg.content).startswith(COMPACTION_PREFIX):
+                continue  # the compaction this store returned, not a turn
+            if isinstance(msg, ToolMessage):
+                # What a tool returned, not something the user said: kept in
+                # the SDK's local archive for history search, never sent as a turn.
+                archive = getattr(self.sdk, "archive_tool_result", None)
+                if callable(archive):
+                    archive(self.conversation_id, msg.content, tool_name=getattr(msg, "name", None))
+                continue
+            if isinstance(msg, AIMessage) and not str(msg.content).strip():
+                continue  # tool calls only: no words to record
             role = "assistant" if isinstance(msg, AIMessage) else "user"
             async with wrap_sdk_errors_async(
                 "langchain.aadd_messages",

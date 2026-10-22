@@ -17,7 +17,7 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
 function client(fetchImpl: typeof fetch, options = {}) {
-  return new SynapClient({ _force_new: true, apiKey: 'k', instanceId: INSTANCE_ID, fetchImpl, ...options });
+  return new SynapClient({ _force_new: true, apiKey: 'k', clientId: 'cli_test', instanceId: INSTANCE_ID, fetchImpl, ...options });
 }
 
 describe('identifier validation, matching Python', () => {

@@ -511,3 +511,19 @@ class TestToolArgsAreTheParsedDict:
         await _handler_for(sdk).on_tool_start(
             {"name": "lookup"}, "raw", run_id=uuid4())
         assert sdk.instance.record_tool_call.await_args.args[1] == {"input": "raw"}
+
+
+@pytest.mark.asyncio
+async def test_the_chat_model_is_sent_with_each_turn():
+    """Synap sizes compaction to the agent's model (COMPACTION_V3_PLAN.md §4.3)."""
+    from unittest.mock import AsyncMock, MagicMock
+    from langchain_core.messages import HumanMessage
+    from synap_langchain.callbacks import SynapCallbackHandler
+
+    sdk = MagicMock()
+    sdk.instance.is_listening = False
+    sdk.conversation.record_message = AsyncMock()
+    handler = SynapCallbackHandler(sdk=sdk, conversation_id="conv-1", user_id="user-1", customer_id="cust-1")
+    await handler.on_chat_model_start({}, [[HumanMessage(content="hi")]], run_id=uuid4(),
+                                      invocation_params={"model": "gpt-4o-mini"})
+    assert sdk.conversation.record_message.call_args.kwargs["metadata"] == {"agent_model": "gpt-4o-mini"}

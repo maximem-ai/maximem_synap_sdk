@@ -10,10 +10,11 @@ the run reports itself.
 
 Two rules hold throughout.
 
-*Silent without a stream.* Everything here needs an active
-``sdk.instance.listen()``. Most callers do not have one, and for them every
-method is a no-op. Adding these hooks must not change behaviour for someone
-who has not opted in.
+*Turns are always written; the rest needs a stream.* The user and assistant
+turns go on the ``sdk.instance.listen()`` stream when one is open and over
+REST (``sdk.conversation.record_message``) when not, so Synap keeps the
+conversation either way (REST needs a ``conversation_id``). Tool calls, tool
+results and reasoning are stream-only: without a stream they are no-ops.
 
 *Never raises.* A hook runs inside the agent's own loop, where an exception
 from telemetry would end the run. No context is worth that.
@@ -22,14 +23,14 @@ from telemetry would end the run. No context is worth that.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
     report_reasoning,
     report_tool_call,
     report_tool_result,
-    report_turn,
+    record_turn,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,13 +45,15 @@ class SynapRunHooks(RunHooks):  # type: ignore[misc,valid-type]
     """Run hooks that report the agent's activity on the Synap stream.
 
     Args:
-        sdk: A configured ``MaximemSynapSDK`` with an active ``listen()``
-            stream. Without one, every hook is a no-op.
+        sdk: A configured ``MaximemSynapSDK``. The reply is written with or
+            without an active ``listen()`` stream (REST when there is none);
+            tool and reasoning hooks are no-ops without one.
         user_id: Synap user scope. Required.
         customer_id: B2B only. Not accepted on a B2C instance.
         conversation_id: The conversation these runs belong to. Required for
             the events to be useful: without it the server cannot say which
-            conversation they are part of, and no session is opened.
+            conversation they are part of, no session is opened, and with no
+            stream the reply is not written at all.
         report_tool_results: Whether tool results are reported. On by default,
             because a result is what tells anticipation how the turn is
             actually going. ⚠ A tool result is usually your own customer's
@@ -147,8 +150,9 @@ class SynapRunHooks(RunHooks):  # type: ignore[misc,valid-type]
         text = _output_text(output)
         if not text:
             return
-        await report_turn(
+        await record_turn(
             self._sdk, role="assistant", content=text, **self._ids(),
+            metadata=_model_metadata(getattr(agent, "model", None)),
         )
 
 
@@ -159,18 +163,36 @@ async def report_user_turn(
     conversation_id: str,
     user_id: str,
     customer_id: str = "",
+    model: Any = None,
 ) -> bool:
-    """Report the user's turn before you run the agent.
+    """Write the user's turn before you run the agent.
+
+    Goes on the ``listen()`` stream when one is open and over REST when not,
+    so the turn is kept either way. Returns whether it was written.
 
     There is no hook for this: ``on_agent_start`` fires with the agent, not
     with what the user said, and the run's input is yours rather than the
     SDK's. One line before ``Runner.run`` is the whole cost, and without it
     the conversation Synap sees has answers and no questions.
+
+    ``model`` is the agent's model (``agent.model``); pass it so Synap sizes
+    compaction to that model's context window.
     """
-    return await report_turn(
+    return await record_turn(
         sdk, role="user", content=content or "",
         conversation_id=conversation_id, user_id=user_id, customer_id=customer_id,
+        metadata=_model_metadata(model),
     )
+
+
+def _model_metadata(model: Any) -> Optional[Dict[str, str]]:
+    """``{"agent_model": name}`` for ``agent.model`` (a name or a Model), or None.
+
+    Synap sizes compaction to the agent model's context window
+    (COMPACTION_V3_PLAN.md §4.3); the server knows common models' windows.
+    """
+    name = model if isinstance(model, str) else getattr(model, "model", None)
+    return {"agent_model": name} if isinstance(name, str) and name else None
 
 
 def _output_text(output: Any) -> str:

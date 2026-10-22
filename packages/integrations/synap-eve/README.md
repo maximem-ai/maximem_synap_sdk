@@ -81,9 +81,11 @@ What each eve stream event becomes:
 | `action.result` | `tool_result`, under the same `callId` |
 | `session.completed` | closes the Synap session |
 
-**Nothing changes if you never call `listen()`.** Every handler is a no-op without an open stream.
-There is no REST fallback here and that is deliberate: this package has never written conversation
-turns, and adding a write would change what happens for someone who has not opted into streaming.
+**Without `listen()`, the turns are still written.** `message.received` and `message.completed`
+fall back to REST (`sdk.conversation.record_message`, under the eve session id or your
+`conversationId`), so Synap keeps the conversation for compaction and history search. A turn is
+never written both ways. Reasoning, tool calls, tool results and the session end are stream-only and
+a no-op without an open stream.
 
 Three options, all on by default:
 
