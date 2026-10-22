@@ -16,14 +16,20 @@
  * Every assertion is on what reached the fake SDK. A test that asserts a call
  * "did not throw" passes on code that reports nothing at all.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   endSession,
+  ensureStream,
+  fetchCompactedHistory,
+  isSynapHistory,
+  recordTurn,
   reportReasoning,
   reportToolCall,
   reportToolResult,
   reportTurn,
+  setAutoListen,
+  spliceHistory,
   streamIsActive,
 } from '../stream-events.js';
 
@@ -331,5 +337,365 @@ describe('end of session', () => {
     const { sdk, calls } = fakeSdk();
     expect(await endSession(sdk, '')).toBe(false);
     expect(calls).toEqual([]);
+  });
+});
+
+// ------------------------------------------------- the stream opens itself
+
+/**
+ * An SDK whose stream is closed until `listen()` is called, the way the real
+ * one behaves: `instance.is_listening` is a getter, `listen()` throws
+ * `ListeningAlreadyActiveError` when a stream exists.
+ */
+function lazySdk(opts: {
+  listenFails?: boolean;
+  neverOpens?: boolean;
+  listenHangs?: boolean;
+  restThrows?: boolean;
+} = {}) {
+  const calls: Call[] = [];
+  const rest: unknown[] = [];
+  const state = { listening: false, listens: 0 };
+  const record = (method: string) => async (options: unknown) => {
+    calls.push({ method, options });
+  };
+  const sdk = {
+    instance: {
+      get is_listening() { return state.listening; },
+      async listen() {
+        if (state.listening) throw new Error('Listening is already active on this instance');
+        state.listens += 1;
+        if (opts.listenHangs === true) return new Promise<void>(() => {});
+        await Promise.resolve();
+        if (opts.listenFails === true) throw new Error('connection refused');
+        if (opts.neverOpens !== true) state.listening = true;
+      },
+      send_message: record('send_message'),
+      record_tool_call: record('record_tool_call'),
+      record_tool_result: record('record_tool_result'),
+      record_thinking: record('record_thinking'),
+      end_session: record('end_session'),
+    },
+    conversation: {
+      async record_message(options: unknown) {
+        if (opts.restThrows === true) throw new Error('503');
+        rest.push(options);
+      },
+    },
+  };
+  return { sdk, calls, rest, state };
+}
+
+describe('the first report opens the stream', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('opens the stream on the first turn and sends it there', async () => {
+    const { sdk, calls, state } = lazySdk();
+    expect(streamIsActive(sdk)).toBe(false);
+    expect(await reportTurn(sdk, { role: 'user', content: 'hi', userId: 'u1', conversationId: 'c1' }))
+      .toBe(true);
+    expect(state.listens).toBe(1);
+    expect(streamIsActive(sdk)).toBe(true);
+    expect(calls[0]?.method).toBe('send_message');
+  });
+
+  it('reads the real SDK\'s `is_listening` getter, not only a method', () => {
+    // The published SDK has no `instance.isListening()`; that method lives on
+    // its private `_internal`. Reading only the method made every real SDK
+    // look permanently closed.
+    expect(streamIsActive({ instance: { is_listening: true } })).toBe(true);
+    expect(streamIsActive({ instance: { is_listening: false } })).toBe(false);
+  });
+
+  it('a stream the caller opened is used and never reopened', async () => {
+    const { sdk, state } = lazySdk();
+    await sdk.instance.listen();
+    expect(await ensureStream(sdk)).toBe(true);
+    expect(state.listens).toBe(1);
+  });
+
+  it('concurrent first reports share one open', async () => {
+    const { sdk, calls, state } = lazySdk();
+    const results = await Promise.all([
+      reportTurn(sdk, { role: 'user', content: 'a', userId: 'u1', conversationId: 'c1' }),
+      reportToolCall(sdk, { toolName: 't', userId: 'u1', conversationId: 'c1' }),
+      reportReasoning(sdk, { content: 'x', userId: 'u1', conversationId: 'c1' }),
+    ]);
+    expect(results).toEqual([true, true, true]);
+    expect(state.listens).toBe(1);
+    expect(calls).toHaveLength(3);
+  });
+
+  it('tool calls, tool results and reasoning also open it', async () => {
+    for (const report of [
+      (sdk: unknown) => reportToolCall(sdk, { toolName: 't', userId: 'u1' }),
+      (sdk: unknown) => reportToolResult(sdk, { result: 'r', userId: 'u1' }),
+      (sdk: unknown) => reportReasoning(sdk, { content: 'x', userId: 'u1' }),
+    ]) {
+      const { sdk, state } = lazySdk();
+      expect(await report(sdk)).toBe(true);
+      expect(state.listens).toBe(1);
+    }
+  });
+
+  it('a failed open is not retried for a minute, and warns once', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { sdk, state } = lazySdk({ listenFails: true });
+    expect(await ensureStream(sdk)).toBe(false);
+    expect(await ensureStream(sdk)).toBe(false);
+    expect(state.listens).toBe(1);
+    vi.advanceTimersByTime(61_000);
+    expect(await ensureStream(sdk)).toBe(false);
+    expect(state.listens).toBe(2);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('a listen() that never answers is given up on after ten seconds', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { sdk } = lazySdk({ listenHangs: true });
+    const pending = ensureStream(sdk);
+    await vi.advanceTimersByTimeAsync(10_001);
+    expect(await pending).toBe(false);
+  });
+
+  it('a listen() that resolves without a stream counts as a failure', async () => {
+    const { sdk, state } = lazySdk({ neverOpens: true });
+    expect(await ensureStream(sdk)).toBe(false);
+    expect(await ensureStream(sdk)).toBe(false);
+    expect(state.listens).toBe(1);
+  });
+
+  it('SYNAP_AUTO_LISTEN=false leaves the stream closed', async () => {
+    vi.stubEnv('SYNAP_AUTO_LISTEN', 'false');
+    const { sdk, state } = lazySdk();
+    expect(await ensureStream(sdk)).toBe(false);
+    expect(state.listens).toBe(0);
+  });
+
+  it('setAutoListen(sdk, false) leaves it closed for that SDK only', async () => {
+    const off = lazySdk();
+    const on = lazySdk();
+    setAutoListen(off.sdk, false);
+    expect(await ensureStream(off.sdk)).toBe(false);
+    expect(await ensureStream(on.sdk)).toBe(true);
+    expect(off.state.listens).toBe(0);
+  });
+
+  it('setAutoListen(sdk, true) beats the environment', async () => {
+    vi.stubEnv('SYNAP_AUTO_LISTEN', 'false');
+    const { sdk } = lazySdk();
+    setAutoListen(sdk, true);
+    expect(await ensureStream(sdk)).toBe(true);
+  });
+
+  it('an opted-out SDK that already has a stream still uses it', async () => {
+    const { sdk, calls } = lazySdk();
+    await sdk.instance.listen();
+    setAutoListen(sdk, false);
+    expect(await reportTurn(sdk, { role: 'user', content: 'hi', userId: 'u1' })).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('never throws on things that are not an SDK', async () => {
+    expect(await ensureStream(null)).toBe(false);
+    expect(await ensureStream(undefined)).toBe(false);
+    expect(await ensureStream('sdk')).toBe(false);
+    expect(await ensureStream({ instance: null })).toBe(false);
+  });
+
+  it('endSession never opens a stream', async () => {
+    const { sdk, calls, state } = lazySdk();
+    expect(await endSession(sdk, 'c1')).toBe(false);
+    expect(state.listens).toBe(0);
+    expect(calls).toEqual([]);
+  });
+
+  it('a tool result with no stream is archived locally and never sent', async () => {
+    const archive = vi.fn();
+    const { sdk, calls } = lazySdk({ neverOpens: true });
+    (sdk as unknown as { archive_tool_result: typeof archive }).archive_tool_result = archive;
+    await reportToolResult(sdk, { result: 'r', toolName: 't', userId: 'u1', conversationId: 'c1' });
+    expect(archive).toHaveBeenCalledWith('c1', 'r', { tool_name: 't' });
+    expect(calls).toEqual([]);
+  });
+});
+
+describe('recordTurn: stream first, REST second, never both', () => {
+  it('opens the stream and does not write REST', async () => {
+    const { sdk, calls, rest } = lazySdk();
+    expect(await recordTurn(sdk, {
+      role: 'assistant', content: 'yes', conversationId: 'c1', userId: 'u1',
+    })).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(opts(calls)).toMatchObject({ event_type: 'assistant_message' });
+    expect(rest).toEqual([]);
+  });
+
+  it('falls back to REST when the stream cannot open', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { sdk, calls, rest } = lazySdk({ listenFails: true });
+    expect(await recordTurn(sdk, {
+      role: 'user', content: 'hi', conversationId: 'c1', userId: 'u1', customerId: '',
+    })).toBe(true);
+    expect(calls).toEqual([]);
+    expect(rest).toEqual([{ conversation_id: 'c1', role: 'user', content: 'hi', user_id: 'u1' }]);
+  });
+
+  it('sends a customer_id on REST only when there is one', async () => {
+    const { sdk, rest } = lazySdk({ neverOpens: true });
+    await recordTurn(sdk, { role: 'user', content: 'hi', conversationId: 'c1', userId: 'u1', customerId: 'cu' });
+    expect(rest[0]).toMatchObject({ customer_id: 'cu' });
+  });
+
+  it('is false, and writes nothing, for empty text', async () => {
+    const { sdk, calls, rest, state } = lazySdk();
+    expect(await recordTurn(sdk, { role: 'user', content: '  ', conversationId: 'c1' })).toBe(false);
+    expect(state.listens).toBe(0);
+    expect(calls).toEqual([]);
+    expect(rest).toEqual([]);
+  });
+
+  it('is false with no stream and no conversation id (REST needs one)', async () => {
+    const { sdk, rest } = lazySdk({ neverOpens: true });
+    expect(await recordTurn(sdk, { role: 'user', content: 'hi' })).toBe(false);
+    expect(rest).toEqual([]);
+  });
+
+  it('swallows a failing REST write', async () => {
+    const { sdk } = lazySdk({ neverOpens: true, restThrows: true });
+    expect(await recordTurn(sdk, { role: 'user', content: 'hi', conversationId: 'c1' })).toBe(false);
+  });
+
+  it('is false when the SDK has neither a stream nor REST', async () => {
+    expect(await recordTurn({}, { role: 'user', content: 'hi', conversationId: 'c1' })).toBe(false);
+  });
+});
+
+// ------------------------------------------------------ Synap's history
+
+function historySdk(response: unknown) {
+  return {
+    conversation: {
+      context: { get_context_for_prompt: vi.fn(async () => response) },
+    },
+  };
+}
+
+describe('fetchCompactedHistory', () => {
+  it('wraps the compaction block and keeps the turns after it', async () => {
+    const sdk = historySdk({
+      context_block: '## Conversation so far (compacted at 5)\nthey like tea',
+      history_block: 'earlier: asked about kettles',
+      recent_messages: [
+        { role: 'user', content: 'and coffee?' },
+        { role: 'assistant', content: 'also fine' },
+        { role: 'system', content: 'dropped' },
+        { role: 'user', content: '   ' },
+      ],
+      compaction_id: 'cmp-1',
+    });
+    const h = await fetchCompactedHistory(sdk, 'c1');
+    expect(h?.preamble).toBe(
+      '<synap_conversation_history>\n## Conversation so far (compacted at 5)\nthey like tea\n\n'
+      + 'earlier: asked about kettles\n</synap_conversation_history>',
+    );
+    expect(h?.turns).toEqual([['user', 'and coffee?'], ['assistant', 'also fine']]);
+    expect(h?.compactionId).toBe('cmp-1');
+    expect(sdk.conversation.context.get_context_for_prompt)
+      .toHaveBeenCalledWith({ conversation_id: 'c1' });
+  });
+
+  it('is null when no compaction exists yet', async () => {
+    expect(await fetchCompactedHistory(historySdk({ context_block: null, recent_messages: [] }), 'c1'))
+      .toBeNull();
+    expect(await fetchCompactedHistory(historySdk({ context_block: '  ' }), 'c1')).toBeNull();
+  });
+
+  it('is null on an SDK without the method, with no conversation, and on error', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(await fetchCompactedHistory({}, 'c1')).toBeNull();
+    expect(await fetchCompactedHistory(historySdk({ context_block: 'x' }), '')).toBeNull();
+    const failing = { conversation: { context: { get_context_for_prompt: async () => { throw new Error('500'); } } } };
+    expect(await fetchCompactedHistory(failing, 'c1')).toBeNull();
+  });
+});
+
+describe('isSynapHistory', () => {
+  it('recognises the preamble and the SDK compaction block, nothing else', () => {
+    expect(isSynapHistory('<synap_conversation_history>\nx')).toBe(true);
+    expect(isSynapHistory('  \n## Conversation so far (compacted at 3)')).toBe(true);
+    expect(isSynapHistory('hello')).toBe(false);
+    expect(isSynapHistory(42)).toBe(false);
+  });
+});
+
+describe('spliceHistory', () => {
+  type Msg = { role: string; text: string };
+  const fns = {
+    roleOf: (m: Msg) => m.role,
+    textOf: (m: Msg) => m.text,
+    makeMessage: (role: string, text: string): Msg => ({ role, text }),
+  };
+  const history = {
+    preamble: '<synap_conversation_history>\nsummary\n</synap_conversation_history>',
+    turns: [['user', 'q5'], ['assistant', 'a5']] as const,
+  };
+
+  it('replaces every earlier turn with the preamble and Synap\'s turns', () => {
+    const out = spliceHistory<Msg>([
+      { role: 'system', text: 'be nice' },
+      { role: 'user', text: 'q1' }, { role: 'assistant', text: 'a1' },
+      { role: 'user', text: 'q5' }, { role: 'assistant', text: 'a5' },
+      { role: 'user', text: 'q6' },
+    ], history, fns);
+    expect(out).toEqual([
+      { role: 'system', text: 'be nice' },
+      { role: 'system', text: history.preamble },
+      { role: 'user', text: 'q5' }, { role: 'assistant', text: 'a5' },
+      { role: 'user', text: 'q6' },
+    ]);
+  });
+
+  it('keeps the current turn whole, tool messages included', () => {
+    const out = spliceHistory<Msg>([
+      { role: 'user', text: 'old' }, { role: 'tool', text: 'old result' },
+      { role: 'user', text: 'now' }, { role: 'assistant', text: 'calling' }, { role: 'tool', text: 'result' },
+    ], history, fns);
+    expect(out.slice(-3)).toEqual([
+      { role: 'user', text: 'now' }, { role: 'assistant', text: 'calling' }, { role: 'tool', text: 'result' },
+    ]);
+    expect(out.some((m) => m.text === 'old result')).toBe(false);
+  });
+
+  it('drops a Synap copy of the current user message, and what followed it', () => {
+    const out = spliceHistory<Msg>(
+      [{ role: 'user', text: 'q5' }, { role: 'assistant', text: 'a5' }, { role: 'user', text: 'q6' }],
+      { preamble: 'P', turns: [['user', 'q5'], ['assistant', 'a5'], ['user', 'q6']] },
+      fns,
+    );
+    expect(out.filter((m) => m.text === 'q6')).toHaveLength(1);
+  });
+
+  it('keeps framework turns Synap has not recorded yet', () => {
+    const out = spliceHistory<Msg>([
+      { role: 'user', text: 'q5' }, { role: 'assistant', text: 'a5' },
+      { role: 'user', text: 'q5b' }, { role: 'assistant', text: 'a5b' },
+      { role: 'user', text: 'q6' },
+    ], history, fns);
+    expect(out.map((m) => m.text)).toEqual([history.preamble, 'q5', 'a5', 'q5b', 'a5b', 'q6']);
+  });
+
+  it('does not keep a previous splice\'s preamble as a system message', () => {
+    const out = spliceHistory<Msg>([
+      { role: 'system', text: history.preamble },
+      { role: 'user', text: 'q6' },
+    ], history, fns);
+    expect(out.filter((m) => m.text === history.preamble)).toHaveLength(1);
   });
 });

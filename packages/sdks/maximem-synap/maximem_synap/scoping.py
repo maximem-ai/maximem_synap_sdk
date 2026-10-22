@@ -19,11 +19,19 @@ from __future__ import annotations
 
 from typing import Optional
 
+from .models.errors import InvalidInputError
+
 B2C_ISOLATION = "equals_customer"
 
 
-class CustomerIdNotAcceptedError(ValueError):
-    """Raised when a customer_id is passed on a B2C instance."""
+class CustomerIdNotAcceptedError(InvalidInputError, ValueError):
+    """Raised when a customer_id is passed on a B2C instance.
+
+    An InvalidInputError, as every other refused input is and as the JS SDK
+    raises it, so one `except InvalidInputError` covers it in both SDKs. Still
+    a ValueError, which is all it was until 0.5.12, so existing handlers keep
+    catching it.
+    """
 
     def __init__(self, where: str, customer_id: str, instance_id: Optional[str] = None):
         self.where = where

@@ -11,6 +11,9 @@ Importing this module has the side effect of registering both:
   telemetry exporter that reports the whole turn (user message, tool
   calls, tool results, reasoning, assistant message) onto Synap's live
   gRPC stream so the anticipation agent can see it.
+- :class:`SynapHistoryMiddlewareConfig` (YAML ``_type: synap_history``) — a
+  function middleware that replaces an agent's earlier turns with Synap's
+  compaction once Synap has compacted the conversation.
 
 Wired via the ``nat.components`` entry-point in ``pyproject.toml`` so
 NAT picks it up automatically on workflow load.
@@ -22,3 +25,4 @@ NAT picks it up automatically on workflow load.
 from . import plugin  # noqa: F401 — registers @register_memory
 from . import short_term  # noqa: F401 — registers @register_function (synap_short_term)
 from . import stream  # noqa: F401 — registers @register_telemetry_exporter (synap_stream)
+from . import history  # noqa: F401 — registers @register_middleware (synap_history)

@@ -7,6 +7,15 @@ CrewAI handles LLM analysis, categorization, and importance scoring.
 This backend handles persistence and retrieval by delegating to the
 Synap SDK.
 
+## Relation to the conversation record
+
+``save`` ingests each :class:`MemoryRecord` that CrewAI's own LLM extracted
+from a task and its result (``Memory.extract_memories``), through
+``sdk.memories.create``. It is a fact-level backend the framework calls, not a
+transcript: the run's turns are recorded separately by
+:class:`synap_crewai.SynapCrewAIListener` as conversation turns, and the two
+are different content (an extracted record versus what was said).
+
 ## Protocol compatibility notes
 
 CrewAI's StorageBackend defines mutation and listing methods
@@ -27,13 +36,17 @@ We therefore:
   from an in-process cache populated on save. Callers are warned once
   at construction that these views are session-scoped, not
   authoritative.
-- Require a non-empty ``query_text`` (either passed via
-  ``metadata_filter['_query_text']`` or supplied through the recall
-  path). ``query_embedding`` is accepted for protocol compliance and
-  intentionally ignored because Synap embeds server-side.
+- Require a non-empty query text. CrewAI never passes one (its
+  ``Memory.recall`` hands storage only an embedding), so use
+  :class:`synap_crewai.SynapMemory`, which records the question for the
+  duration of ``recall``. Calling the backend directly still works by passing
+  ``metadata_filter['_query_text']``. ``query_embedding`` is accepted for
+  protocol compliance and intentionally ignored because Synap embeds
+  server-side.
 """
 
 import logging
+import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -63,6 +76,20 @@ _MUTATION_UNSUPPORTED_WARNING = (
     "backend are unchanged. If you need this, raise a request at "
     "docs.maximem.ai."
 )
+
+
+def _naive_utc(value: Optional[datetime]) -> datetime:
+    """CrewAI compares record timestamps with ``datetime.utcnow()`` (naive UTC).
+
+    Synap returns timezone-aware datetimes, and subtracting one from the other raises
+    ``TypeError`` inside CrewAI's scoring, so every real recall would crash. Convert at
+    the boundary; a missing value means "now".
+    """
+    if value is None:
+        return datetime.now(timezone.utc).replace(tzinfo=None)
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
 
 
 class SynapStorageBackend:
@@ -104,6 +131,16 @@ class SynapStorageBackend:
         self._default_scope = default_scope(user_id, customer_id or None)
         self._records: Dict[str, MemoryRecord] = {}
         self._session_warning_logged = False
+        # CrewAI 1.10's encoding flow does ``with storage.write_lock:``; later releases
+        # no longer use it. Harmless to keep for every version.
+        self.write_lock = threading.RLock()
+        # Set by synap_crewai.SynapMemory: maps the embedding CrewAI hands to ``search``
+        # back to the question text that produced it. None means plain CrewAI Memory.
+        self._query_registry: Optional[Any] = None
+
+    def attach_query_registry(self, registry: Any) -> None:
+        """Let :class:`synap_crewai.SynapMemory` resolve embeddings back to question text."""
+        self._query_registry = registry
 
     def _warn_session_only(self) -> None:
         if not self._session_warning_logged:
@@ -152,9 +189,9 @@ class SynapStorageBackend:
 
         ``query_embedding`` is accepted for CrewAI protocol compliance
         but intentionally ignored — Synap embeds queries server-side.
-        The caller must pass the query text via
-        ``metadata_filter['_query_text']`` (CrewAI's ``Memory.recall``
-        sets this automatically).
+        The query text comes from ``metadata_filter['_query_text']`` when
+        calling the backend directly, or from :class:`synap_crewai.SynapMemory`
+        during ``recall``. CrewAI's own ``Memory`` does not supply it.
         """
         return run_async(self.asearch(
             query_embedding, scope_prefix, categories,
@@ -170,19 +207,23 @@ class SynapStorageBackend:
         limit: int = 10,
         min_score: float = 0.0,
     ) -> List[Tuple[MemoryRecord, float]]:
-        del query_embedding  # unused: Synap embeds server-side
-
         query_text: Optional[str] = None
         if metadata_filter and "_query_text" in metadata_filter:
             query_text = metadata_filter.pop("_query_text")
+        if not query_text and self._query_registry is not None:
+            query_text = self._query_registry.lookup(query_embedding)
+            if not query_text:
+                # Not a recall question: CrewAI's save-time duplicate check, which sends
+                # the new record's embedding. Synap dedupes server-side, so nothing to do.
+                return []
 
         if not query_text:
             raise SynapIntegrationError(
                 "crewai.asearch",
-                "query_text missing — pass via "
-                "metadata_filter['_query_text']. CrewAI's Memory.recall "
-                "populates this automatically; if you are calling the "
-                "backend directly, supply the query text yourself.",
+                "query_text missing. CrewAI's own Memory never passes the question "
+                "text to storage, so recall cannot work through it. Use "
+                "synap_crewai.SynapMemory(storage=backend) instead of Memory, or "
+                "pass metadata_filter['_query_text'] when calling the backend directly.",
                 {"scope_prefix": scope_prefix, "limit": limit},
             )
 
@@ -215,14 +256,14 @@ class SynapStorageBackend:
             )
 
         results: List[Tuple[MemoryRecord, float]] = []
-        now = datetime.now(timezone.utc)
+        now = _naive_utc(None)
         scope = scope_prefix or self._default_scope
 
         for fact in response.facts:
             results.append((MemoryRecord(
                 id=fact.id, content=fact.content, scope=scope,
                 categories=["fact"], importance=fact.confidence,
-                created_at=fact.extracted_at, last_accessed=now,
+                created_at=_naive_utc(fact.extracted_at), last_accessed=now,
                 metadata={"source": fact.source,
                           "scope_origin": response.scope_map.get(fact.id, "")},
             ), fact.confidence))
@@ -231,7 +272,7 @@ class SynapStorageBackend:
             results.append((MemoryRecord(
                 id=pref.id, content=pref.content, scope=scope,
                 categories=["preference"], importance=pref.strength,
-                created_at=pref.extracted_at, last_accessed=now,
+                created_at=_naive_utc(pref.extracted_at), last_accessed=now,
                 metadata={"category": pref.category,
                           "scope_origin": response.scope_map.get(pref.id, "")},
             ), pref.strength))
@@ -240,7 +281,7 @@ class SynapStorageBackend:
             results.append((MemoryRecord(
                 id=ep.id, content=ep.summary, scope=scope,
                 categories=["episode"], importance=ep.significance,
-                created_at=ep.occurred_at, last_accessed=now,
+                created_at=_naive_utc(ep.occurred_at), last_accessed=now,
                 metadata={"scope_origin": response.scope_map.get(ep.id, "")},
             ), ep.significance))
 
@@ -248,7 +289,7 @@ class SynapStorageBackend:
             results.append((MemoryRecord(
                 id=em.id, content=f"{em.emotion_type}: {em.context}",
                 scope=scope, categories=["emotion"], importance=em.intensity,
-                created_at=em.detected_at, last_accessed=now,
+                created_at=_naive_utc(em.detected_at), last_accessed=now,
                 metadata={"emotion_type": em.emotion_type,
                           "scope_origin": response.scope_map.get(em.id, "")},
             ), em.intensity))
@@ -258,7 +299,7 @@ class SynapStorageBackend:
                 id=te.id, content=te.content, scope=scope,
                 categories=["temporal_event"],
                 importance=te.temporal_confidence,
-                created_at=te.event_date, last_accessed=now,
+                created_at=_naive_utc(te.event_date), last_accessed=now,
                 metadata={
                     "valid_until": str(te.valid_until) if te.valid_until else None,
                     "scope_origin": response.scope_map.get(te.id, ""),

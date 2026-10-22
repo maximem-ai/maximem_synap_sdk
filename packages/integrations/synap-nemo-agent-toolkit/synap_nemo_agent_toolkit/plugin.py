@@ -3,7 +3,9 @@
 Drop ``_type: synap_memory`` into a NAT workflow's ``memory:`` block and
 the toolkit will construct a :class:`SynapMemoryEditor` from env vars
 (``SYNAP_API_KEY`` / optional ``SYNAP_INSTANCE_ID``). Config fields let
-operators override the scope, fetch mode, and document type from YAML.
+operators override the scope, fetch mode, and document type from YAML. The SDK
+is the process's shared one for those credentials, so the stream the
+``synap_stream`` exporter opens serves this editor's reads too.
 
 Example YAML::
 
@@ -20,18 +22,15 @@ instantiate :class:`SynapMemoryEditor` directly instead.
 from __future__ import annotations
 
 import logging
-import os
-from typing import Optional
 
 from pydantic import Field
 
 from nat.builder.builder import Builder
 from nat.cli.register_workflow import register_memory
-from nat.data_models.common import OptionalSecretStr, get_secret_value
+from nat.data_models.common import OptionalSecretStr
 from nat.data_models.memory import MemoryBaseConfig
 
-from maximem_synap import MaximemSynapSDK
-
+from synap_nemo_agent_toolkit._sdk import shared_sdk
 from synap_nemo_agent_toolkit.editor import SynapMemoryEditor
 
 logger = logging.getLogger(__name__)
@@ -69,45 +68,14 @@ class SynapMemoryClientConfig(MemoryBaseConfig, name="synap_memory"):
 
 @register_memory(config_type=SynapMemoryClientConfig)
 async def synap_memory_client(config: SynapMemoryClientConfig, builder: Builder):
-    """Construct + initialize a Synap SDK, yield a :class:`SynapMemoryEditor`."""
-    api_key: Optional[str] = get_secret_value(config.api_key) or os.environ.get(
-        "SYNAP_API_KEY"
-    )
-    if api_key is None:
-        raise RuntimeError(
-            "Synap API key is not set. Provide it via SynapMemoryClientConfig.api_key "
-            "or the SYNAP_API_KEY environment variable."
+    """Yield a :class:`SynapMemoryEditor` on the process's shared Synap SDK."""
+    async with shared_sdk(config) as sdk:
+        yield SynapMemoryEditor(
+            sdk=sdk,
+            customer_id=config.customer_id,
+            mode=config.mode,
+            document_type=config.document_type,
         )
-
-    sdk = MaximemSynapSDK(
-        instance_id=config.instance_id or os.environ.get("SYNAP_INSTANCE_ID", ""),
-        api_key=api_key,
-        _force_new=True,
-    )
-    await sdk.initialize()
-
-    editor = SynapMemoryEditor(
-        sdk=sdk,
-        customer_id=config.customer_id,
-        mode=config.mode,
-        document_type=config.document_type,
-    )
-    try:
-        yield editor
-    finally:
-        # The SDK's teardown is shutdown(); there is no close(). Probing for
-        # the wrong name resolved to None on every run, so this block was a
-        # silent no-op and each workflow leaked the SDK's HTTP transport,
-        # gRPC stream and telemetry collector. close() is still accepted
-        # second so a duck-typed test double keeps working.
-        teardown = getattr(sdk, "shutdown", None) or getattr(sdk, "close", None)
-        if teardown is not None:
-            try:
-                await teardown()
-            except Exception:  # noqa: BLE001 — teardown must not mask workflow errors
-                logger.exception(
-                    "synap_memory_client: SDK teardown raised (suppressing)"
-                )
 
 
 __all__ = ["SynapMemoryClientConfig", "synap_memory_client"]

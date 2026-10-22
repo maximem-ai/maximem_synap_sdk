@@ -173,6 +173,21 @@ describe('HttpTransport', () => {
       expect(spy).toHaveBeenCalledTimes(2);
     });
 
+    it.each(['ECONNREFUSED', 'ENOTFOUND', 'ECONNRESET'])(
+      'reports a %s connection as a NetworkTimeoutError, as Python does',
+      async (code) => {
+        // fetch nests the socket error under its own, as Node's undici does.
+        const spy = vi.fn(async () => {
+          throw Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error(code), { code }) });
+        });
+        const err = await transport(spy as unknown as typeof fetch, { retryPolicy: null })
+          .request('whoami').then(() => null, (e: unknown) => e);
+        expect(err).toBeInstanceOf(NetworkTimeoutError);
+        // Still a request that never reached the server, so still safe to retry.
+        expect(isOutcomeUnknown(err)).toBe(false);
+      },
+    );
+
     it('retries a context fetch POST because it is declared idempotent', async () => {
       let n = 0;
       const spy = vi.fn(async () => (++n < 2 ? err(503) : ok({ items_by_type: {} })));

@@ -11,6 +11,13 @@ export interface SynapProviderOptions {
   grpcPort?: number;
   /** Disable TLS for gRPC (local dev only). Defaults to true */
   grpcUseTls?: boolean;
+  /**
+   * Open the gRPC stream on the first model call, so turns, tool calls and
+   * reasoning go on it and anticipation bundles come back. Defaults to true;
+   * the env var `SYNAP_AUTO_LISTEN=false` turns it off too. When the stream
+   * cannot open, everything falls back to REST.
+   */
+  autoListen?: boolean;
 }
 
 // ─── Per-call model options ───────────────────────────────────────────────────
@@ -30,6 +37,12 @@ export interface SynapModelOptions {
   writeMemory?: boolean;
   /** Inject context as system prompt prefix. Defaults to true. */
   injectContext?: boolean;
+  /**
+   * The wrapped model's name. `wrap()` fills it from `model.modelId`; set it
+   * only when calling `createSynapMiddleware` directly. Sent with each turn
+   * so Synap sizes compaction to the model's context window.
+   */
+  agentModel?: string;
 }
 
 // ─── Context types ────────────────────────────────────────────────────────────

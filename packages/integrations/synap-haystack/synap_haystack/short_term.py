@@ -5,8 +5,14 @@ Mirrors the LangGraph template, adapted to Haystack's
 ``sdk.conversation.context.get_context_for_prompt`` (cache-first behind
 ``SYNAP_SDK_ST_AUTHORITATIVE``).
 
-Exposes :class:`SynapShortTermContext` — a component that emits the
-formatted Synap short-term context string on its ``synap_st`` output.
+Exposes :class:`SynapShortTermContext` — a component that emits Synap's
+compaction of the conversation, as a string, on its ``synap_st`` output. It is
+the compaction only: the turns after it are the ones your pipeline already
+passes (a chat history, an agent's messages), and Synap's ``formatted_context``
+carries them too, so a block built from it showed every recent turn twice. Until
+the conversation has been compacted the block is empty. (An agent should use
+``SynapMemoryStore`` as its ``chat_message_store`` instead, which replaces the
+history it loads.)
 Wire it before your prompt builder, then reference ``{synap_st}`` (or
 your prompt builder's variable name) in the template. The component
 re-fetches on every pipeline run, so ST stays fresh.
@@ -18,7 +24,7 @@ Quality contract identical to the LangGraph adapter:
   raise abort the whole pipeline. The default ``on_error="fallback"``
   emits the bare user system text (or empty string) on SDK failure,
   with an ERROR log. ``on_error="raise"`` surfaces failures.
-- Empty ST is a no-op — never wipes the user's system text.
+- No compaction yet is a no-op — never wipes the user's system text.
 """
 
 from __future__ import annotations
@@ -141,8 +147,14 @@ class SynapShortTermContext:
                     conversation_id=self.conversation_id,
                     style=self.style,
                 )
-            if getattr(response, "available", False):
-                st_block = (getattr(response, "formatted_context", None) or "").strip()
+            compaction = getattr(response, "context_block", None)
+            if getattr(response, "available", True) is not False and isinstance(compaction, str) \
+                    and compaction.strip():
+                parts = [compaction.strip()]
+                found = getattr(response, "history_block", None)
+                if isinstance(found, str) and found.strip():
+                    parts.append(found.strip())
+                st_block = "\n\n".join(parts)
         except SynapIntegrationError:
             if self.on_error == "raise":
                 raise

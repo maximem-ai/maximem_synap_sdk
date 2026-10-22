@@ -62,16 +62,16 @@ describe('scope widening', () => {
 });
 
 describe('serving from the cache', () => {
-  it('answers a matching query without the network', () => {
-    const attempt = tryServeFromCache(seeded('u1'), 'user', {
+  it('answers a matching query without the network', async () => {
+    const attempt = await tryServeFromCache(seeded('u1'), 'user', {
       searchQuery: QUERY, entityId: 'u1', clientId: 'cli',
     }, 10);
     expect(attempt.hit).not.toBeNull();
     expect(attempt.response?.facts).toBeDefined();
   });
 
-  it('marks the response as locally served', () => {
-    const attempt = tryServeFromCache(seeded('u1'), 'user', {
+  it('marks the response as locally served', async () => {
+    const attempt = await tryServeFromCache(seeded('u1'), 'user', {
       searchQuery: QUERY, entityId: 'u1',
     }, 10);
     // How a caller, and the metering that reads it, tells a local hit from a
@@ -80,24 +80,27 @@ describe('serving from the cache', () => {
     expect(attempt.response?.metadata?.['cache_hit']).toBe(true);
   });
 
-  it('falls through when nothing matches', () => {
-    const attempt = tryServeFromCache(seeded('u1'), 'user', {
+  it('falls through when nothing matches', async () => {
+    const attempt = await tryServeFromCache(seeded('u1'), 'user', {
       searchQuery: ['something completely unrelated to any of it'], entityId: 'u1',
     }, 10);
     expect(attempt.response).toBeNull();
   });
 
-  it('never serves one user a bundle stored for another', () => {
-    const attempt = tryServeFromCache(seeded('user-a'), 'user', {
+  it('never serves one user a bundle stored for another', async () => {
+    const attempt = await tryServeFromCache(seeded('user-a'), 'user', {
       searchQuery: QUERY, entityId: 'user-b',
     }, 10);
     expect(attempt.response).toBeNull();
   });
 
-  it('degrades to the network when the cache throws', () => {
+  it('degrades to the network when the cache throws', async () => {
     // A fault in the cache must never fail a retrieval the server could answer.
-    const broken = { lookup() { throw new Error('cache exploded'); } } as unknown as AnticipationCache;
-    const attempt = tryServeFromCache(broken, 'user', { searchQuery: QUERY, entityId: 'u1' }, 10);
+    const broken = {
+      lookup() { throw new Error('cache exploded'); },
+      lookupAsync() { throw new Error('cache exploded'); },
+    } as unknown as AnticipationCache;
+    const attempt = await tryServeFromCache(broken, 'user', { searchQuery: QUERY, entityId: 'u1' }, 10);
     expect(attempt.response).toBeNull();
   });
 
@@ -180,7 +183,7 @@ describe('the client serves a fetch from a stream-delivered bundle', () => {
         status: 200, headers: { 'content-type': 'application/json' },
       }));
     const client = new SynapClient({
-      apiKey: 'k', _force_new: true, clientId: 'cli', fetchImpl: fetchImpl as never,
+      apiKey: 'k', _force_new: true, clientId: 'cli', instanceId: 'inst_0123456789abcdef', fetchImpl: fetchImpl as never,
     });
 
     await client.instance.listen({ host: '127.0.0.1', port: server.port, use_tls: false });
@@ -221,7 +224,7 @@ describe('the client serves a fetch from a stream-delivered bundle', () => {
         status: 200, headers: { 'content-type': 'application/json' },
       }));
     const client = new SynapClient({
-      apiKey: 'k', _force_new: true, clientId: 'cli', fetchImpl: fetchImpl as never,
+      apiKey: 'k', _force_new: true, clientId: 'cli', instanceId: 'inst_0123456789abcdef', fetchImpl: fetchImpl as never,
     });
     await client.instance.listen({ host: '127.0.0.1', port: server.port, use_tls: false });
     await server.connected;
@@ -249,7 +252,7 @@ describe('the network path, when nothing is cached', () => {
       new Response(JSON.stringify({ context: { facts: [{ id: 'f1', content: 'from server' }] } }), {
         status: 200, headers: { 'content-type': 'application/json' },
       }));
-    const c = new SynapClient({ apiKey: 'k', _force_new: true, fetchImpl: fetchImpl as never });
+    const c = new SynapClient({ apiKey: 'k', _force_new: true, clientId: 'cli_test', instanceId: 'inst_0123456789abcdef', fetchImpl: fetchImpl as never });
     const ctx = await c.user.context.fetch({ user_id: 'u1', search_query: QUERY });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(ctx.facts?.[0]?.content).toBe('from server');

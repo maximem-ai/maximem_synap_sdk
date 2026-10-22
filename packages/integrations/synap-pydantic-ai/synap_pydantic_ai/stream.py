@@ -31,9 +31,13 @@ importing classes, so this module imports nothing from ``pydantic_ai`` and a
 version that spells a class differently degrades to reporting less rather
 than to an ImportError.
 
-Both rules from ``stream_events`` hold throughout: silent when no
-``sdk.instance.listen()`` is running, and never raises. A handler that
-throws inside the agent's own loop takes down the run.
+Both rules from ``stream_events`` hold throughout: the first report opens the
+gRPC stream (``SYNAP_AUTO_LISTEN=false`` turns that off), and nothing raises. A
+handler that throws inside the agent's own loop takes down the run.
+
+``synap_run`` also installs :func:`synap_history_processor` on the agent, so
+once Synap has compacted the conversation the model sees Synap's compaction in
+place of the earlier turns.
 """
 
 from __future__ import annotations
@@ -44,14 +48,16 @@ import logging
 from typing import Any, AsyncIterable, Dict, Optional
 
 from synap_integrations_common import (
+    is_synap_history,
+    record_turn,
     report_reasoning,
     report_tool_call,
     report_tool_result,
-    report_turn,
     run_async,
 )
 
 from synap_pydantic_ai.deps import SynapDeps
+from synap_pydantic_ai.history import install_synap_history
 
 logger = logging.getLogger(__name__)
 
@@ -286,44 +292,42 @@ def _output_text(result: Any) -> str:
     return output if isinstance(output, str) else str(output)
 
 
-async def _report_turn(deps: SynapDeps, role: str, content: str) -> None:
-    """Stream first, REST only as a fallback, never both.
+def _agent_model(agent: Any, kwargs: Dict[str, Any]) -> Optional[str]:
+    """The run's model name: ``model=`` on the call, else the agent's.
+
+    Synap sizes compaction to that model's context window
+    (COMPACTION_V3_PLAN.md §4.3). A ``Model`` has ``model_name``; a string is
+    ``"provider:name"``, of which the server's table wants the name.
+    """
+    model = kwargs.get("model") or getattr(agent, "model", None)
+    name = model if isinstance(model, str) else getattr(model, "model_name", None)
+    if not isinstance(name, str) or not name:
+        return None
+    return name.split(":", 1)[-1]
+
+
+async def _report_turn(deps: SynapDeps, role: str, content: str, model: Optional[str] = None) -> None:
+    """Stream first (opened if need be), REST only as a fallback, never both.
 
     The server persists ``user_message`` and ``assistant_message`` from the
     stream itself (``grpc/servicer.py``), so a ``record_message`` on top of a
     delivered stream event writes the same turn twice and extracts it twice.
-    ``report_turn`` returns whether it actually went out, which is what makes
-    the choice decidable rather than guessed.
+    ``record_turn`` makes that choice. With no ``conversation_id`` only the
+    stream can carry the turn (it opens its own conversation); REST records
+    against one.
     """
-    if not content:
+    if not content or is_synap_history(content):
         return
-    if await report_turn(
+    await record_turn(
         deps.sdk,
         role=role,
         content=content,
         conversation_id=deps.conversation_id or "",
         user_id=deps.user_id,
         customer_id=deps.customer_id,
-    ):
-        return
-    if not deps.conversation_id:
-        # REST records against a conversation and the stream opens its own,
-        # so a run with no conversation_id has nowhere to fall back to.
-        return
-    try:
-        await deps.sdk.conversation.record_message(
-            conversation_id=deps.conversation_id,
-            role=role,
-            content=content,
-            user_id=deps.user_id,
-            customer_id=deps.customer_id or None,
-        )
-    except Exception as exc:  # noqa: BLE001 — never break the agent run
-        logger.error(
-            "synap pydantic-ai: record_message failed role=%s "
-            "conversation_id=%s error=%s",
-            role, deps.conversation_id, exc, exc_info=True,
-        )
+        # In metadata, not model=, so an older installed SDK accepts it.
+        metadata={"agent_model": model} if model else None,
+    )
 
 
 def _accepts_event_stream_handler(agent: Any) -> bool:
@@ -359,9 +363,11 @@ async def synap_run(
     :class:`SynapEventStreamHandler` installed for this run; pass your own
     ``event_stream_handler=`` and it is left alone.
 
-    Every report is silent when no ``sdk.instance.listen()`` is running, and
-    none of them can break the run. A failure to report is logged, not
-    raised.
+    The first report opens the gRPC stream when none is running (set
+    ``SYNAP_AUTO_LISTEN=false`` to stay on REST), and none of them can break the
+    run. A failure to report is logged, not raised. The agent also gets
+    :func:`synap_history_processor`, so the model sees Synap's compaction once
+    one exists.
 
     Args:
         agent: A ``pydantic_ai.Agent``.
@@ -394,7 +400,9 @@ async def synap_run(
     if deps is None:
         raise ValueError("synap_run requires SynapDeps (it carries the sdk)")
 
-    await _report_turn(deps, "user", _prompt_text(user_prompt))
+    install_synap_history(agent)
+    model = _agent_model(agent, kwargs)
+    await _report_turn(deps, "user", _prompt_text(user_prompt), model)
 
     if "event_stream_handler" not in kwargs:
         if _accepts_event_stream_handler(agent):
@@ -415,7 +423,7 @@ async def synap_run(
 
     result = await agent.run(user_prompt, deps=deps, **kwargs)
 
-    await _report_turn(deps, "assistant", _output_text(result))
+    await _report_turn(deps, "assistant", _output_text(result), model)
     return result
 
 
