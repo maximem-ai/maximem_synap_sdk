@@ -36,6 +36,8 @@ If the user is just doing single-turn LLM calls with no agent loop and no need f
 
 **CLI selection (read once).** In this skill `<cli>` means `maximem-synap` from PATH when `maximem-synap --version` reports 0.3.0 or newer (it starts instantly and avoids npx fetching an older published version), otherwise `npx @maximem/synap-cli@latest`. Pick one at the start and use it for every command. The `npx` form needs Node and Python 3.10+ (npx only installs the Python CLI).
 
+**Environment.** If the prompt names an environment, add `--env <name>` to every CLI command (or `export SYNAP_ENV=<name>` in the commands' shell). A one-time code only works against the server that issued it. If the prompt names none, do nothing extra.
+
 The CLI provisions the instance and key, so do it yourself, in this order. **Never guess. If anything is unclear, stop and ask the human.** A wrong guess costs a new instance and about 14 minutes. Wording, failures and resume rules: `reference/onboarding-ask-rules.md`. CLI details: `reference/dashboard-setup.md`.
 
 1. **Sign in.** `<cli> auth login --code <syn_ob_...>` with the one-time code from the human's prompt. Missing, expired or used code at this first sign-in is the one case where you say: copy a fresh prompt from the dashboard. Do not fall back to the browser flow silently. The key lasts 7 days, fixed, and cannot be renewed (never run `auth refresh` for it). Within 7 days a new session resumes from `onboard status` and the profile; after expiry ask the human for a fresh prompt.
