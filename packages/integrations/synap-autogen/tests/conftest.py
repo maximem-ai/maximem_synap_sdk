@@ -37,3 +37,13 @@ def cancelled_ct():
     token = CancellationToken()
     token.cancel()
     return token
+
+
+@pytest.fixture(autouse=True)
+def _fresh_dedupe_registry():
+    """Contexts in different tests share conversation ids and message text."""
+    from synap_autogen import stream
+
+    stream._seen.clear()
+    yield
+    stream._seen.clear()

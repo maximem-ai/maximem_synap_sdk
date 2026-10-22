@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SynapClient, type SynapSdkLike } from '../index.js';
-import { InvalidInputError } from '../errors.js';
+import { AuthenticationError, InvalidInputError } from '../errors.js';
 import { buildFetchRequest } from '../context/fetch.js';
 import { buildCreateBody } from '../memories/interface.js';
 
@@ -22,7 +22,7 @@ function client(fetchImpl: typeof fetch) {
 describe('SynapClient', () => {
   describe('credentials', () => {
     it('requires an API key', () => {
-      expect(() => new SynapClient({ _force_new: true })).toThrow(InvalidInputError);
+      expect(() => new SynapClient({ _force_new: true })).toThrow(AuthenticationError); // as Python raises it, since 0.5.13
       expect(() => new SynapClient({ _force_new: true })).toThrow(/SYNAP_API_KEY/);
     });
 

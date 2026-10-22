@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
+from synap_integrations_common import set_auto_listen
 from synap_livekit_agents.recording import attach_synap_recording
 
 
@@ -60,6 +61,9 @@ def _make_sdk():
     sdk = MagicMock()
     sdk.conversation = MagicMock()
     sdk.conversation.record_message = AsyncMock(return_value={"message_id": "msg-1"})
+    # These tests are about the REST path; the stream is covered below.
+    sdk.instance.is_listening = False
+    set_auto_listen(sdk, False)
     return sdk
 
 
@@ -371,8 +375,7 @@ class TestHappyPathAsync:
 class TestFailureDegradation:
     def test_sdk_failure_does_not_propagate_from_sync_callback(self):
         """A Synap write outage must NOT tear down the synchronous event fire."""
-        sdk = MagicMock()
-        sdk.conversation = MagicMock()
+        sdk = _make_sdk()
         sdk.conversation.record_message = AsyncMock(
             side_effect=RuntimeError("sdk boom")
         )
@@ -386,28 +389,23 @@ class TestFailureDegradation:
         )
 
     def test_sdk_failure_logs_error_in_sync_context(self, caplog):
-        sdk = MagicMock()
-        sdk.conversation = MagicMock()
+        sdk = _make_sdk()
         sdk.conversation.record_message = AsyncMock(
             side_effect=RuntimeError("boom")
         )
         session = MockSession()
         attach_synap_recording(session, sdk, user_id="u1", conversation_id="c1")
-        with caplog.at_level(logging.ERROR):
+        with caplog.at_level(logging.WARNING):
             session.fire(
                 "conversation_item_added",
                 _make_event(_make_item(role="user", text_content="hello")),
             )
-        assert any(
-            "record_message" in r.message or "record_turn" in r.message
-            for r in caplog.records
-        )
+        assert any("turn write failed" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_sdk_failure_does_not_propagate_from_async_context(self):
         """A Synap write outage must NOT propagate from the async task path."""
-        sdk = MagicMock()
-        sdk.conversation = MagicMock()
+        sdk = _make_sdk()
         sdk.conversation.record_message = AsyncMock(
             side_effect=RuntimeError("sdk boom")
         )
@@ -477,15 +475,35 @@ from livekit.agents.voice.events import (  # noqa: E402
     CloseReason,
     ConversationItemAddedEvent,
     FunctionToolsExecutedEvent,
-    ToolCallEnded,
-    ToolCallStarted,
-    ToolExecutionUpdatedEvent,
 )
+
+try:
+    from livekit.agents.voice.events import (  # noqa: E402
+        ToolCallEnded,
+        ToolCallStarted,
+        ToolExecutionUpdatedEvent,
+    )
+except ImportError:
+    # livekit-agents before 1.6 never emits `tool_execution_updated` and has
+    # none of these types. The listener reads only `.update.type` and
+    # `.update.function_call`, so a same-shaped double is the whole contract.
+    from types import SimpleNamespace as _NS
+
+    def ToolCallStarted(**kw):  # noqa: N802
+        return _NS(type="tool_call_started", **kw)
+
+    def ToolCallEnded(**kw):  # noqa: N802
+        return _NS(type="tool_call_ended", **kw)
+
+    def ToolExecutionUpdatedEvent(**kw):  # noqa: N802
+        return _NS(**kw)
 
 
 def _streaming_sdk(is_listening: bool = True):
     sdk = MagicMock()
     sdk.instance.is_listening = is_listening
+    if not is_listening:
+        set_auto_listen(sdk, False)  # "no stream" means no stream, not "open one"
     sdk.instance.send_message = AsyncMock()
     sdk.instance.record_tool_call = AsyncMock()
     sdk.instance.record_tool_result = AsyncMock()
@@ -896,3 +914,12 @@ class TestNoneOfItTearsDownTheCall:
         session.fire("conversation_item_added", _turn("user", "hi"))
         await _settle()
         sdk.conversation.record_message.assert_awaited_once()
+
+
+def test_the_session_model_is_named_for_compaction_sizing():
+    from types import SimpleNamespace
+    from synap_livekit_agents.recording import _session_model
+
+    assert _session_model(SimpleNamespace(llm=SimpleNamespace(model="gpt-4o-mini"))) == "gpt-4o-mini"
+    assert _session_model(SimpleNamespace(llm="openai/gpt-4.1-mini")) == "openai/gpt-4.1-mini"
+    assert _session_model(SimpleNamespace(llm=None)) is None
