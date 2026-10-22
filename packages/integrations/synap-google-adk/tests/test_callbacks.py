@@ -3,8 +3,9 @@
 The package gave an agent tools and reported nothing about the run itself, so
 anticipation had nothing to work with and every fetch stayed a cold retrieval.
 
-Two rules hold in every test. Nothing requires a stream: with no `listen()`
-running the callbacks are a no-op. And every callback returns None, always —
+Two rules hold in every test. Turns do not require a stream: with no
+`listen()` running the reply and the user turn go over REST
+(`sdk.conversation.record_message`) and the tool callbacks are a no-op. And every callback returns None, always —
 ADK reads a returned value as an override of the model or tool result, so
 telemetry that returns anything else silently changes what the agent does.
 """
@@ -26,6 +27,8 @@ def sdk(listening: bool = True):
     s.instance.send_message = AsyncMock()
     s.instance.record_tool_call = AsyncMock()
     s.instance.record_tool_result = AsyncMock()
+    s.conversation = MagicMock()
+    s.conversation.record_message = AsyncMock()
     return s
 
 
@@ -142,14 +145,57 @@ class TestWhatReachesTheStream:
 
 class TestWithoutAStream:
     @pytest.mark.asyncio
-    async def test_nothing_is_sent(self):
+    async def test_tool_callbacks_send_nothing(self):
         s = sdk(listening=False)
         cb = callbacks(s)
         await cb["before_tool_callback"](tool(), {}, MagicMock())
         await cb["after_tool_callback"](tool(), {}, MagicMock(), {})
-        await cb["after_model_callback"](MagicMock(), llm_response("hi"))
         s.instance.send_message.assert_not_awaited()
         s.instance.record_tool_call.assert_not_awaited()
+        s.instance.record_tool_result.assert_not_awaited()
+        s.conversation.record_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_user_and_assistant_turns_are_written_over_rest_once_each(self):
+        """A turn is the conversation itself; it must not depend on listen()."""
+        s = sdk(listening=False)
+        assert await report_user_turn(
+            s, "where is my order", conversation_id="c1", user_id="u1",
+        ) is True
+        out = await callbacks(s)["after_model_callback"](MagicMock(), llm_response("shipped"))
+        assert out is None
+        calls = s.conversation.record_message.await_args_list
+        assert [(c.kwargs["role"], c.kwargs["content"]) for c in calls] == [
+            ("user", "where is my order"), ("assistant", "shipped"),
+        ]
+        assert all(c.kwargs["conversation_id"] == "c1" for c in calls)
+        s.instance.send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_partial_chunks_and_thoughts_are_not_turns(self):
+        s = sdk(listening=False)
+        cb = callbacks(s)
+        partial = SimpleNamespace(partial=True, content=SimpleNamespace(
+            parts=[SimpleNamespace(text="ship")]))
+        await cb["after_model_callback"](MagicMock(), partial)
+        whole = SimpleNamespace(partial=False, content=SimpleNamespace(parts=[
+            SimpleNamespace(text="thinking about it", thought=True),
+            SimpleNamespace(text="shipped"),
+        ]))
+        await cb["after_model_callback"](MagicMock(), whole)
+        calls = s.conversation.record_message.await_args_list
+        assert [c.kwargs["content"] for c in calls] == ["shipped"]
+
+
+class TestWithAStream:
+    @pytest.mark.asyncio
+    async def test_turns_go_on_the_stream_and_not_over_rest(self):
+        s = sdk(listening=True)
+        await report_user_turn(s, "hi", conversation_id="c1", user_id="u1")
+        await callbacks(s)["after_model_callback"](MagicMock(), llm_response("hello"))
+        events = [c.kwargs["event_type"] for c in s.instance.send_message.await_args_list]
+        assert events == ["user_message", "assistant_message"]
+        s.conversation.record_message.assert_not_awaited()
 
 
 class TestAFailingReportNeverBreaksTheRun:

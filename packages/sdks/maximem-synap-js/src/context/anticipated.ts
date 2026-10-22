@@ -101,15 +101,15 @@ export interface AnticipationAttempt {
  * Deliberately swallows its own errors: a fault in the cache must degrade to a
  * network fetch, never fail a retrieval that the server could have answered.
  */
-export function tryServeFromCache(
+export async function tryServeFromCache(
   cache: AnticipationCache,
   scope: Scope,
   params: AnticipationLookupParams,
   maxItems: number,
-): AnticipationAttempt {
+): Promise<AnticipationAttempt> {
   try {
     const scoped = scopeLookupParams(scope, params);
-    const hit = cache.lookup({
+    const hit = await cache.lookupAsync({
       searchQuery: scoped.searchQuery ?? null,
       entityId: scoped.entityId ?? null,
       customerId: scoped.customerId ?? null,
@@ -123,4 +123,15 @@ export function tryServeFromCache(
   } catch {
     return { response: null, hit: null };
   }
+}
+
+/**
+ * How many distinct, non-empty search queries a fetch carried, for the
+ * `context_used` event's `query_count`. Matches the Python SDK and the count
+ * the server itself uses when it answers a fetch: the same query sent twice is
+ * one, and an empty string is none.
+ */
+export function distinctQueryCount(searchQuery: unknown): number {
+  if (!Array.isArray(searchQuery)) return 0;
+  return new Set(searchQuery.filter((q) => typeof q === 'string' && q.length > 0)).size;
 }

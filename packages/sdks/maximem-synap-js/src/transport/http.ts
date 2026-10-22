@@ -164,6 +164,19 @@ export class HttpTransport {
    */
   userContextIsolation: string | undefined = undefined;
 
+  /**
+   * Set by the client to its identity resolution (`initialize()`'s whoami).
+   * Python refuses every call before `initialize()`; here the first request
+   * runs it instead, so a caller who skips it gets the same identity-dependent
+   * behaviour (client-scope cache hits, the B2C check) rather than an error.
+   */
+  identityResolver: (() => Promise<void>) | undefined = undefined;
+
+  /** Resolve identity once, before the first request. Never throws. */
+  async ready(): Promise<void> {
+    if (this.identityResolver !== undefined) await this.identityResolver();
+  }
+
   /** Refuse a customer_id on a B2C instance, at the call site. */
   checkCustomerId(customerId: unknown, where: string): void {
     checkCustomerId(
@@ -198,6 +211,8 @@ export class HttpTransport {
     const spec = ENDPOINTS[name];
     const correlationId = options.correlationId ?? newCorrelationId();
     const idempotent = options.idempotent ?? spec.idempotent;
+    // whoami IS the identity resolution, so it must not wait on itself.
+    if (name !== 'whoami') await this.ready();
 
     let attempt = 0;
     let last: AttemptOutcome | null = null;
