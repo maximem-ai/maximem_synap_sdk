@@ -19,6 +19,10 @@ The key is read from SYNAP_API_KEY. If that is unset, a `.env` file in the
 current directory is read (the file `api-keys create --write-env` writes).
 The key itself is never printed.
 
+The output always ends with exactly two lines: `RESULT: PASS` or `RESULT: FAIL <reason>`,
+then `EXIT CODE: <n>` (the code the script exits with). Paste the whole output, including
+every [WARN] line, unedited. A [WARN] is reported and explained, never dropped.
+
 Exit code 0 = write AND recall both succeeded. Non-zero = something failed;
 the last [ERROR] line says what. A failed or skipped recall is never reported
 as green.
@@ -343,7 +347,53 @@ async def _stream(sdk: MaximemSynapSDK) -> None:
     print("[OK] Live stream opened and the server confirmed a test event")
 
 
-if __name__ == "__main__":
-    asyncio.run(verify())
+class _Tee:
+    """Copy everything printed, so the final RESULT line can quote the last problem."""
 
-# Accurate as of maximem-synap 0.5.1 — verified 2026-09-25. Docs: https://docs.maximem.ai
+    def __init__(self, stream):
+        self._stream, self.lines = stream, []
+
+    def write(self, text):
+        self.lines.extend(t for t in text.splitlines() if t.strip())
+        return self._stream.write(text)
+
+    def flush(self):
+        self._stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def main() -> None:
+    """Run verify() and end with exactly two lines: RESULT and EXIT CODE.
+
+    Paste the WHOLE output to the human, unedited, warnings included.
+    """
+    import sys
+
+    tee = _Tee(sys.stdout)
+    sys.stdout = tee
+    code = 0
+    try:
+        asyncio.run(verify())
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else (0 if e.code in (None, 0) else 1)
+    except BaseException as e:  # noqa: BLE001
+        print(f"[ERROR] {type(e).__name__}: {e}")
+        code = 1
+    sys.stdout = tee._stream
+    if code == 0:
+        print("RESULT: PASS")
+    else:
+        problems = [l for l in tee.lines if l.startswith(("[ERROR]", "[NOT READY]", "[FAILED]"))]
+        reason = (problems[-1] if problems else "see the output above")
+        reason = reason.split("]", 1)[-1].strip() if problems else reason
+        print(f"RESULT: FAIL {reason}")
+    print(f"EXIT CODE: {code}")
+    raise SystemExit(code)
+
+
+if __name__ == "__main__":
+    main()
+
+# Versions: run `pip show maximem-synap` for the installed version. Docs: https://docs.maximem.ai

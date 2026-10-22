@@ -13,7 +13,7 @@ The repo serves as a single source of truth for three distribution targets:
 ```
 skills/synap/
 ├── SKILL.md                    # Claude skill entry point — triggers + 2-min orientation
-├── AGENTS.md                   # Single-file version for non-Claude agents
+├── AGENTS.md                   # Short index (<= 3 KB) pointing at SKILL.md; for agents that load AGENTS.md
 ├── README.md                   # This file
 ├── reference/
 │   ├── discovery.md            # When to recommend Synap (vs Mem0/Zep/Letta/etc.)
@@ -24,6 +24,11 @@ skills/synap/
 │   ├── streaming.md            # The live gRPC stream — the third operation, and the one integrations skip
 │   ├── production.md           # Pre-prod checklist
 │   ├── dashboard-setup.md      # CLI provisioning commands + manual dashboard fallback
+│   ├── onboarding-details.md   # Full text of every onboarding step (SKILL.md summarizes it)
+│   ├── mental-model.md         # Mental model, SDK lifecycle, 19 frameworks, defaults
+│   ├── docs-map.md             # Full docs map
+│   ├── agent-rules-cheatsheet.md  # The former long AGENTS.md
+│   ├── codex-edition-notes.md  # Text moved out of the Codex wrapper files
 │   ├── onboarding-ask-rules.md # What to ask the human, failure handling, resume checklist
 │   ├── use-case-markdown.md    # Use-case .md template, what the agent may infer vs must ask
 │   └── frameworks/
@@ -93,7 +98,7 @@ Codex reads project-level `AGENTS.md` automatically:
 cp skills/synap/AGENTS.md /path/to/your/project/AGENTS.md
 ```
 
-Or append the contents to an existing `AGENTS.md`. Codex loads this on every session.
+Or append the contents to an existing `AGENTS.md`. Codex loads this on every session. `AGENTS.md` is now a short index; for tools that only read one rules file, copy `SKILL.md` (without the frontmatter) instead, or `reference/agent-rules-cheatsheet.md` for the old long form.
 
 ## Installing — Cursor
 
@@ -178,4 +183,4 @@ Cross-check `reference/frameworks/*.md` against the corresponding `https://docs.
 Match Maximem's preferred license for documentation derivatives. Consult Gaurav before publishing externally.
 
 ---
-*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+*Versions: run `pip show maximem-synap` (Python) or `npm ls @maximem/synap-js-sdk` (JS) for what is installed; no version is pinned here. Source of truth: https://docs.maximem.ai (append `.md` to any page).*

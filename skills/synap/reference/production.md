@@ -109,4 +109,4 @@ Full detail: `reference/streaming.md`.
 The canonical version of this checklist with rationale per item: `https://docs.maximem.ai/guides/production-checklist`
 
 ---
-*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+*Versions: run `pip show maximem-synap` (Python) or `npm ls @maximem/synap-js-sdk` (JS) for what is installed; no version is pinned here. Source of truth: https://docs.maximem.ai (append `.md` to any page).*

@@ -22,9 +22,9 @@ answers it. Exit codes: 0 ok, 1 generic, 2 usage, 3 auth, 4 not found, 5 permiss
 | Template | `instances template --output-file usecase.md` | The current use-case template. See `use-case-markdown.md`. |
 | Ask | `onboard ask "<question>"` / `onboard ask --clear` | Lets an open dashboard show that your agent is waiting. Always ask the human in the session too. |
 | Report | `onboard report <step> <status> [--detail TEXT]` | Steps: `use_case_drafted`, `use_case_approved`, `integrating`, `env_written`. Status: `in_progress`, `done`, `failed`. |
-| Create | `instances create --name NAME --relationship b2c\|b2b --from-file usecase.md` | `--relationship` has no safe default: pass what the human confirmed. Also takes `--agent-type`. Starts the build (about 14 minutes). |
+| Create | `instances create --name NAME --relationship b2c\|b2b --from-file usecase.md` | `--relationship` has no safe default: pass what the human confirmed. Also takes `--agent-type`. Starts the build (15 to 20 minutes). |
 | Key | `api-keys create -i <instance_id> --write-env` | Writes `SYNAP_API_KEY` and `SYNAP_INSTANCE_ID` into `./.env` (or the path you give), keeps the file git-ignored, and prints only a masked key. |
-| Wait | `instances wait <instance_id> [--timeout S] [--interval S]` | Prints "attempt 2 of 3, about 6 min left" or "taking longer than usual" (Synap restarts a dead build by itself, up to 3 attempts). Exit 0 ready, 7 timeout, 1 failed (reason and the rebuild command printed). Final JSON has `attempt`, `max_attempts`, `elapsed_seconds`, `estimated_remaining_seconds`, `restartable`. Until it reports ready, runtime writes and fetches (including `verify_synap.py`) are rejected with HTTP 409 `instance_not_ready`. |
+| Wait | `instances wait <instance_id> [--timeout S] [--interval S]` | Run it in the background with output to a log file and poll the log or `onboard status`, so the human can keep talking to you. Usually 15 to 20 minutes. Prints "attempt 2 of 3, about 6 min left" or "taking longer than usual" (Synap restarts a dead build by itself, up to 3 attempts). Exit 0 ready, 7 timeout, 1 failed (reason and the rebuild command printed). Final JSON has `attempt`, `max_attempts`, `elapsed_seconds`, `estimated_remaining_seconds`, `restartable`. Until it reports ready, runtime writes and fetches (including `verify_synap.py`) are rejected with HTTP 409 `instance_not_ready`. |
 | Rebuild | `instances rebuild <instance_id>` | Only after a failed build. Re-runs from the stored use-case (nothing to re-approve), starts a new series of 3 attempts, then `instances wait` again. At most 3 per instance per 24 hours: a 429 says so with the server's message; a 409 means the build is not failed. |
 | Verify | `python scripts/verify_synap.py` | Not a CLI command. Real write then recall. Waits the retry time the server gives while the build runs (message "The memory architecture is still being built: waiting N s"); exit 2 = still building when time ran out, 3 = the build failed (run `instances rebuild`). |
 | Sign out | `auth logout` | The LAST step, only if verify passed. Revokes the setup key on the server and removes it from `~/.config/synap`, so nobody can use it later; the app keeps its own key in `.env`. Send all `onboard report` events before it: afterwards there is no profile to resume from. If it fails, say so plainly; the key expires by itself after 7 days. |
@@ -41,7 +41,7 @@ answers it. Exit codes: 0 ok, 1 generic, 2 usage, 3 auth, 4 not found, 5 permiss
   - **B2B** (`strict`): memory is per tenant. Each `user_id` lives under a `customer_id`, and `customer_id` is
     required.
   - **Which one am I on?** `GET /api/v1/auth/whoami` returns `user_context_isolation`. Read it, do not guess.
-- **The build takes about 14 minutes.** Say so before `instances create`.
+- **The build takes 15 to 20 minutes.** Say so before `instances create`.
 - **Roles:** Owner and Admin can create instances and keys; Member is read-only.
 - **The instance is resolved from the API key.** You do not pass an instance ID on each call. Set
   `SYNAP_INSTANCE_ID` as an env var if you want to pin it; never as an `instance_id=` constructor argument.
@@ -73,5 +73,5 @@ agent running. Everything above can be done at **https://synap.maximem.ai**:
 Then install the SDK, integrate, and run `python scripts/verify_synap.py`.
 
 ---
-> **Accurate as of** `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25 (SDK facts). The onboarding commands follow `docs/internal/agent_onboarding_contract.md` and were not yet verified against a released CLI.
+> Versions: run `pip show maximem-synap` (Python) or `npm ls @maximem/synap-js-sdk` (JS) for what is installed; no version is pinned here. The onboarding commands follow `docs/internal/agent_onboarding_contract.md` and were not yet verified against a released CLI.
 > Live, changing detail: https://docs.maximem.ai (Mintlify serves a clean `.md` for any page).

@@ -60,4 +60,4 @@ In every case the app still calls `sdk.instance.listen()` at startup and
 If the user has a custom or unsupported framework, fall back to `reference/ingestion.md` and `reference/context-fetch.md` — every integration is a thin wrapper over those two primitives.
 
 ---
-*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+*Versions: run `pip show maximem-synap` (Python) or `npm ls @maximem/synap-js-sdk` (JS) for what is installed; no version is pinned here. Source of truth: https://docs.maximem.ai (append `.md` to any page).*

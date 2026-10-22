@@ -20,13 +20,15 @@ fill a gap with a guess. Write the literal text `not stated` instead.
 | Section | Required | May the agent infer it from code? | Rule |
 |---|---|---|---|
 | Agent Objective | Yes | Yes: README, prompts, entry points | Quote what you found. Ask if the repo does not say what "remembering well" means. |
-| Target Users | Yes | **No. Always ask.** | Includes B2C vs B2B. Show the evidence (user model, tenant or org tables, auth) and still ask. Immutable after create; must match `--relationship`. |
+| Target Users | Yes | **No. Always ask.** | Includes B2C vs B2B and what identifies a returning person (a stable user id; none means per-session memory only, which the goal text must not contradict). Show the evidence (user model, tenant or org tables, auth) and still ask. Immutable after create; must match `--relationship`. |
 | Task Examples | Yes | Partly: real utterances from tests, fixtures, prompts | Use real examples found in the repo, marked as such, and ask the human for the ones that matter. Never invent utterances. |
 | Behavioral Guidelines | Optional | Only if the code states them | Otherwise `not stated`. |
 | Role Descriptions | Optional | Only if the code states who the client, customer and user are | Otherwise `not stated`; ask if tenancy is unclear. |
-| Compliance & Data Sensitivity | Optional | **No. Always ask.** | Do not assume "no PII". Unanswered means `not stated`, and ask again before approval. |
+| Compliance & Data Sensitivity | Optional | **No. Always ask.** | Write the human's answer verbatim. Do not assume "no PII". For health, financial or children's data follow the sensitive-data rule in `onboarding-ask-rules.md`. Unanswered means `not stated`, and ask again before approval. |
 | Memory Priorities | Optional | **No. Always ask.** | The human's words: what to prioritize, deprioritize, or never remember. |
 | Additional Context | Optional | Yes, for deployment and integrations visible in code | Otherwise `not stated`. |
+
+The file you show is the file you upload: print its full contents in chat, quote its `shasum -a 256`, and if you change one character after approval, ask again.
 
 A draft with `not stated` in it is fine to show. A draft with an invented answer is not. Show the whole file to
 the human and wait for an explicit yes before `instances create`. Section names above come from
@@ -60,5 +62,5 @@ the human and wait for an explicit yes before `instances create`. Section names 
 - If the agent is multi-domain, list the domains; the MACA can weight them differently.
 
 ---
-> **Accurate as of** `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25.
+> Versions: run `pip show maximem-synap` (Python) or `npm ls @maximem/synap-js-sdk` (JS) for what is installed; no version is pinned here.
 > MACA / memory-architecture detail: https://docs.maximem.ai/concepts/memory-architecture

@@ -2,12 +2,12 @@
 
 > **Read this next:** [Memory scopes (B2C vs B2B)](https://docs.maximem.ai/concepts/memory-scopes.md); [Memory Architecture and the use-case file](https://docs.maximem.ai/concepts/memory-architecture.md); [CLI overview](https://docs.maximem.ai/cli/overview.md); [Error handling](https://docs.maximem.ai/sdk/error-handling.md). The live docs win over this file.
 
-Read this before step 4 of the procedure in `SKILL.md`. Commands are in `dashboard-setup.md`.
+Read this before step 4 of the procedure in `SKILL.md`. Step 0 (learn Synap) comes first. Commands are in `dashboard-setup.md`.
 
 ## The rule
 
 Ask the human whenever you cannot know the answer from the code. Never guess. A wrong guess costs a new
-instance and about 14 minutes, and two of the answers (B2C or B2B, and the use-case text) cannot be changed
+instance and 15 to 20 minutes, and two of the answers (B2C or B2B, and the use-case text) cannot be changed
 after create.
 
 ## How to ask
@@ -21,16 +21,39 @@ after create.
   When answered, run `onboard ask --clear`.
 - Repeat the answer back in the draft, in the human's words.
 
-## The questions (all required, in this order)
+## The questions (all required, in this order, all BEFORE you draft the use-case)
 
 1. **Who uses the agent?** B2C (each end user has their own private memory) or B2B (users belong to a customer
    organization and memory is per organization). *Immutable once the instance exists.* If the repo shows both
    patterns, or neither, say so and ask.
-2. **Compliance and sensitive data.** Does the agent see health, financial, children's or other regulated data?
-   Any rules to follow (GDPR, HIPAA, SOC 2, data residency)? Which fields are sensitive?
-3. **What matters most to remember?** Top two or three kinds of facts, preferences or events that make the
+2. **What identifies a returning person in this app (a stable user id)?** If there is none, memory can only be
+   per session. Show what the code has (a login id, an account id, a device id, only a random session id) and
+   still ask. The answer maps to the SDK scope:
+   - **B2C:** that id is the `user_id`, and a `customer_id` is never sent.
+   - **B2B:** the organization's id is the `customer_id` and the person's id is the `user_id`; both are required.
+   - **No stable id (a session id as the user id):** each visit is a new person, so memory cannot recall a
+     returning user. If the approved goal is "remember returning users" (or anything across sessions), say so
+     plainly BEFORE approval, offer the options (add a stable id, an anonymous device id, or accept per-session
+     memory and change the goal text), and ask again. Do not draft a use-case the integration cannot serve.
+3. **Compliance and sensitive data.** Does the agent see health, financial, children's or other regulated data?
+   Any rules to follow (GDPR, HIPAA, SOC 2, data residency)? Which fields are sensitive? See the sensitive-data
+   rule below.
+4. **What matters most to remember?** Top two or three kinds of facts, preferences or events that make the
    agent better the next time.
-4. **What must never be stored?** Secrets, payment details, health details, anything else.
+5. **What must never be stored?** Secrets, payment details, health details, anything else.
+
+### Sensitive-data rule (general)
+
+When the human mentions health, financial, children's or other personal data, or answers "store everything" for
+such a domain:
+
+1. Read `https://docs.maximem.ai/guides/pii-protection.md` before approval (and `/dashboard/pii-and-data-controls`
+   if you need the controls' names).
+2. Tell the human the PII options in plain words: what can be hidden or removed before storage, what Synap can
+   hold, and what is left to their own code. Use only what that page says.
+3. Require an explicit yes to the "store everything" choice after you have said what it means ("passwords,
+   card numbers and clinical details typed into the chat would be remembered").
+4. Write the human's answer verbatim in the use-case Compliance and Data Sensitivity section, in their words.
 
 Anything else you cannot resolve from code (agent purpose, who the end users are, which framework when the repo
 has two) is also a question. Do not ask what the code answers (language, framework, package manager).
@@ -43,7 +66,7 @@ has two) is also a question. Do not ask what the code answers (language, framewo
 - The human changes an answer after approval but before create: redraft, show it, get approval again, and
   report `use_case_drafted` again.
 - After `instances create` nothing in the use-case or B2C/B2B can change. A change means a new instance, which
-  needs the human's explicit yes (another 15 minutes of build).
+  needs the human's explicit yes (another 15 to 20 minute build).
 
 ## Reporting progress
 
@@ -51,8 +74,8 @@ has two) is also a question. Do not ask what the code answers (language, framewo
 
 | When | Command |
 |---|---|
-| Draft shown | `onboard report use_case_drafted done` |
-| Human said yes to the exact text you will upload | `onboard report use_case_approved done` |
+| Draft shown in chat (report AFTER showing it) | `onboard report use_case_drafted done` |
+| Human said yes to the exact file you will upload (shown in full, hash quoted) | `onboard report use_case_approved done` |
 | Create finished, you start coding | `onboard report integrating in_progress` |
 | Integration written | `onboard report integrating done` |
 | Key is in `.env` | `onboard report env_written done` |
@@ -65,7 +88,7 @@ so reporting cannot make those look done, and you must not try. Never put keys, 
 ## Announce in the session
 
 The human should never have to open the dashboard to know what happened. Say, in the chat, at each point: the
-use-case you will upload, "instance created: <name> (<id>), the build takes about 14 minutes, I am integrating
+use-case you will upload, "instance created: <name> (<id>), the build takes 15 to 20 minutes, I am integrating
 meanwhile", "key saved to `.env` (masked: synap_...abcd)", and at the end the result: what was created, the
 **verbatim** `verify_synap.py` output (the write and the recalled text), and every file you changed. You may add
 one line: "Optional: view it in your dashboard at https://synap.maximem.ai". Never make it a step.

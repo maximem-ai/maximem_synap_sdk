@@ -227,6 +227,6 @@ This is what most integrations do under the hood.
 `https://docs.maximem.ai/sdk/context-fetch`
 
 ---
-*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+*Versions: run `pip show maximem-synap` (Python) or `npm ls @maximem/synap-js-sdk` (JS) for what is installed; no version is pinned here. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
 
 > While a new instance is still building, fetches get HTTP 409 `instance_not_ready`: degrade to no memory and continue, see `sdk-setup.md`.

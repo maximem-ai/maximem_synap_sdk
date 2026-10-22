@@ -76,5 +76,5 @@ client so a lost memory is visible, not silent. Tune timeouts server-side via
 `https://docs.maximem.ai/integrations/mcp`
 
 ---
-> **Accurate as of** `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25.
+> Versions: run `pip show maximem-synap` (Python) or `npm ls @maximem/synap-js-sdk` (JS) for what is installed; no version is pinned here.
 > Hosted MCP server: `https://synap-mcp.maximem.ai/mcp`.
