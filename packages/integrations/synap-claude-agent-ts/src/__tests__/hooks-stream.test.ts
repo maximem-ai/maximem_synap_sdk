@@ -178,10 +178,23 @@ describe('the assistant turn, which is what wakes anticipation', () => {
     expect(stream).toEqual([]);
   });
 
-  it('never writes the assistant turn over REST', async () => {
-    // There was no REST write for the assistant before. Adding one would start
-    // persisting data an existing caller never asked for.
-    const { sdk, recordMessage } = makeSdk({ listening: false });
+  it('writes the assistant turn over REST when the stream cannot carry it', async () => {
+    // The reply is part of the conversation. Stream-only meant it was lost
+    // for every caller who never opened a stream.
+    const { sdk, recordMessage, stream } = makeSdk({ listening: false });
+    await fire(hooksFor(sdk), 'Stop', {
+      hook_event_name: 'Stop', stop_hook_active: false,
+      last_assistant_message: 'here is the answer',
+    });
+    expect(stream).toEqual([]);
+    expect(recordMessage).toHaveBeenCalledOnce();
+    expect(recordMessage.mock.calls[0]).toMatchObject([{
+      conversation_id: 'conv-1', role: 'assistant', content: 'here is the answer', user_id: 'u1',
+    }]);
+  });
+
+  it('on the stream it is not also written over REST', async () => {
+    const { sdk, recordMessage } = makeSdk({ listening: true });
     await fire(hooksFor(sdk), 'Stop', {
       hook_event_name: 'Stop', stop_hook_active: false,
       last_assistant_message: 'here is the answer',
@@ -189,15 +202,16 @@ describe('the assistant turn, which is what wakes anticipation', () => {
     expect(recordMessage).not.toHaveBeenCalled();
   });
 
-  it('honours recordUserPrompts: false', async () => {
-    // Both halves of the conversation are persisted server-side, so the one
-    // switch governs both. Recording one and not the other would be strange.
+  it('recordUserPrompts: false does not suppress the assistant turn', async () => {
+    // It gates the user's prompt. It used to gate the reply too, which also
+    // switched off the event that wakes anticipation.
     const { sdk, stream } = makeSdk({ listening: true });
     await fire(hooksFor(sdk, { recordUserPrompts: false }), 'Stop', {
       hook_event_name: 'Stop', stop_hook_active: false,
       last_assistant_message: 'here is the answer',
     });
-    expect(stream).toEqual([]);
+    expect(sent(stream, 'send_message')).toHaveLength(1);
+    expect(sent(stream, 'send_message')[0]).toMatchObject({ role: 'assistant' });
   });
 });
 

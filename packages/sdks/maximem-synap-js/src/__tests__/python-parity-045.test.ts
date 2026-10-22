@@ -172,11 +172,11 @@ describe('api_base_url, the name Python uses', () => {
     }) as unknown as typeof fetch;
 
     const viaPythonName = new SynapClient({
-      apiKey: 'synap_x', instanceId: 'inst_00000000000000ab', _force_new: true,
+      apiKey: 'synap_x', clientId: 'cli_test', instanceId: 'inst_00000000000000ab', _force_new: true,
       api_base_url: 'https://example.invalid', fetchImpl: capture,
     });
     const viaJsName = new SynapClient({
-      apiKey: 'synap_x', instanceId: 'inst_00000000000000ac', _force_new: true,
+      apiKey: 'synap_x', clientId: 'cli_test', instanceId: 'inst_00000000000000ac', _force_new: true,
       baseUrl: 'https://example.invalid', fetchImpl: capture,
     });
 

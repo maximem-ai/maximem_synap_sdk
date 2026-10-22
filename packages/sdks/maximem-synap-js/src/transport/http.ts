@@ -164,8 +164,26 @@ export class HttpTransport {
    */
   userContextIsolation: string | undefined = undefined;
 
-  /** Refuse a customer_id on a B2C instance, at the call site. */
-  checkCustomerId(customerId: unknown, where: string): void {
+  /**
+   * Set by the client to its identity resolution (`initialize()`'s whoami).
+   * Python refuses every call before `initialize()`; here the first request
+   * runs it instead, so a caller who skips it gets the same identity-dependent
+   * behaviour (client-scope cache hits, the B2C check) rather than an error.
+   */
+  identityResolver: (() => Promise<void>) | undefined = undefined;
+
+  /** Resolve identity once, before the first request. Never throws. */
+  async ready(): Promise<void> {
+    if (this.identityResolver !== undefined) await this.identityResolver();
+  }
+
+  /**
+   * Refuse a customer_id on a B2C instance, at the call site. Resolves identity
+   * first: the isolation comes from whoami, so on the first call of a client
+   * that skipped initialize() the check would otherwise see nothing and pass.
+   */
+  async checkCustomerId(customerId: unknown, where: string): Promise<void> {
+    await this.ready();
     checkCustomerId(
       this.userContextIsolation, customerId, where, this.#credentials.instanceId,
     );
@@ -198,6 +216,8 @@ export class HttpTransport {
     const spec = ENDPOINTS[name];
     const correlationId = options.correlationId ?? newCorrelationId();
     const idempotent = options.idempotent ?? spec.idempotent;
+    // whoami IS the identity resolution, so it must not wait on itself.
+    if (name !== 'whoami') await this.ready();
 
     let attempt = 0;
     let last: AttemptOutcome | null = null;
@@ -329,26 +349,35 @@ export function isOutcomeUnknown(error: unknown): boolean {
   if (error instanceof InsufficientCreditsError) return false;
   if (error instanceof ContextNotFoundError) return false;
 
+  // Connection-level failures mean the request never reached the application.
+  // Checked before the class: since 0.5.13 they are NetworkTimeoutErrors too,
+  // and they must stay safe to retry.
+  if (isConnectionRefusal(error)) return false;
+
   // Timeouts are the ambiguous case: the request may have been handled and
   // only the response lost.
   if (error instanceof NetworkTimeoutError) return true;
 
-  // Connection-level failures mean the request never reached the application.
-  if (isConnectionRefusal(error)) return false;
-
   return true;
 }
 
+const CONNECTION_REFUSAL_CODES = new Set([
+  'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'EHOSTUNREACH',
+]);
+
+/**
+ * A refusal code anywhere on the cause chain. fetch nests the socket error
+ * under its own, and a SynapError carries a `code` of its own
+ * ('network_timeout'), so the walk cannot stop at the first `code` it sees.
+ */
 function isConnectionRefusal(error: unknown): boolean {
-  const code = (error as { cause?: { code?: string }; code?: string })?.cause?.code
-    ?? (error as { code?: string })?.code;
-  return (
-    code === 'ECONNREFUSED' ||
-    code === 'ENOTFOUND' ||
-    code === 'EAI_AGAIN' ||
-    code === 'ECONNRESET' ||
-    code === 'EHOSTUNREACH'
-  );
+  let cur: unknown = error;
+  for (let depth = 0; depth < 4 && cur !== null && typeof cur === 'object'; depth += 1) {
+    const code = (cur as { code?: unknown }).code;
+    if (typeof code === 'string' && CONNECTION_REFUSAL_CODES.has(code)) return true;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 function toTransportError(error: unknown, correlationId: string): SynapError {
@@ -356,6 +385,16 @@ function toTransportError(error: unknown, correlationId: string): SynapError {
   const name = (error as { name?: string })?.name;
   if (name === 'AbortError' || name === 'TimeoutError') {
     return new NetworkTimeoutError('Request timed out', { correlationId, cause: error });
+  }
+  // A refused, unresolvable or dropped connection is a NetworkTimeoutError,
+  // as Python raises it (httpx ConnectError and RemoteProtocolError), so one
+  // `catch` handles "could not reach Synap" in both SDKs. Until 0.5.13 these
+  // were ServiceUnavailableErrors, the class for a 5xx the server sent.
+  if (isConnectionRefusal(error)) {
+    return new NetworkTimeoutError(
+      `Connection failed: ${(error as Error)?.message ?? String(error)}`,
+      { correlationId, cause: error },
+    );
   }
   return new ServiceUnavailableError(
     `Network request failed: ${(error as Error)?.message ?? String(error)}`,

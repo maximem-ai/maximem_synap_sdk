@@ -31,7 +31,12 @@ from synap_integrations_common import SynapIntegrationError
 def _make_response(formatted: str | None, available: bool = True):
     resp = MagicMock()
     resp.available = available
-    resp.formatted_context = formatted
+    # `formatted_context` is the compaction plus the turns after it. The
+    # instructions take only the compaction (`context_block`): the SDK already
+    # sends those turns.
+    resp.formatted_context = f"{formatted}\nuser: the recent turn" if formatted else formatted
+    resp.context_block = formatted
+    resp.history_block = None
     return resp
 
 
@@ -187,6 +192,35 @@ class TestHappyPath:
             conversation_id="conv_abc",
             style="structured",
         )
+
+
+class TestNoDuplicateTurns:
+    @pytest.mark.asyncio
+    async def test_the_recent_turns_in_formatted_context_are_not_sent(self):
+        """The SDK sends the recent turns in the input; the instructions carry
+        the compaction only."""
+        sdk = _fake_sdk(formatted="## Conversation so far (compacted)\nTrip to Lisbon.")
+        out = await synap_st_instructions(sdk, "conv_abc", system="sys")(MagicMock(), MagicMock())
+        assert "Trip to Lisbon." in out
+        assert "the recent turn" not in out
+
+    @pytest.mark.asyncio
+    async def test_before_the_first_compaction_nothing_is_added(self):
+        """No compaction means `formatted_context` is only recent turns, which
+        the SDK already sends."""
+        sdk = _fake_sdk(formatted=None)
+        sdk.conversation.context.get_context_for_prompt.return_value.formatted_context = (
+            "user: hi\nassistant: hello")
+        out = await synap_st_instructions(sdk, "conv_abc", system="sys")(MagicMock(), MagicMock())
+        assert out == "sys"
+
+    @pytest.mark.asyncio
+    async def test_history_search_excerpts_come_with_the_compaction(self):
+        sdk = _fake_sdk(formatted="## Conversation so far (compacted)\nTrip.")
+        sdk.conversation.context.get_context_for_prompt.return_value.history_block = (
+            "Earlier: the budget was 2,400 EUR.")
+        out = await synap_st_instructions(sdk, "conv_abc")(MagicMock(), MagicMock())
+        assert "2,400 EUR" in out
 
 
 # ---------------------------------------------------------------------------

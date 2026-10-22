@@ -11,9 +11,12 @@ from synap_integrations_common import SynapIntegrationError
 
 
 def _make_response(formatted: str | None, available: bool):
+    """``formatted`` is the compaction block; the response also carries recent turns."""
     resp = MagicMock()
     resp.available = available
-    resp.formatted_context = formatted
+    resp.formatted_context = f"{formatted}\n\nuser: a recent turn" if formatted else None
+    resp.context_block = formatted
+    resp.history_block = None
     return resp
 
 
@@ -46,13 +49,35 @@ class TestValidation:
 class TestCacheHit:
     @pytest.mark.asyncio
     async def test_returns_combined_instructions(self):
-        sdk = _fake_sdk(formatted="User is VIP.")
+        sdk = _fake_sdk(formatted="## Conversation so far (compacted, 9 turns)\nUser is VIP.")
         cb = synap_st_instructions(sdk, "conv_abc", instructions="You are helpful.")
         out = await cb()
         assert "<synap_short_term_context>" in out
         assert "User is VIP." in out
         assert "</synap_short_term_context>" in out
         assert "You are helpful." in out
+
+    @pytest.mark.asyncio
+    async def test_adds_the_compaction_block_and_never_the_recent_turns(self):
+        """Agno sends its own history, so the recent turns would be sent twice."""
+        sdk = _fake_sdk(formatted="## Conversation so far (compacted, 9 turns)\nlikes tea")
+        out = await synap_st_instructions(sdk, "conv_abc", instructions="Hi.")()
+        assert "likes tea" in out
+        assert "a recent turn" not in out
+
+    @pytest.mark.asyncio
+    async def test_no_compaction_yet_adds_nothing(self):
+        sdk = _fake_sdk(formatted=None, available=True)
+        assert (await synap_st_instructions(sdk, "conv_abc", instructions="Hi.")()) == "Hi."
+
+    @pytest.mark.asyncio
+    async def test_adds_nothing_when_the_hooks_already_spliced_the_history(self):
+        sdk = _fake_sdk(formatted="## Conversation so far (compacted, 9 turns)\nlikes tea")
+        run_context = MagicMock()
+        setattr(run_context, "_synap_history_spliced", True)
+        out = await synap_st_instructions(sdk, "conv_abc", instructions="Hi.")(run_context=run_context)
+        assert out == "Hi."
+        sdk.conversation.context.get_context_for_prompt.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_passes_conv_and_style(self):

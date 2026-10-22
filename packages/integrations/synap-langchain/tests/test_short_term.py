@@ -23,9 +23,14 @@ from synap_integrations_common import SynapIntegrationError
 
 
 def _make_response(formatted: str | None, available: bool):
+    """`formatted` is the compaction. `formatted_context` is what the server
+    sends beside it: the compaction AND the recent turns, which the framework
+    already sends, so it must never reach the prompt."""
     resp = MagicMock()
     resp.available = available
-    resp.formatted_context = formatted
+    resp.context_block = formatted
+    resp.history_block = None
+    resp.formatted_context = f"{formatted}\nRECENT-TURNS-DUPLICATE" if formatted else None
     return resp
 
 
@@ -72,6 +77,42 @@ class TestMessageValidation:
         sdk = _fake_sdk()
         with pytest.raises(ValueError, match="non-empty conversation_id"):
             synap_st_message(sdk, "  ")
+
+
+# ---------------------------------------------------------------------------
+# The block is the compaction, never the recent turns
+# ---------------------------------------------------------------------------
+
+
+class TestNoDuplicatedTurns:
+    @pytest.mark.asyncio
+    async def test_runnable_returns_the_compaction_not_the_recent_turns(self):
+        sdk = _fake_sdk(formatted="## Conversation so far (compacted 1x)\nThey asked about refunds.")
+        out = await synap_st_runnable(sdk, "conv_abc").ainvoke({})
+        assert "They asked about refunds." in out
+        assert "RECENT-TURNS-DUPLICATE" not in out
+
+    @pytest.mark.asyncio
+    async def test_message_factory_returns_the_compaction_not_the_recent_turns(self):
+        sdk = _fake_sdk(formatted="## Conversation so far (compacted 1x)\nThey asked about refunds.")
+        msg = await synap_st_message(sdk, "conv_abc", system="Be brief.")()
+        assert "They asked about refunds." in msg.content
+        assert "RECENT-TURNS-DUPLICATE" not in msg.content
+
+    @pytest.mark.asyncio
+    async def test_the_searched_excerpts_come_with_it(self):
+        sdk = _fake_sdk(formatted="## Conversation so far (compacted 1x)\nsummary")
+        sdk.conversation.context.get_context_for_prompt.return_value.history_block = "EXCERPT"
+        out = await synap_st_runnable(sdk, "conv_abc").ainvoke({})
+        assert out.index("summary") < out.index("EXCERPT")
+
+    @pytest.mark.asyncio
+    async def test_no_compaction_yet_adds_nothing(self):
+        """Available, with recent turns, but not compacted: the framework's
+        own messages are the record, so there is nothing to add."""
+        sdk = _fake_sdk(formatted=None, available=True)
+        sdk.conversation.context.get_context_for_prompt.return_value.formatted_context = "recent turns"
+        assert await synap_st_runnable(sdk, "conv_abc").ainvoke({}) == ""
 
 
 # ---------------------------------------------------------------------------

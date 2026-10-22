@@ -1,8 +1,11 @@
 """Synap short-term context for OpenAI Agents SDK.
 
-Mirrors the LangGraph template: a single thin wrapper around
-``sdk.conversation.context.get_context_for_prompt``. Quality contract is
-identical to the LangGraph adapter (see synap_langgraph.short_term).
+A thin wrapper around ``sdk.conversation.context.get_context_for_prompt``.
+It adds Synap's compaction of the conversation to the instructions, and
+nothing before the first compaction: the Agents SDK already sends the recent
+turns in the input, and ``formatted_context`` would send them twice. To also
+replace the SDK's own earlier turns with Synap's, run with
+``SynapRunHooks.run_kwargs()``.
 
 OpenAI Agents accepts ``Agent(instructions=...)`` where ``instructions``
 can be a string OR an async callable receiving ``(context, agent)`` and
@@ -80,8 +83,11 @@ async def _fetch_st_block(
         return ""
     if not getattr(response, "available", False):
         return ""
-    formatted = getattr(response, "formatted_context", None)
-    return (formatted or "").strip()
+    # `formatted_context` ends with the turns after the compaction, and the
+    # SDK sends those itself in the input. Only the compaction (and the earlier
+    # turns history search matched) belong in the instructions.
+    parts = [getattr(response, "context_block", None), getattr(response, "history_block", None)]
+    return "\n\n".join(p.strip() for p in parts if isinstance(p, str) and p.strip())
 
 
 def _compose(

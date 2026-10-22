@@ -13,8 +13,11 @@ Context-engineering plug points on a normal MAF agent:
   ``agent_framework.mem0.Mem0ContextProvider``.
 - :class:`SynapHistoryProvider` — a ``HistoryProvider``. Persists the
   conversation message log to Synap and loads it back.
-- :class:`SynapShortTermContextProvider` — compacted conversation history,
-  refreshed each turn.
+- :class:`SynapShortTermContextProvider` — Synap's compaction of the
+  conversation, refreshed each turn.
+- :class:`SynapCompactionMiddleware` — a ``ChatMiddleware`` that sends the model
+  Synap's compaction in place of the history provider's earlier turns.
+  ``SynapContextProvider`` adds it to every run.
 
 ::
 
@@ -70,6 +73,7 @@ working on ``>=1.0``.
 
 from typing import TYPE_CHECKING, Any
 
+from synap_microsoft_agent.compaction import SynapCompactionMiddleware
 from synap_microsoft_agent.context_provider import SynapContextProvider
 from synap_microsoft_agent.history_provider import SynapHistoryProvider
 from synap_microsoft_agent.short_term import SynapShortTermContextProvider
@@ -120,6 +124,7 @@ __all__ = [
     "SynapContextProvider",
     "SynapHistoryProvider",
     "SynapShortTermContextProvider",
+    "SynapCompactionMiddleware",
     # Harness surfaces
     "SynapMemoryStore",
     "SynapMemoryContextProvider",
