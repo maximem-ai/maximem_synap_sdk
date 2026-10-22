@@ -14,6 +14,7 @@
  */
 
 import type { Json, RawContext } from './types.js';
+import { isComplete, turnsAfter } from '../cache/short-term-store.js';
 import type { ShortTermStore, ShortTermTurn } from '../cache/short-term-store.js';
 import { getEnv } from '../util/env.js';
 
@@ -90,7 +91,32 @@ export function overlayLocalRecentTurns(
     // regardless of this switch.
     if (existing !== null && !verbatimOverlayEnabled(configured)) return;
 
-    const localTurns = budgetRecentTurns(entry.recentTurns);
+    // Which turns the tail is built from. The local list replaces the
+    // server's only when it is known to be the whole conversation and to
+    // follow the same summary the server sent. Otherwise the server's turns
+    // stand, and the local list adds only what comes after them. A process
+    // that has just restarted holds one turn, and replacing the server's list
+    // with it dropped every turn before the restart.
+    const serverCompaction = existing === null ? null : existing['compaction_id'];
+    const localIsWhole =
+      isComplete(entry) && (!serverCompaction || serverCompaction === entry.compactionId);
+    let sourceTurns: ShortTermTurn[] = entry.recentTurns;
+    if (existing !== null && !localIsWhole) {
+      const raw = Array.isArray(existing['recent_turns']) ? existing['recent_turns'] : [];
+      const serverTurns: ShortTermTurn[] = (raw as Array<Record<string, unknown>>).map((t) => ({
+        role: String(t['role'] ?? 'user'),
+        content: String(t['content'] ?? ''),
+        timestamp: String(t['timestamp'] ?? ''),
+      }));
+      sourceTurns = [...serverTurns, ...turnsAfter(entry.recentTurns, serverTurns)];
+    }
+    // Role, text and time only, as Python sends: the server's id for a turn is
+    // bookkeeping for the store, not part of the response.
+    const localTurns = budgetRecentTurns(sourceTurns).map((t) => ({
+      role: t.role,
+      content: t.content,
+      timestamp: t.timestamp,
+    }));
 
     // `x || fallback`, not `??`, matching Python: the server sends '' and {}
     // for absent fields rather than null, and those must not win over a local

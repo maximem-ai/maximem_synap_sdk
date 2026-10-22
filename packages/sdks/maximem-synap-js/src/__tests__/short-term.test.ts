@@ -235,8 +235,20 @@ describe('read-your-writes, end to end', () => {
     await c.shutdown();
   });
 
-  it('buffers every message of a batch', async () => {
-    const c = client([]);
+  /** A server that answers a batch in its real shape: stored rows, and failures by index. */
+  function batchClient(results: unknown[], errors: unknown[] = []) {
+    return new SynapClient({
+      apiKey: 'k',
+      _force_new: true,
+      fetchImpl: (async (url: string) =>
+        String(url).includes('/messages/batch')
+          ? json({ total: results.length + errors.length, results, errors })
+          : json({ context: { facts: [] } })) as unknown as typeof fetch,
+    });
+  }
+
+  it('buffers every message of a batch the server stored', async () => {
+    const c = batchClient([{ message_id: 'm1' }, { message_id: 'm2' }]);
     await c.conversation.record_messages_batch([
       { conversation_id: UUID, user_id: 'u1', customer_id: 'c1', role: 'user', content: 'one' },
       { conversation_id: UUID, user_id: 'u1', customer_id: 'c1', role: 'assistant', content: 'two' },
@@ -244,6 +256,20 @@ describe('read-your-writes, end to end', () => {
     const ctx = await c.conversation.context.fetch({ conversation_id: UUID });
     const turns = (ctx.conversation_context?.['recent_turns'] ?? []) as Array<{ content: string }>;
     expect(turns.map((t) => t.content)).toEqual(['one', 'two']);
+    await c.shutdown();
+  });
+
+  it('does not buffer the message of a batch the server refused', async () => {
+    // This used to buffer every body, so a refused message appeared in the
+    // caller's next prompt as if it had been said.
+    const c = batchClient([{ message_id: 'm1' }], [{ index: 0, error: 'nope' }]);
+    await c.conversation.record_messages_batch([
+      { conversation_id: UUID, user_id: 'u1', customer_id: 'c1', role: 'user', content: 'refused' },
+      { conversation_id: UUID, user_id: 'u1', customer_id: 'c1', role: 'assistant', content: 'stored' },
+    ]);
+    const ctx = await c.conversation.context.fetch({ conversation_id: UUID });
+    const turns = (ctx.conversation_context?.['recent_turns'] ?? []) as Array<{ content: string }>;
+    expect(turns.map((t) => t.content)).toEqual(['stored']);
     await c.shutdown();
   });
 });

@@ -51,6 +51,12 @@ function emptyCtx(): FetchedContext {
     conversationContext: null,
     source: 'cloud',
     correlationId: 'corr-x',
+    bundleId: '',
+    servedItemIds: [],
+    sourceBundleIds: [],
+    totalTokens: 0,
+    assemblySource: 'cloud',
+    cacheHit: false,
   };
 }
 
@@ -84,6 +90,12 @@ function richCtx(): FetchedContext {
     },
     source: 'cloud',
     correlationId: 'corr-1',
+    bundleId: '',
+    servedItemIds: [],
+    sourceBundleIds: [],
+    totalTokens: 0,
+    assemblySource: 'cloud',
+    cacheHit: false,
   };
 }
 

@@ -16,19 +16,21 @@ nothing to work with, so every fetch stayed a cold retrieval.
 
 Two rules hold throughout.
 
-*Silent without a stream.* Everything here needs an active
-``sdk.instance.listen()``. Without one every hook is a no-op, so adding them
-changes nothing for someone who has not opted into streaming. Nothing here
-writes over REST either: this package has never recorded conversation turns, and
-a hook that quietly started doing so would double-extract against the stream and
-bill for turns the caller never asked to store.
+*Turns are always written; the rest needs a stream.* The user and assistant
+turns go through ``record_turn``: on the stream while ``sdk.instance.listen()``
+is running, otherwise over REST (``conversation.record_message``), never both.
+A turn is the conversation itself, and without it Synap has nothing to compact
+and the SDK nothing to search. The REST write needs a conversation id, which is
+Agno's ``session_id`` unless ``conversation_id=`` overrides it; a run with
+neither writes no turn without a stream. Tool calls, tool results and reasoning
+are stream-only: without ``listen()`` they are not sent.
 
 *Never raises.* Agno logs and continues when a hook raises, but a hook that
 throws inside a guardrail chain is still a hazard, and telemetry has no business
 interrupting a run. ``stream_events`` swallows everything by design and the
 bridge around it is wrapped too.
 
-## What goes on the stream
+## What is reported
 
 ===================  ==========================================================
 Event                Where it comes from
@@ -80,10 +82,10 @@ from typing import Any, Callable, Dict, List, Optional
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import run_async
 from synap_integrations_common.stream_events import (
+    record_turn,
     report_reasoning,
     report_tool_call,
     report_tool_result,
-    report_turn,
 )
 
 logger = logging.getLogger(__name__)
@@ -153,7 +155,7 @@ async def _report_input(
         if not content:
             content = _text(getattr(run_input, "input_content", None))
     if content:
-        await report_turn(sdk, role="user", content=content, **ids)
+        await record_turn(sdk, role="user", content=content, **ids)
 
 
 async def _report_output(
@@ -202,7 +204,7 @@ async def _report_output(
     # reads it as the cue to predict the next one.
     content = _text(getattr(run_output, "content", None))
     if content:
-        await report_turn(sdk, role="assistant", content=content, **ids)
+        await record_turn(sdk, role="assistant", content=content, **ids)
 
 
 def _validate(sdk: Any, site: str) -> None:
@@ -225,8 +227,8 @@ def create_synap_async_hooks(
     ``arun()``.
 
     Args:
-        sdk: A configured SDK. Without an active ``listen()`` stream every hook
-            is a no-op.
+        sdk: A configured SDK. Without an active ``listen()`` stream the user
+            and assistant turns are written over REST and nothing else is sent.
         customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
             B2C instance (user_context_isolation=equals_customer): the server
             rejects a call carrying one with HTTP 400. Leave it unset there.

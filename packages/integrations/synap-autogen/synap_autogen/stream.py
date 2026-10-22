@@ -35,10 +35,11 @@ reported, so adding it is always safe.
 
 Two rules hold throughout, and they come from ``stream_events``.
 
-*Silent without a stream.* Everything here needs an active
-``sdk.instance.listen()``. Most callers do not have one, and for them every
-report is a no-op. Adding this context must not change behaviour for someone
-who has not opted into streaming.
+*Turns are always written; the rest needs a stream.* User and assistant
+turns go on the ``sdk.instance.listen()`` stream when one is open and over
+REST (``sdk.conversation.record_message``) when not, so Synap keeps the
+conversation either way. Tool calls, tool results and thoughts are
+stream-only: without a stream they are no-ops.
 
 *Never raises.* ``add_message`` runs inside the agent's own loop, where an
 exception from telemetry would end the run. No context is worth that.
@@ -64,10 +65,10 @@ from autogen_core.models import (
 
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
+    record_turn,
     report_reasoning,
     report_tool_call,
     report_tool_result,
-    report_turn,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,8 +95,10 @@ class SynapStreamingChatContext(ChatCompletionContext):
                                model_context=model_context)
 
     Args:
-        sdk: A configured :class:`MaximemSynapSDK`. Without an active
-            ``listen()`` stream every report is a no-op.
+        sdk: A configured :class:`MaximemSynapSDK`. User and assistant turns
+            are written with or without an active ``listen()`` stream (REST
+            when there is none); tool and thought reports are no-ops without
+            one.
         conversation_id: The conversation these turns belong to. **Required.**
             Without it the server cannot say which conversation an event is
             part of, and no session is opened.
@@ -206,7 +209,7 @@ class SynapStreamingChatContext(ChatCompletionContext):
         if isinstance(message, UserMessage):
             text = _user_text(message.content)
             if text:
-                await report_turn(
+                await record_turn(
                     self._sdk, role="user", content=text, **self._ids()
                 )
             return
@@ -247,7 +250,7 @@ class SynapStreamingChatContext(ChatCompletionContext):
             text = content.strip()
             if text:
                 self._last_assistant_text = text
-                await report_turn(
+                await record_turn(
                     self._sdk, role="assistant", content=text, **self._ids()
                 )
             return
@@ -285,8 +288,9 @@ class SynapStreamingChatContext(ChatCompletionContext):
         ``assistant_message`` that says the turn has ended, which is the event
         it acts on.
 
-        Returns whether an event went out. ``False`` when there was no stream,
-        when there was nothing to report, or when this exact reply already
+        Returns whether the reply was written (on the stream, or over REST
+        when there is none). ``False`` when the write failed, when there was
+        nothing to report, or when this exact reply already
         went out through ``add_message`` — so calling it on every turn is
         safe and never writes the reply twice.
         """
@@ -300,7 +304,7 @@ class SynapStreamingChatContext(ChatCompletionContext):
             return False
 
         self._last_assistant_text = text
-        return await report_turn(
+        return await record_turn(
             self._sdk, role="assistant", content=text, **self._ids()
         )
 

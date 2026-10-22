@@ -15,7 +15,7 @@ into the two extension points it *does* expose, plus static instructions:
 | Surface | Smolagents extension point | Purpose |
 |---------|----------------------------|---------|
 | `create_synap_tools` | `@tool` | Explicit `search_memory` / `store_memory` the model can call |
-| `synap_step_callbacks` | `step_callbacks={MemoryStep: ...}` | Report the whole turn on Synap's live stream and record each completed action into Synap |
+| `synap_step_callbacks` | `step_callbacks={MemoryStep: ...}` | Record the user and assistant turns as a Synap conversation, and report tool calls and reasoning on the live stream |
 | `synap_st_instructions` | `CodeAgent(instructions=...)` | Fold Synap short-term context into the agent's instructions |
 
 ## Example
@@ -53,19 +53,26 @@ compose naturally into agent-written code.
   `store_memory` raises `SynapIntegrationError`; the recorder **logs and never
   raises** — it runs inside the agent loop, where a raising callback would abort the
   run.
-- **Per-step documents.** The recorder writes each `ActionStep` to its own Synap
-  document, so multi-step runs are captured in full.
+- **Turns are conversation messages.** The user's task and the assistant's final
+  answer are written to the conversation `conversation_id` names: on the stream
+  when `sdk.instance.listen()` is running, otherwise with
+  `sdk.conversation.record_message`, never both. The server compacts that
+  conversation and promotes it to long-term memory, and the SDK's local history
+  search can find old turns after compaction. Reuse one `conversation_id` across
+  `agent.run()` calls that belong together.
+- **No per-step documents by default.** Earlier versions ingested every step's
+  model output with `memories.create`, which left no conversation on the server.
+  That is now off (`ingest_steps=True` turns it back on): with the turns recorded,
+  it would extract the final answer twice.
 - **Live stream.** With `sdk.instance.listen()` running, the recorder also reports
-  the turn as it happens: the user's task, the assistant's final answer, every tool
-  call and its result, and the model's plan and step output as reasoning. Without a
-  stream every one of those is a no-op, so nothing changes for callers who have not
-  opted in.
+  every tool call and its result, and the model's plan and step output as
+  reasoning. Without a stream those are no-ops.
 - **Register against `MemoryStep`.** `synap_step_callbacks` does this for you.
   Registering the recorder against `ActionStep` alone (what earlier versions of this
   README showed) never delivers the final answer, and the assistant turn is the one
   event anticipation acts on.
 - **Two gaps, on purpose.** Smolagents never passes its `TaskStep` to a callback, so
-  the user turn is read from `agent.task` and reported at the end of the first step
+  the user turn is read from `agent.task` and written at the end of the first step
   rather than before it (`report_user_task=False` turns it off). And a step with
   several parallel tool calls merges their outputs into one `observations` string,
   so that result is reported with no `tool_call_id` rather than being attributed to
