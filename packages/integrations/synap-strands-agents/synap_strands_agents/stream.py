@@ -20,11 +20,16 @@ Lifecycle is the app's job, not the hook's:
     await sdk.instance.stop_listening()             # app closes it on shutdown
 
 Design rules (these differ from the other surfaces):
-- **Gate every send on ``sdk.instance.is_listening``**; no-op silently when the
-  app never called ``listen()`` — never raise ``ListeningNotActiveError``.
+- **Turns are always written.** A user or assistant turn goes on the stream
+  while ``sdk.instance.is_listening``; without a stream it is written over REST
+  (``conversation.record_message`` via ``record_turn``) under the hook's
+  ``conversation_id``. Never both. Without it Synap keeps no conversation to
+  compact or search for the many apps that never call ``listen()``.
+- **Tool events are stream-only**: gated on ``sdk.instance.is_listening`` and a
+  silent no-op without a stream — never raise ``ListeningNotActiveError``.
 - **Log, never raise.** These run inside Strands' event loop; a raising hook can
   abort the agent turn. This mirrors the SDK's own fire-and-forget stream sends.
-- This feeds *signal*, it does not durably ingest. Long-term memory still comes
+- Apart from the turns, this feeds *signal*, it does not ingest. Long-term memory still comes
   only from :class:`~synap_strands_agents.store.SynapMemoryStore` /
   :func:`~synap_strands_agents.tools.create_synap_tools`.
 """
@@ -45,6 +50,7 @@ from strands.hooks import (
 from maximem_synap import MaximemSynapSDK
 
 from synap_integrations_common.stream_events import (
+    record_turn,
     report_tool_call,
     report_tool_result,
 )
@@ -75,8 +81,9 @@ class SynapStreamHook(HookProvider):
 
     Args:
         sdk: Initialised :class:`MaximemSynapSDK`. The app owns its
-            ``listen()`` / ``stop_listening()`` lifecycle; this hook only feeds
-            an already-open stream and no-ops when none is active.
+            ``listen()`` / ``stop_listening()`` lifecycle. With a stream open
+            the hook feeds it; without one it writes only the user and
+            assistant turns, over REST.
         conversation_id: Synap conversation id for the emitted events. **Required.**
         user_id: External user id for the conversation. **Required.**
         customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
@@ -117,22 +124,35 @@ class SynapStreamHook(HookProvider):
 
     async def _on_message(self, event: MessageAddedEvent) -> None:
         try:
-            if not self._sdk.instance.is_listening:
-                return
             message = event.message
             text = message_text(message)
             if not text:
                 return  # tool-result / tool-use-only turns carry no text
             role = message.get("role", "user") if isinstance(message, dict) else "user"
-            event_type = "assistant_message" if role == "assistant" else "user_message"
-            await self._sdk.instance.send_message(
+            if self._sdk.instance.is_listening:
+                # Hand-rolled rather than record_turn so the stream event keeps
+                # the session_id, which the shared helper does not carry. The
+                # server persists a streamed turn itself: no REST write on top.
+                event_type = "assistant_message" if role == "assistant" else "user_message"
+                await self._sdk.instance.send_message(
+                    content=text,
+                    role=role,
+                    event_type=event_type,
+                    conversation_id=self._conversation_id,
+                    user_id=self._user_id,
+                    customer_id=self._customer_id or None,
+                    session_id=self._session_id or None,
+                )
+                return
+            # No stream: write the turn over REST so the conversation is kept.
+            # record_turn never raises.
+            await record_turn(
+                self._sdk,
+                role="assistant" if role == "assistant" else "user",
                 content=text,
-                role=role,
-                event_type=event_type,
                 conversation_id=self._conversation_id,
                 user_id=self._user_id,
-                customer_id=self._customer_id or None,
-                session_id=self._session_id or None,
+                customer_id=self._customer_id or "",
             )
         except Exception as exc:  # noqa: BLE001 — stream feed must never abort the turn
             logger.warning(

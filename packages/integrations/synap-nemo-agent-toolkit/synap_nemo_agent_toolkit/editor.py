@@ -156,19 +156,24 @@ class SynapMemoryEditor(MemoryEditor):
             )
             return []
 
-        facts = list(getattr(response, "facts", None) or [])
-        items: list[MemoryItem] = []
-        for fact in facts:
+        # Every memory type comes back, not just facts: a stored preference, episode
+        # or emotion is just as much a hit. Rank them together by score.
+        scored: list[tuple[float, MemoryItem]] = []
+        for kind, obj, content, score in _iter_hits(response):
             # Synap does not echo back custom metadata written with
             # memories.create(), so _MARKER-based filtering is not possible.
-            # All facts for the user/customer scope are returned as-is.
-            md = getattr(fact, "metadata", None) or {}
+            # All hits for the user/customer scope are returned as-is.
+            md = getattr(obj, "metadata", None) or {}
             if tag_filter:
-                fact_tags = md.get("tags") or []
-                if not any(t in fact_tags for t in tag_filter):
+                hit_tags = md.get("tags") or []
+                if not any(t in hit_tags for t in tag_filter):
                     continue
-            items.append(_fact_to_memory_item(fact, user_id=user_id))
-        return items
+            scored.append(
+                (score if score is not None else 0.0,
+                 _hit_to_memory_item(kind, obj, content, score, user_id=user_id))
+            )
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [item for _, item in scored[: max(int(top_k), 1)]]
 
     # ── deletes (warn + no-op) ─────────────────────────────────────────────
 
@@ -197,8 +202,30 @@ def _conversation_to_text(conversation: Optional[list[dict[str, str]]]) -> str:
     return "\n".join(lines)
 
 
-def _fact_to_memory_item(fact: Any, *, user_id: str) -> MemoryItem:
-    md = getattr(fact, "metadata", None) or {}
+def _iter_hits(response: Any):
+    """Yield ``(kind, object, text, score)`` for every memory type in a fetch response."""
+    for fact in getattr(response, "facts", None) or []:
+        yield "fact", fact, getattr(fact, "content", None), getattr(fact, "confidence", None)
+    for pref in getattr(response, "preferences", None) or []:
+        yield "preference", pref, getattr(pref, "content", None), getattr(pref, "strength", None)
+    for episode in getattr(response, "episodes", None) or []:
+        yield "episode", episode, getattr(episode, "summary", None), getattr(episode, "significance", None)
+    for emotion in getattr(response, "emotions", None) or []:
+        etype = getattr(emotion, "emotion_type", None)
+        ctx = getattr(emotion, "context", None)
+        text = f"{etype}: {ctx}" if etype and ctx else (ctx or etype)
+        yield "emotion", emotion, text, getattr(emotion, "intensity", None)
+    for event in getattr(response, "temporal_events", None) or []:
+        score = getattr(event, "temporal_confidence", None)
+        if score is None:
+            score = getattr(event, "confidence", None)
+        yield "temporal_event", event, getattr(event, "content", None), score
+
+
+def _hit_to_memory_item(
+    kind: str, obj: Any, content: Optional[str], score: Optional[float], *, user_id: str
+) -> MemoryItem:
+    md = getattr(obj, "metadata", None) or {}
     tags = md.get("tags") or []
     if not isinstance(tags, list):
         tags = []
@@ -208,13 +235,15 @@ def _fact_to_memory_item(fact: Any, *, user_id: str) -> MemoryItem:
     # Strip our internal marker + conversation copy so downstream consumers
     # don't see implementation detail in MemoryItem.metadata.
     clean_metadata = {k: v for k, v in md.items() if k not in (_MARKER, "tags", "conversation")}
+    # Say what kind of memory this is, since all kinds now come back together.
+    clean_metadata["synap_type"] = kind
     return MemoryItem(
         conversation=conversation,
         user_id=user_id,
-        memory=getattr(fact, "content", None) or None,
+        memory=content or None,
         tags=list(tags),
         metadata=clean_metadata,
-        similarity_score=getattr(fact, "confidence", None),
+        similarity_score=score,
     )
 
 
