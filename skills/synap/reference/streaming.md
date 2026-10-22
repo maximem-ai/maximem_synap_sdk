@@ -1,6 +1,6 @@
 # The live stream — the third operation
 
-> **Read this next:** [Real-time anticipation](https://docs.maximem.ai/concepts/real-time-anticipation.md); [Event delivery](https://docs.maximem.ai/concepts/event-delivery.md); [Server pattern](https://docs.maximem.ai/patterns/real-time-anticipation-server.md); [listen](https://docs.maximem.ai/sdk-reference/instance/listen.md); [send-message](https://docs.maximem.ai/sdk-reference/instance/send-message.md); [record-thinking](https://docs.maximem.ai/sdk-reference/instance/record-thinking.md); [record-tool-call](https://docs.maximem.ai/sdk-reference/instance/record-tool-call.md); [record-tool-result](https://docs.maximem.ai/sdk-reference/instance/record-tool-result.md); [end-session](https://docs.maximem.ai/sdk-reference/instance/end-session.md); [stop-listening](https://docs.maximem.ai/sdk-reference/instance/stop-listening.md). **Checkpoint:** open the method's page before writing each call, re-read it after and compare every parameter, scope rule and error; if the docs and this file disagree, the docs win and tell the human.
+> **Read this next:** [gRPC vs REST](https://docs.maximem.ai/concepts/grpc-vs-rest.md); [Traces and tool calls](https://docs.maximem.ai/capture/traces-and-tool-calls.md); [Real-time anticipation](https://docs.maximem.ai/concepts/real-time-anticipation.md); [Event delivery](https://docs.maximem.ai/concepts/event-delivery.md); [Server pattern](https://docs.maximem.ai/patterns/real-time-anticipation-server.md); [listen](https://docs.maximem.ai/sdk-reference/instance/listen.md); [send-message](https://docs.maximem.ai/sdk-reference/instance/send-message.md); [record-thinking](https://docs.maximem.ai/sdk-reference/instance/record-thinking.md); [record-tool-call](https://docs.maximem.ai/sdk-reference/instance/record-tool-call.md); [record-tool-result](https://docs.maximem.ai/sdk-reference/instance/record-tool-result.md); [end-session](https://docs.maximem.ai/sdk-reference/instance/end-session.md); [stop-listening](https://docs.maximem.ai/sdk-reference/instance/stop-listening.md). **Checkpoint:** open the method's page before writing each call, re-read it after and compare every parameter, scope rule and error; if the docs and this file disagree, the docs win and tell the human.
 
 **Read this before you finish any agent integration.** Ingestion and retrieval
 are the two operations every guide in this skill starts with. There is a third,
@@ -31,25 +31,39 @@ Three specific consequences, in the order they bite:
    but never the reply gets zero prefetching, and looks healthy from outside.
 2. **No stream means every retrieval is cold.** `fetch()` still works. It just
    pays the full network and ranking cost on every turn, forever.
-3. **No stream means no automatic memory.** The user has to call
-   `memories.create()` by hand for every conversation, which is the work this
-   is meant to remove.
+3. **No stream means your code records each turn itself.** Turns still become
+   memory if you send them with `conversation.record_message` (one request per
+   turn) or `memories.create()`; the stream is what removes that work.
 
-If the user's app is a long-lived process, wiring the stream is part of the
-integration, not an enhancement to suggest later. Do not leave it for them.
+If the human chose Full (see `integration-depth.md`), wiring the whole stream is part
+of the integration, not an enhancement to suggest later. Do not leave it for them.
 
-## When not to wire it
+## When the stream does not fit
 
-Be honest about this rather than forcing it:
+Do not decide this yourself and do not silently fall back. Offer the options at the
+"integration depth" step (`integration-depth.md`) and let the human decide. These are
+the technical facts that step rests on (all from the docs):
 
-- **Per-request serverless** (Lambda, Vercel functions, Cloud Run scale-to-zero).
-  A stream needs a process that outlives the request. Use `memories.create()`
-  and `fetch()` and say why.
-- **Edge runtimes.** Importing the JS SDK is safe there, but the live stream is not: grpc-js is built on `node:http2`. Use the HTTP path on Edge and stream from a Node runtime.
-- **Batch or offline jobs.** Nothing is anticipating anything. Ingest directly.
+- **The stream needs a process that stays up** for the length of a conversation and
+  owns the stream (`listen()` at startup, `stop_listening()` at shutdown). A serverless
+  function that exits after one response (Lambda, Vercel functions, Cloud Run scaled to
+  zero) is opened and torn down on every request, with no time for a prepared bundle to
+  arrive. The documented route there is REST: `conversation.record_message` per turn
+  (stored, compacted and turned into long-term memory) and a normal `fetch`. It gives no
+  prepared context and no reasoning or tool traces.
+- **Prepared bundles go only to the process that sent the events.** The docs say a
+  conversation's bundles are delivered only to the streams that sent events for that
+  conversation, and the prepared context lives in the SDK's own process. So a separate
+  always-on worker does not feed a separate function. The docs do not describe another
+  way for a function to get the stream's benefits; the documented way to get Full is to
+  run the agent loop itself in a long-running process.
+- **Edge runtimes and browsers cannot open the stream.** Importing the JS SDK is safe
+  there, but `listen()` throws: grpc-js needs `node:http2`. Stream from a Node runtime.
+- **Batch or offline jobs.** Nothing is waiting for a next turn. Ingest directly
+  (`ingest_transcript`, `memories.create`).
 
-Everything else — servers, workers, voice sessions, desktop agents, long-running
-chat backends — should stream.
+A long-running process (chat server, voice session, worker, desktop agent) is the case
+where Full is recommended; the human still decides.
 
 ## The five events
 
@@ -57,8 +71,8 @@ chat backends — should stream.
 |---|---|---|
 | The user spoke | `send_message(event_type="user_message")` | Nothing from this conversation is recorded at all. |
 | The agent reasoned | `record_thinking(...)` | Prediction sees the edges of the turn and not the intent inside it. |
-| It called a tool | `record_tool_call(...)` | A lookup and a booking are indistinguishable, so nothing useful can be prefetched. |
-| The tool answered | `record_tool_result(...)` | A failed call and a successful one look identical. |
+| It called a tool | `record_tool_call(...)` | Synap cannot see which tool and arguments the agent is about to rely on. |
+| The tool answered | `record_tool_result(...)` | The result is the strongest clue to the next question, and it is missing. |
 | The agent replied | `send_message(event_type="assistant_message")` | **Anticipation never runs.** |
 
 If you can only wire one event beyond the user's turn, wire

@@ -66,10 +66,7 @@ Understood, I'll keep responses tight."""
 
 ## Modes
 
-- **`long-range`** (default): full extraction pipeline including entity resolution, relationship mapping, preference detection, emotional analysis, and graph storage. Use for real conversations.
-- **`fast`**: basic chunking + lightweight extraction + vector embedding. Skips graph work. Use for high-volume logging where deep extraction isn't worth the latency.
-
-You can re-ingest later in `long-range` by resubmitting with the same `document_id` — extractions will be redone.
+The server accepts `long-range` (default) or `fast`, but per the docs both run the same pipeline today and nothing downstream reads the value, so the choice does not change what is extracted or how fast. Do not choose by workload and do not offer it as a decision (`https://docs.maximem.ai/concepts/retrieval-modes.md`). The retrieval `mode` (`fast` or `accurate`) does change results. Resubmitting with the same `document_id` redoes the extraction.
 
 ## Batch ingestion
 
@@ -138,7 +135,7 @@ await sdk.memories.delete(memory_id=memory_id)
 - **Stable user/customer IDs.** Inconsistent IDs fragment a user's memory. Pick a deterministic identifier and stick to it.
 - **Idempotency for retried sources.** Webhook-driven ingestion? Pass `document_id`.
 - **Backfilled data needs `document_created_at`.** Otherwise temporal reasoning thinks everything happened today.
-- **Choose mode by workload.** `long-range` for conversations, `fast` for high-volume logs.
+- **The ingestion `mode` makes no difference today**; leave the default.
 - **Don't `sleep()` for ingestion to complete.** Use webhooks or fire-and-forget.
 
 ## Live doc

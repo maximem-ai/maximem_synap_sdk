@@ -31,8 +31,9 @@ after create.
    still ask. The answer maps to the SDK scope:
    - **B2C:** that id is the `user_id`, and a `customer_id` is never sent.
    - **B2B:** the organization's id is the `customer_id` and the person's id is the `user_id`; both are required.
-   - **No stable id (a session id as the user id):** each visit is a new person, so memory cannot recall a
-     returning user. If the approved goal is "remember returning users" (or anything across sessions), say so
+   - **Shared devices:** a device id is shared when two people use one phone or computer; the second person would be shown the first person's memory. Use a device id only with a visible opt-in such as "continue my last session?", or use a login.
+   - **No stable id (a session id as the user id):** use a per-chat or per-session id only if the human confirms the app has no persistent identity. Say plainly what is lost: no returning-person memory, no profile, no per-person erasure, and Synap will return nothing the app does not already have.
+   - **Goal vs identity:** with a per-session id each visit is a new person. If the approved goal is "remember returning users" (or anything across sessions), say so
      plainly BEFORE approval, offer the options (add a stable id, an anonymous device id, or accept per-session
      memory and change the goal text), and ask again. Do not draft a use-case the integration cannot serve.
 3. **Compliance and sensitive data.** Does the agent see health, financial, children's or other regulated data?
@@ -54,6 +55,33 @@ such a domain:
 3. Require an explicit yes to the "store everything" choice after you have said what it means ("passwords,
    card numbers and clinical details typed into the chat would be remembered").
 4. Write the human's answer verbatim in the use-case Compliance and Data Sensitivity section, in their words.
+5. If the app redacts before sending, test that redaction against the human's never-store list with realistic samples in the local formats (phone numbers with spaces, landlines, dates of birth, postal codes, ids), add unit tests, and tell the human which fields pass through (Synap does not detect names or street addresses). Mention custom field types for local ids. Do not leave the policy "as a decision" silently.
+6. The instance's sensitive-data policy is approved by the human in the dashboard and applies going forward only. If the use-case has a never-store list and the policy is not approved, it is a named open item in the final report.
+7. Ask whether the app's consent screen tells the person that a third party stores their text, and flag it to the human if not. When user ids are per-person, ask how a deletion request will be served; when they are per-session, say it cannot be.
+
+## The integration-depth question
+
+Asked after the five questions above and before you draft the use-case. Background and the capability menu: `integration-depth.md`. Rules:
+
+- **One question, recommendation first, plain words, no class or method names.** Form the recommendation from the repo before you ask, and show the evidence (what kind of app, whether it runs a tool or reasoning loop, how long the process lives, where it deploys).
+- **Two or three options.** Basic; Full (the live stream); and, only for a serverless, edge or short-lived process, the per-turn HTTP route. Say what each gives and what it does NOT give.
+- **The human decides.** Never pick for them and never silently choose Basic.
+- **Ask modality and turn speed once.** They fill the use-case Interaction Pattern section too; reuse the answer there.
+
+Wording:
+
+> "How deep should the Synap integration go? I recommend **Full**, because this is a long-running chat server that keeps tools and a conversation loop open (`server.py` starts one process that handles many turns). Full: Synap also prepares what your agent will need next and records every conversation automatically, and it sees the agent's reasoning and tool use to predict better. **Basic**: Synap stores and recalls memories only when your code asks. Which do you want?"
+
+Examples (adapt the evidence, keep the shape):
+
+- **Chat backend (long-running server):** recommend Full. "Your server stays up across many turns and calls tools, so Synap can prepare the next answer between turns."
+- **Voice agent:** recommend Full. "Turns land seconds apart and latency matters; prepared memory is the point of the stream, and the call ending is a clean place to close the session."
+- **Serverless function (for example a Vercel or Lambda function):** recommend the per-turn HTTP route, and say plainly what it does not give. "Each request ends before a stream could deliver anything. Basic or the HTTP route records and recalls memories, but nothing is prepared in advance and Synap does not see tool use. Getting Full would mean running the agent loop in a long-running service, which changes how you deploy. Which do you prefer?" Do not offer a worker next to the function as a way to get the stream's benefits: the docs do not support it.
+- **Desktop or CLI agent:** recommend Full if the process stays open for the session; Basic if each run is a one-shot command.
+
+If the answer is "I do not know": explain the trade in two sentences and recommend. "Full lets Synap prepare answers ahead and record conversations by itself, but it needs a process that stays running. Basic works anywhere but only stores and recalls when your code asks. Since your app is <X>, I recommend <Y>; shall I go with that?" Then wait for a yes.
+
+Report the choice with `onboard report integrating in_progress --detail "depth=full|basic|http-turns"` and in the final announcement (including what a Basic choice leaves out).
 
 Anything else you cannot resolve from code (agent purpose, who the end users are, which framework when the repo
 has two) is also a question. Do not ask what the code answers (language, framework, package manager).

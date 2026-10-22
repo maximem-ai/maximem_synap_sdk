@@ -1,0 +1,99 @@
+/**
+ * Minimal Synap example — TypeScript, no framework.
+ *
+ * The JS SDK is pure TypeScript: no Python, no subprocess, zero runtime
+ * dependencies, Node 20+. Importing it on Edge, Workers, Bun or Deno is safe;
+ * only the live stream needs a Node runtime.
+ *
+ * Run after:
+ *   npm install @maximem/synap-js-sdk
+ *   export SYNAP_API_KEY=synap_...
+ *   export SYNAP_INSTANCE_ID=inst_...      // optional; shown with the key in the dashboard
+ *
+ * The instance is resolved from the API key — no instance id needed.
+ */
+
+import { SynapClient } from "@maximem/synap-js-sdk";
+import { v5 as uuidv5 } from "uuid";
+
+const NAMESPACE_URL = "6ba7b811-9dad-11d1-80b4-00c04fd430c8";
+
+async function main() {
+  const sdk = new SynapClient({ apiKey: process.env.SYNAP_API_KEY! });
+  await sdk.init(); // note: init(), not initialize()
+
+  try {
+    const userId = "alice";
+    // B2C shape: userId and nothing else. On a B2B instance (whoami reports
+    // user_context_isolation="strict") add customerId to the calls below. On B2C a
+    // customerId is rejected with HTTP 400, so never pass the user id as one.
+    // conversation_id must be a UUID — derive deterministically from any session string
+    const convId = uuidv5("session-2026-05-04", NAMESPACE_URL);
+
+    // 1. Ingest a turn. The JS write path takes a `messages` array, not a `document` string.
+    await sdk.addMemory({
+      userId,
+      conversationId: convId,
+      messages: [
+        { role: "user", content: "I prefer concise bullet-point summaries." },
+        { role: "assistant", content: "Got it — I'll keep responses tight." },
+      ],
+      mode: "long-range",
+    });
+    console.log("ingest accepted (async pipeline; extraction is eventual)");
+
+    // Real apps don't sleep here — drive retrieval from webhooks.
+    await new Promise((r) => setTimeout(r, 3000));
+
+    // 2. Fetch context. We ingested at USER scope, so we read at user scope to match.
+    const context = await sdk.fetchUserContext({
+      userId,
+      searchQuery: ["communication preferences"],
+      maxResults: 5,
+      mode: "fast",
+    });
+
+    console.log(
+      `\nFound ${context.facts.length} facts, ${context.preferences.length} preferences`
+    );
+    for (const p of context.preferences) {
+      // JS normalizes preference relevance to `strength` (facts use `confidence`).
+      console.log(`  preference: ${p.content} (strength=${p.strength})`);
+    }
+  } finally {
+    await sdk.shutdown();
+  }
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
+
+// ---------------------------------------------------------------------------
+// Namespaced API (mirrors the Python SDK 1:1), available in
+// recent @maximem/synap-js-sdk releases (check `npm ls @maximem/synap-js-sdk`). The flat methods used above (addMemory,
+// fetchUserContext) still work; the namespaced surface is added alongside them
+// and accepts camelCase OR snake_case argument keys:
+//
+//   await sdk.conversation.record_message({ conversationId, role, content, userId });
+//   await sdk.memories.create({ document, userId });
+//   const ctx = await sdk.user.context.fetch({ userId, searchQuery: ["..."] });
+//   const promptCtx = await sdk.conversation.context.get_context_for_prompt({ conversationId });
+//
+// On a B2B instance each of those also takes customerId; on B2C it is rejected.
+// Also: sdk.fetch(...), sdk.customer.context.fetch(...) (B2B only),
+// sdk.client.context.fetch(...).
+// Namespaced calls return the raw (snake_case) response shape that the framework
+// integrations (@maximem/synap-mastra, @maximem/synap-claude-agent) consume.
+// ---------------------------------------------------------------------------
+//
+// ── What this example deliberately leaves out ───────────────────────────────
+// The live stream. This script runs once and exits, so there is nothing for a
+// stream to observe. A real agent is a long-lived process, and there the stream
+// is the third operation, not an extra: sdk.instance.listen() at startup, five
+// events per turn, sdk.instance.stop_listening() at shutdown. Without it every
+// fetch is a cold retrieval and no turn becomes memory on its own.
+// See reference/streaming.md. Note: the stream needs Node, not Edge.
+//
+// Versions: run `pip show maximem-synap` (Python) or `npm ls @maximem/synap-js-sdk` (JS) for what is installed; no version is pinned here. Docs: https://docs.maximem.ai

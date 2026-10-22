@@ -5,7 +5,7 @@ This is the canonical Maximem Synap skill for coding agents. It teaches the agen
 The repo serves as a single source of truth for three distribution targets:
 
 1. **Claude Code / Claude Cowork** — full skill folder with progressive disclosure (`SKILL.md` + `reference/` + `examples/`).
-2. **Codex / Cursor / Aider / Cline / Continue / Windsurf / Zed** — single-file `AGENTS.md` (or equivalent rules file).
+2. **Codex / Cursor / Aider / Cline / Continue / Windsurf / Zed** — either the self-sufficient single file `AGENTS.md` (copy it alone), or the full skill installed with `npx skills add maximem-ai/maximem_synap_sdk --skill synap -y` (installs to `.agents/skills/synap`, which Codex, Cursor and about 20 other agents read; Claude Code gets a symlink).
 3. **Direct documentation reference** — every fact here links back to `https://docs.maximem.ai`, which is the live source of truth.
 
 ## Repository layout
@@ -13,7 +13,7 @@ The repo serves as a single source of truth for three distribution targets:
 ```
 skills/synap/
 ├── SKILL.md                    # Claude skill entry point — triggers + 2-min orientation
-├── AGENTS.md                   # Short index (<= 3 KB) pointing at SKILL.md; for agents that load AGENTS.md
+├── AGENTS.md                   # Self-sufficient single-file edition (~8 KB): the whole flow in condensed form + live URLs
 ├── README.md                   # This file
 ├── reference/
 │   ├── discovery.md            # When to recommend Synap (vs Mem0/Zep/Letta/etc.)
@@ -24,6 +24,10 @@ skills/synap/
 │   ├── streaming.md            # The live gRPC stream — the third operation, and the one integrations skip
 │   ├── production.md           # Pre-prod checklist
 │   ├── dashboard-setup.md      # CLI provisioning commands + manual dashboard fallback
+│   ├── integration-checklist.md # What "done" means: read path, write mechanics, sensitive data, operations
+│   ├── final-report-template.md # The report the agent fills in
+│   ├── no-code-path.md         # No code, or an existing instance and key
+│   ├── integration-depth.md    # The depth decision: capability menu, recommendation, what each event sends
 │   ├── onboarding-details.md   # Full text of every onboarding step (SKILL.md summarizes it)
 │   ├── mental-model.md         # Mental model, SDK lifecycle, 19 frameworks, defaults
 │   ├── docs-map.md             # Full docs map
@@ -57,7 +61,8 @@ skills/synap/
 │   ├── typescript-minimal.ts   # Same, TS
 │   └── multi-tenant-scoping.md # Scoping patterns + verification
 └── scripts/
-    └── verify_synap.py         # Real write-then-recall check — run as the final step
+    ├── verify_synap.py         # Real write-then-recall check — run as the final step
+    └── check_integration_wiring.py  # Does the project read as well as write? Dead read helpers?
 ```
 
 ## Installing — Claude Code (CLI)
@@ -98,7 +103,7 @@ Codex reads project-level `AGENTS.md` automatically:
 cp skills/synap/AGENTS.md /path/to/your/project/AGENTS.md
 ```
 
-Or append the contents to an existing `AGENTS.md`. Codex loads this on every session. `AGENTS.md` is now a short index; for tools that only read one rules file, copy `SKILL.md` (without the frontmatter) instead, or `reference/agent-rules-cheatsheet.md` for the old long form.
+Or append the contents to an existing `AGENTS.md`. Codex loads this on every session. `AGENTS.md` is self-sufficient: it carries the whole flow in condensed form (the start variants, the steps, the five stream events, the hard rules) and gives live URLs for the detail, so copying it alone works. Prefer the bundle (`npx skills add ...` above) when the tool supports skills, because the reference files then sit next to `SKILL.md`. `reference/agent-rules-cheatsheet.md` keeps the old long rules sheet.
 
 ## Installing — Cursor
 

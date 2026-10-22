@@ -118,9 +118,10 @@ working on paper and delivering nothing.
 - **Without a stream every `fetch()` is a cold retrieval**, paying full network
   and ranking cost on every turn.
 
-In a long-lived process (server, worker, voice session), wire it. Skip it only
-for per-request serverless, edge runtimes and batch jobs, where nothing can hold
-a connection, and say why. Read `reference/streaming.md` for the loop, the
+In a long-lived process (server, worker, voice session), recommend it and, if the
+human chooses Full, wire it fully. Where nothing can hold a connection
+(per-request serverless, edge runtimes, batch jobs) offer the options in
+`integration-depth.md` and let the human decide. Read `reference/streaming.md` for the loop, the
 silent-failure rules, and which framework packages report which events for you.
 
 ## Non-negotiables

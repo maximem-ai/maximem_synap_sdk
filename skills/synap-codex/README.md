@@ -12,7 +12,7 @@ differ only in the thin wrapper.
 | `scripts/verify_synap.py` | **byte-for-byte identical** to `../synap/scripts/` | the smoke test |
 | `examples/` | **byte-for-byte identical** to `../synap/examples/` | runnable samples |
 | `SKILL.md` | **wrapper — differs** | Codex manifest: `name` + `description` only (no `allowed-tools`), plus a Sandbox & approvals section |
-| `AGENTS.md` | **wrapper — differs** | short repo-level steering that points Codex at the skill |
+| `AGENTS.md` | **wrapper — differs** | self-sufficient single-file edition (the whole flow in condensed form); copying it alone works |
 
 Do not fork the shared content, and do not edit it here. In the private monorepo
 (`maximem-ai/maximem_synap`) this directory holds only the three wrapper files;

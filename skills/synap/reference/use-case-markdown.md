@@ -22,6 +22,7 @@ fill a gap with a guess. Write the literal text `not stated` instead.
 | Agent Objective | Yes | Yes: README, prompts, entry points | Quote what you found. Ask if the repo does not say what "remembering well" means. |
 | Target Users | Yes | **No. Always ask.** | Includes B2C vs B2B and what identifies a returning person (a stable user id; none means per-session memory only, which the goal text must not contradict). Show the evidence (user model, tenant or org tables, auth) and still ask. Immutable after create; must match `--relationship`. |
 | Task Examples | Yes | Partly: real utterances from tests, fixtures, prompts | Use real examples found in the repo, marked as such, and ask the human for the ones that matter. Never invent utterances. |
+| Interaction Pattern (if the template has it) | Optional | Partly: voice or text from the code | Modality and average turn speed. Ask once and reuse the answer for the integration depth decision; never ask twice. |
 | Behavioral Guidelines | Optional | Only if the code states them | Otherwise `not stated`. |
 | Role Descriptions | Optional | Only if the code states who the client, customer and user are | Otherwise `not stated`; ask if tenancy is unclear. |
 | Compliance & Data Sensitivity | Optional | **No. Always ask.** | Write the human's answer verbatim. Do not assume "no PII". For health, financial or children's data follow the sensitive-data rule in `onboarding-ask-rules.md`. Unanswered means `not stated`, and ask again before approval. |

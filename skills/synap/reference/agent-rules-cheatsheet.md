@@ -195,8 +195,9 @@ the integration. Wire it unless you can name a reason not to.
 - **Without a stream every `fetch()` is a cold retrieval** and pays full network
   and ranking cost, on every turn, forever.
 
-Skip it only for per-request serverless, edge runtimes and batch jobs. A stream
-needs a process that outlives the request. Say why when you skip it.
+The human decides whether to wire it (`integration-depth.md`). A stream needs a
+process that outlives the request; for per-request serverless, edge runtimes and
+batch jobs offer the other options instead of silently skipping it.
 
 Rules that fail silently: never hand-set `role` on a tool or reasoning event
 (use the typed methods); every event needs `conversation_id` and `user_id`, plus

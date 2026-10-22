@@ -94,15 +94,14 @@ Two orthogonal mode axes. Don't confuse them.
 
 **Ingestion mode** (depth of extraction):
 
-- `fast` — basic chunking + lightweight extraction + vector embedding. Skips graph/relationship work. Use for high-throughput logging.
-- `long-range` — full pipeline: deep entity resolution, relationship mapping, preference detection, emotional analysis, graph storage. **Default for real conversations.**
+The server accepts `fast` or `long-range` (default), but the docs say both run the same ingestion pipeline today and nothing reads the value, so it makes no difference. Leave the default and do not offer it as a decision.
 
 **Retrieval mode** (depth of search):
 
 - `fast` — vector similarity only, ~50–100ms. **Default for the agent hot path.**
 - `accurate` — vector + graph traversal + multi-signal rank, ~200–500ms. Use for relationship-heavy queries ("What did Alice say about the project Bob is leading?").
 
-Most production agents: `long-range` ingest, `fast` retrieve.
+Most production agents: default ingest, `fast` retrieve.
 
 ## Document types
 

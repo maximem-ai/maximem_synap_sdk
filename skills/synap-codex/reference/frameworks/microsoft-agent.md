@@ -1,0 +1,74 @@
+# Microsoft Agent Framework (MAF)
+
+> **Read this next:** [This integration's docs page](https://docs.maximem.ai/integrations/microsoft-agent.md); [memories.create](https://docs.maximem.ai/sdk-reference/memories/create.md); [context fetch](https://docs.maximem.ai/sdk-reference/context/fetch.md); [listen](https://docs.maximem.ai/sdk-reference/instance/listen.md); [Errors](https://docs.maximem.ai/sdk-reference/errors.md); [Graceful degradation](https://docs.maximem.ai/patterns/graceful-degradation.md). **Checkpoint:** open the method's page before writing each call, re-read it after and compare every parameter, scope rule and error; if the docs and this file disagree, the docs win and tell the human.
+
+`pip install maximem-synap-microsoft-agent`
+
+For Microsoft Agent Framework / Azure AI Agents.
+
+| Class | Purpose |
+| --- | --- |
+| `SynapContextProvider` | Injects memory into context before each turn; records turns after |
+| `SynapHistoryProvider` | Persists/loads full conversation history |
+
+## Quick start
+
+```python
+import os
+from azure.ai.agents import AgentsClient
+from synap_microsoft_agent import SynapContextProvider, SynapHistoryProvider
+
+client = AgentsClient(endpoint=os.environ["AZURE_AI_ENDPOINT"])
+
+agent = client.as_agent(
+    context_providers=[
+        SynapContextProvider(
+            sdk=sdk,
+            user_id="alice",
+            customer_id="acme",   # B2B only; omit on B2C
+            max_context_results=6,
+        ),
+        SynapHistoryProvider(
+            sdk=sdk,
+            user_id="alice",
+            conversation_id="thread-001",
+        ),
+    ],
+)
+
+response = await agent.run("What were the outcomes from my last meeting?")
+```
+
+**Scoping:** `customer_id` is B2B only, and required there. On a B2C instance (`user_context_isolation = "equals_customer"`) pass `user_id` alone: a `customer_id` comes back as HTTP 400. `GET /api/v1/auth/whoami` tells you which mode the instance is in.
+
+## SynapContextProvider — semantic memory injection
+
+Called by the MAF runtime at the start of each turn:
+
+1. Fetches relevant memories for the incoming message
+2. Appends them as a `system` context message
+3. After the agent responds, ingests the full turn back into Synap
+
+Step 1 failures degrade gracefully (empty context, error logged). Step 3 failures raise so callers know persistence failed.
+
+## SynapHistoryProvider — verbatim history
+
+Persists/reloads the full conversation message list:
+
+- `load(thread_id)` — fetches prior messages and restores them to the MAF thread
+- `save(thread_id, messages)` — writes new messages after each turn
+
+Use `SynapHistoryProvider` when the LLM needs the full transcript, not just semantic context.
+
+## When to use which
+
+- **Semantic recall ("what does the agent know about me")** → `SynapContextProvider`.
+- **Full transcript replay ("what did we say last session, verbatim")** → `SynapHistoryProvider`.
+- **Both** → most production agents want both. They compose cleanly.
+
+## Live doc
+
+`https://docs.maximem.ai/integrations/microsoft-agent`
+
+---
+*Versions: run `pip show maximem-synap` (Python) or `npm ls @maximem/synap-js-sdk` (JS) for what is installed; no version is pinned here. Source of truth: https://docs.maximem.ai (append `.md` to any page).*

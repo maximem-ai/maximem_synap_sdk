@@ -71,14 +71,13 @@ private    org-wide      app-wide   global
 
 Decide scoping at ingestion time by which `*_id` you pass. On B2C: `user_id` → user-scoped, nothing → client-scoped, and that is the whole set. On B2B: `user_id` + `customer_id` → user-scoped, `customer_id` only → org-shared, nothing → client-scoped.
 
-**Two modes per axis — pick one:**
+**Retrieval modes:**
 
-| | `fast` | `accurate` / `long-range` |
+| | `fast` | `accurate` |
 | --- | --- | --- |
-| Ingestion | Lightweight extraction, seconds | Full pipeline + graph, seconds-to-minutes |
 | Retrieval | Vector only, ~50-100ms | Vector + graph + multi-signal rank, ~200-500ms |
 
-Default to `fast` for retrieval (it's in the agent hot path) and `long-range` for ingestion (extraction quality compounds).
+The ingestion `mode` (`fast` or `long-range`) is accepted but, per the docs, both run the same pipeline today, so it makes no difference; leave the default. Default to `fast` for retrieval (it is in the agent hot path) and use `accurate` for valuable one-off questions.
 
 ## SDK lifecycle
 
@@ -159,7 +158,7 @@ When generating code, default to:
 - Retrieval `mode="fast"`, `max_results=10`.
 - Always pass `user_id`. Add `customer_id` only on a B2B instance, where it is required. Confirm the mode with `GET /api/v1/auth/whoami` (`user_context_isolation`); on B2C a `customer_id` is rejected with HTTP 400.
 - `conversation_id` must be a valid UUID — if the user passes a session string, wrap it: `str(uuid5(NAMESPACE_URL, session_str))`.
-- Open the live stream. In a long-lived process this is a default, not a question to ask: `listen()` at startup, the five events per turn, `stop_listening()` at shutdown. Skip it only for per-request serverless, edge runtimes and batch jobs, and say why when you do.
+- The live stream is the human's choice (`integration-depth.md`): recommend Full for a long-lived process, then if they choose it wire it fully: `listen()` at startup, the five events per turn, `stop_listening()` at shutdown. Never skip it on your own, including for serverless, edge or batch targets: offer the options and let the human decide.
 
 
 

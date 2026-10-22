@@ -171,7 +171,7 @@ Higher scopes don't leak narrower-scope memories. User context includes broader 
 
 ## Pattern: system-prompt injection
 
-The 80% use case — fetch context, format as a system message, send to LLM, ingest the turn afterward.
+The 80% use case: fetch context, format as a system message, send to the LLM, record the turns afterward with `conversation.record_message` (the first call registers the `conversation_id`; record the user turn before the first fetch). Never also send the same text with `memories.create()`: it is extracted twice.
 
 ```python
 async def turn(conv_id: str, user_id: str, user_message: str) -> str:
@@ -201,12 +201,14 @@ Use this context, but do not mention you're reading from a memory system.
     # 3. LLM call
     answer = await your_llm.complete(system=system_prompt, user=user_message)
 
-    # 4. ingest
-    await sdk.memories.create(
-        document=f"User: {user_message}\nAssistant: {answer}",
-        document_type="ai-chat-conversation",
+    # 4. record the turns (one owner for conversation turns: record_message, not memories.create)
+    await sdk.conversation.record_message(
+        conversation_id=conv_id, role="user", content=user_message,
         user_id=user_id,          # B2C shape; on B2B add customer_id=...
-        mode="long-range",
+    )
+    await sdk.conversation.record_message(
+        conversation_id=conv_id, role="assistant", content=answer,
+        user_id=user_id,
     )
 
     return answer
@@ -220,7 +222,7 @@ This is what most integrations do under the hood.
 - **Smaller `max_results` is faster.** Default 10 is fine; drop to 5 for tight budgets.
 - **Filter `types`.** Don't fetch episodes if you only show facts.
 - **Cache aggressively.** The SDK cache already helps; reuse the same `search_query` if the conversation hasn't shifted topic.
-- **Streaming via gRPC** ships in the box (`grpcio` is a core dependency) for sub-50ms reads. Most users don't need to think about it.
+- **The live stream** can make a read a local cache hit when Synap prepared the context. Whether to wire it is the human's choice: see `integration-depth.md`.
 
 ## Live doc
 
