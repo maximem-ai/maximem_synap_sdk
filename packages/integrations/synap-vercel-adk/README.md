@@ -15,7 +15,7 @@ Synap maintains long-term memory about your users: facts, preferences, past epis
 1. **Fetches** the relevant context for the current user before the LLM call
 2. **Injects** it as a `<synap_context>` block in the system prompt
 3. **Calls** your underlying model with the enriched prompt
-4. **Writes** the conversation turn back to Synap memory after the response
+4. **Records** the new user message and the model's reply as conversation turns after the response
 
 The developer writes zero context management code.
 
@@ -46,7 +46,7 @@ const { text } = await generateText({
 });
 ```
 
-That's it. Synap context is fetched, injected, and the conversation is written back to memory automatically.
+That's it. Synap context is fetched and injected, and the new turn is recorded automatically. The gRPC stream opens on the first call; you do not have to call `listen()`.
 
 ---
 
@@ -61,8 +61,8 @@ export const synap = await createSynap({
   apiKey: process.env.SYNAP_API_KEY!,
 });
 
-// Optional: open the gRPC stream for real-time context anticipation
-// Node.js only — safe no-op in Edge Runtime
+// Optional: the gRPC stream opens on the first model call by itself.
+// Call this to have it ready earlier. Node.js only, a safe no-op in Edge Runtime.
 await synap.listen();
 ```
 
@@ -129,16 +129,19 @@ All three can be combined — Synap fetches and merges context from all applicab
 
 ---
 
-## gRPC anticipation stream (optional)
+## gRPC stream (opens by default)
 
-When `synap.listen()` is called, the provider opens a persistent bidirectional gRPC stream to Synap. The server proactively pushes context bundles for your users *before* they send a message — so when the request arrives, context is already in the in-memory cache and no HTTP call is needed.
+The first model call opens a persistent bidirectional gRPC stream to Synap. Turns, tool calls, tool results and reasoning go on it, and the server pushes context bundles for your users *before* they send a message, so when the request arrives the context is already in the in-memory cache and no HTTP call is needed.
 
 ```
-Without listen():   request → HTTP fetch context → inject → LLM   (~50-200ms overhead)
-With listen():      request → cache hit → inject → LLM             (<1ms overhead)
+Without the stream:  request → HTTP fetch context → inject → LLM   (~50-200ms overhead)
+With the stream:     request → cache hit → inject → LLM             (<1ms overhead)
 ```
 
-`listen()` is Node.js only. In Edge Runtime or Vercel Serverless, it silently no-ops and the provider falls back to HTTP context fetching automatically.
+- The first call does not wait for it: the stream opens alongside the context fetch, with a 10s limit. If it cannot open (Edge Runtime, blocked network, server down), turns are recorded over REST instead and nothing is retried for 60s. Turns are never sent both ways.
+- An open stream does not keep a script alive: the process exits when your work is done.
+- To turn it off, set `SYNAP_AUTO_LISTEN=false` (or pass `autoListen: false` to `createSynap`). Everything then goes over REST.
+- `listen()` is optional. Use it at startup to open the stream before the first request:
 
 ```typescript
 // instrumentation.ts (Next.js)
@@ -149,6 +152,23 @@ export async function register() {
   }
 }
 ```
+
+---
+
+## Conversation history and compaction
+
+The AI SDK has no compaction: you send the whole `messages` list on every call. Synap compacts a conversation server-side as it grows. When you pass a `conversationId` and Synap has compacted that conversation, the model sees Synap's compaction in place of the earlier turns in your `messages`:
+
+```
+system  (your system prompt + <synap_context>)
+system  <synap_conversation_history> …compaction… </synap_conversation_history>
+user / assistant   the turns after the compaction
+user    (the current turn, with any tool calls and results, untouched)
+```
+
+Until Synap has compacted the conversation, your messages are sent as you gave them. If the history fetch fails, the same. This needs `injectContext` (the default) and a `conversationId`; there is no separate switch.
+
+Each call records only the new user message and the reply as turns, so Synap always has the conversation it compacts. Your resent history is not re-ingested.
 
 ---
 
@@ -165,6 +185,7 @@ const synap = await createSynap({
   grpcHost?: string;        // advanced: override gRPC host
   grpcPort?: number;        // advanced: override gRPC port
   grpcUseTls?: boolean;     // advanced: override gRPC TLS
+  autoListen?: boolean;     // open the gRPC stream on first use. default: true
 });
 ```
 
@@ -176,7 +197,7 @@ const synap = await createSynap({
 
 ### `synap.wrap(model, options?)`
 
-Wraps any Vercel AI SDK `LanguageModelV1` with Synap context middleware.
+Wraps any Vercel AI SDK `LanguageModelV1` (AI SDK 3 and 4) with Synap context middleware. AI SDK 5 models (`LanguageModelV2`) are not supported: context is injected, but replies and tool calls are not recorded.
 
 ```typescript
 synap.wrap(model, {
@@ -185,7 +206,7 @@ synap.wrap(model, {
   conversationId?: string;   // session scope
   contextTypes?: Array<'facts' | 'preferences' | 'episodes' | 'emotions' | 'temporal_events'>;
   maxContextResults?: number; // default: 10
-  writeMemory?: boolean;      // write turn to memory after response. default: true
+  writeMemory?: boolean;      // record the turn (user message + reply) after the response. default: true
   injectContext?: boolean;    // inject context into prompt. default: true
 })
 ```
@@ -196,11 +217,11 @@ Works with `generateText`, `streamText`, `generateObject`, `streamObject` — an
 
 ### `synap.listen()`
 
-Opens the gRPC anticipation stream. Node.js only, safe to call anywhere.
+Opens the gRPC stream now instead of on the first call. Optional. Node.js only, safe to call anywhere. Models you wrapped earlier use it too.
 
 ### `synap.stopListening()`
 
-Gracefully closes the gRPC stream.
+Gracefully closes the gRPC stream. It stays closed (turns go over REST) until you call `listen()` again.
 
 ### `synap.isListening`
 
@@ -217,6 +238,7 @@ Gracefully closes the gRPC stream.
 | Variable | Description |
 |---|---|
 | `SYNAP_API_KEY` | Your Synap API key |
+| `SYNAP_AUTO_LISTEN` | `false` stops the gRPC stream opening on first use. Default: on |
 
 ---
 

@@ -1,7 +1,16 @@
 // createSynapShortTermHook — TypeScript mirror of the Python
 // create_synap_st_hook. Installs a UserPromptSubmit hook that fetches
-// Synap *short-term* context (compacted summary + recent turns per
-// conversation) and injects it via hookSpecificOutput.additionalContext.
+// Synap *short-term* context and injects it via
+// hookSpecificOutput.additionalContext.
+//
+// What it injects is Synap's COMPACTION (the summary of the turns the
+// conversation has outgrown, plus earlier turns history search found for the
+// prompt), never the recent turns: Claude Code's own transcript already holds
+// those, and `formatted_context` carries them too, so injecting it sent every
+// recent turn twice. Before the first compaction there is nothing to add and
+// the hook returns {}. A given compaction is injected once per hook: each
+// injection is stored in the transcript with the prompt, so repeating it every
+// prompt would grow the transcript by the same block each turn.
 //
 // Composes with createSynapHooks (LT). To get both LT + ST, register
 // both hooks under UserPromptSubmit:
@@ -32,13 +41,11 @@ import type {
   UserPromptSubmitHookInput,
 } from "@anthropic-ai/claude-agent-sdk";
 
+import { compactedHistoryFrom } from "./stream-events.js";
 import type { SynapSdkLike } from "./types.js";
 
 const SUPPORTED_STYLES = ["structured", "narrative", "bullet_points"] as const;
 export type SynapShortTermStyle = (typeof SUPPORTED_STYLES)[number];
-
-const DEFAULT_PREAMBLE_OPEN = "<synap_short_term_context>";
-const DEFAULT_PREAMBLE_CLOSE = "</synap_short_term_context>";
 
 export type SynapShortTermOnError = "fallback" | "raise";
 
@@ -48,7 +55,10 @@ export interface CreateSynapShortTermHookOptions {
   conversationId: string;
   /** Defaults to 'narrative'. */
   style?: SynapShortTermStyle;
-  /** Wrapping tags. Pass null for both to drop the wrapper. */
+  /**
+   * Extra wrapping tags around Synap's `<synap_conversation_history>` block.
+   * None by default.
+   */
   preambleOpen?: string | null;
   preambleClose?: string | null;
   /** Defaults to 'fallback' — hook never throws on SDK failure. */
@@ -78,10 +88,6 @@ export function createSynapShortTermHook(
     );
   }
   const onError: SynapShortTermOnError = options.onError ?? "fallback";
-  const preambleOpen =
-    options.preambleOpen === undefined ? DEFAULT_PREAMBLE_OPEN : options.preambleOpen;
-  const preambleClose =
-    options.preambleClose === undefined ? DEFAULT_PREAMBLE_CLOSE : options.preambleClose;
 
   if (!sdk.conversation?.context?.get_context_for_prompt) {
     throw new Error(
@@ -90,17 +96,20 @@ export function createSynapShortTermHook(
     );
   }
 
+  // The compaction last injected: a different one (or a changed excerpt set)
+  // is new information, the same one is already in the transcript.
+  let injected = "";
+
   const onUserPromptSubmit: HookCallback = async (_input) => {
-    // _input typed as HookInput union; we don't actually need its fields.
-    let stBlock = "";
+    let preamble = "";
     try {
+      // `style` shapes `formatted_context`, which this hook no longer injects;
+      // it is still sent so a caller's choice reaches the server unchanged.
       const response = await sdk.conversation.context!.get_context_for_prompt({
         conversation_id: conversationId,
         style,
       });
-      if (response.available) {
-        stBlock = (response.formatted_context ?? "").trim();
-      }
+      preamble = compactedHistoryFrom(response)?.preamble ?? "";
     } catch (err) {
       if (onError === "raise") throw err;
       console.warn(
@@ -110,12 +119,15 @@ export function createSynapShortTermHook(
       return {};
     }
 
-    if (!stBlock) return {};
+    if (!preamble || preamble === injected) return {};
+    injected = preamble;
 
+    // The default tags are Synap's own `<synap_conversation_history>`; custom
+    // ones wrap them.
     const wrapped =
-      preambleOpen && preambleClose
-        ? `${preambleOpen}\n${stBlock}\n${preambleClose}`
-        : stBlock;
+      options.preambleOpen && options.preambleClose
+        ? `${options.preambleOpen}\n${preamble}\n${options.preambleClose}`
+        : preamble;
 
     return {
       hookSpecificOutput: {

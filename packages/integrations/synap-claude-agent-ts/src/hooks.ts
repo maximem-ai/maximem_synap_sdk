@@ -7,7 +7,8 @@
 //
 // It also reports the turn to the live gRPC stream, along with each tool call,
 // each tool result, the assistant's reply and the end of the session. See
-// "What reaches Synap, and by which path" below.
+// "What reaches Synap, and by which path" below. The stream opens itself on the
+// first report; `SYNAP_AUTO_LISTEN=false` keeps it closed.
 //
 // The hooks NEVER throw: SDK failures log and fall through to {} (no
 // context injected, no block on the agent). Context providers must not
@@ -36,27 +37,55 @@
 // place would be inventing a signal, so the integration reports four of the
 // five events and says so.
 //
-// **Stream first, REST only as a fallback, never both.** The server persists a
-// turn it receives on the stream by itself, so calling `record_message` after
-// a successful stream report writes it twice. A user who never calls
-// `sdk.instance.listen()` sees behaviour byte-identical to before: every
-// helper here is a no-op without a stream.
-
+// **Stream first, REST only as a fallback, never both.** `recordTurn` opens the
+// stream if there is none and sends the turn there; the server persists a turn
+// it receives on the stream by itself, so calling `record_message` after a
+// successful stream report would write it twice. Only when the stream cannot
+// open (or `SYNAP_AUTO_LISTEN=false`) does a turn go over REST. Tool calls and
+// results are stream-only.
+//
+// ## Synap's compaction, and what Claude Code does not let us replace
+//
+// Claude Code owns the transcript: the CLI subprocess keeps the message list,
+// decides when to compact it and writes the summary itself. The hook surface
+// cannot replace any of that:
+//
+//   - `PreCompactHookInput` (trigger, custom_instructions) and
+//     `PostCompactHookInput` (compact_summary) are input only. `HookJSONOutput`
+//     has no `hookSpecificOutput` member for `PreCompact` or `PostCompact`, so
+//     a hook can neither supply the summary nor veto the compaction.
+//   - `hookSpecificOutput.additionalContext` ADDS a message; nothing in
+//     `SyncHookJSONOutput` removes or rewrites an earlier one.
+//
+// What can be done, and is: Synap's compaction (`fetchCompactedHistory`) is
+// added as `additionalContext`, once per compaction, on the first prompt and
+// whenever Synap compacts again; and `SessionStart` with `source: "compact"`
+// adds it again right after the CLI replaced its history with its own summary,
+// because that discards everything added before. Only the compaction block goes
+// in, never the turns after it: the CLI's transcript already holds those.
+//
+// Measured against the real CLI (see the probe in this package's tests):
+// a `SessionStart` callback fires for `compact` and never for `startup`. The
+// CLI runs its startup hooks before the SDK has registered callbacks.
+//
 import type {
   HookCallback,
   HookCallbackMatcher,
   PostToolUseHookInput,
   PostToolUseFailureHookInput,
   PreToolUseHookInput,
+  SessionStartHookInput,
   StopHookInput,
   UserPromptSubmitHookInput,
 } from "@anthropic-ai/claude-agent-sdk";
 
 import {
   endSession,
+  fetchCompactedHistory,
+  isSynapHistory,
+  recordTurn,
   reportToolCall,
   reportToolResult,
-  reportTurn,
 } from "./stream-events.js";
 import type { SynapIdentityOptions } from "./types.js";
 
@@ -71,18 +100,15 @@ export interface CreateSynapHooksOptions extends SynapIdentityOptions {
    */
   contextPreamble?: string;
   /**
-   * When true (default), record conversation turns to Synap. Disable for
-   * injection-only semantics.
+   * When true (default), record the user's prompts to Synap. Disable to keep
+   * prompts out of Synap's conversation record.
    *
-   * ⚠ This now gates the ASSISTANT turn as well as the user's prompt, because
-   * both are persisted server-side and it would be strange for one to be
-   * recorded and the other not. The assistant turn only ever goes out over the
-   * stream: there was no REST write for it before and adding one would start
-   * persisting data an existing caller never asked for.
+   * This gates the user's prompt only. The assistant's reply (the `Stop` hook)
+   * is always recorded: it is the event that tells the anticipation agent a
+   * turn has ended, and `recordUserPrompts: false` used to switch that off too.
    *
    * Tool calls and tool results are not gated by this. They are
-   * anticipation-only, never persisted, and impossible to send without a
-   * stream the caller opened on purpose.
+   * anticipation-only and never persisted.
    */
   recordUserPrompts?: boolean;
 }
@@ -93,6 +119,7 @@ type SynapHookEvent =
   | "PreToolUse"
   | "PostToolUse"
   | "PostToolUseFailure"
+  | "SessionStart"
   | "Stop"
   | "SessionEnd";
 
@@ -122,6 +149,24 @@ export function createSynapHooks(
   if (!userId) {
     throw new Error("createSynapHooks requires a non-empty userId");
   }
+
+  /**
+   * The compaction last put in front of the model, so a compaction is injected
+   * once, not on every prompt: each injection is stored in the transcript with
+   * the prompt, so repeating it would grow the transcript by the same block
+   * every turn.
+   */
+  let injectedCompaction = "";
+
+  /** Synap's compaction block for this conversation, or "" if there is none. */
+  const compactionFor = async (convId: string, force: boolean): Promise<string> => {
+    const history = await fetchCompactedHistory(sdk, convId);
+    if (!history) return "";
+    const marker = history.compactionId ?? history.preamble;
+    if (!force && marker === injectedCompaction) return "";
+    injectedCompaction = marker;
+    return history.preamble;
+  };
 
   const onUserPromptSubmit: HookCallback = async (input) => {
     const i = input as UserPromptSubmitHookInput;
@@ -153,44 +198,33 @@ export function createSynapHooks(
       );
     }
 
-    if (recordUserPrompts && convId) {
-      // Stream first. The server persists a turn it receives on the stream
-      // itself, so a record_message after a successful report writes it twice.
-      const sent = await reportTurn(sdk, {
+    // Not a turn: a hook that echoes Synap's own history back must not have it
+    // recorded as something the user said.
+    if (recordUserPrompts && convId && !isSynapHistory(prompt)) {
+      await recordTurn(sdk, {
         role: "user",
         content: prompt,
         conversationId: convId,
         userId,
         customerId,
       });
-      if (!sent) {
-        try {
-          await sdk.conversation.record_message({
-            conversation_id: convId,
-            role: "user",
-            content: prompt,
-            user_id: userId,
-            customer_id: customerId,
-          });
-        } catch (err) {
-          // Never throw — write-side in a hook still honors callback contract.
-          // eslint-disable-next-line no-console
-          console.error(
-            `synap_claude_agent.UserPromptSubmit: record_message failed convId=${convId}`,
-            err,
-          );
-        }
-      }
     }
 
-    if (!formatted) {
+    // Synap's compaction replaces nothing here (see the header), so it goes in
+    // beside what the CLI holds.
+    const compaction = convId ? await compactionFor(convId, false) : "";
+    const context = [
+      compaction,
+      formatted ? contextPreamble.replace("{body}", formatted) : "",
+    ].filter(Boolean).join("\n\n");
+    if (!context) {
       return {};
     }
 
     return {
       hookSpecificOutput: {
         hookEventName: "UserPromptSubmit" as const,
-        additionalContext: contextPreamble.replace("{body}", formatted),
+        additionalContext: context,
       },
     };
   };
@@ -253,10 +287,12 @@ export function createSynapHooks(
     // empty assistant turn would be a worse signal than none.
     const content = typeof i.last_assistant_message === "string"
       ? i.last_assistant_message : "";
-    if (!recordUserPrompts || !content.trim()) {
+    if (!content.trim()) {
       return {};
     }
-    await reportTurn(sdk, {
+    // `recordTurn`, not `reportTurn`: the reply is part of the conversation and
+    // goes over REST when the stream cannot carry it.
+    await recordTurn(sdk, {
       role: "assistant",
       content,
       conversationId: convIdOf(i),
@@ -264,6 +300,21 @@ export function createSynapHooks(
       customerId,
     });
     return {};
+  };
+
+  const onSessionStart: HookCallback = async (input) => {
+    const i = input as SessionStartHookInput;
+    // The CLI just replaced its history with its own summary; what was added
+    // before is gone with it.
+    if (i.source !== "compact") return {};
+    const preamble = await compactionFor(convIdOf(i), true);
+    if (!preamble) return {};
+    return {
+      hookSpecificOutput: {
+        hookEventName: "SessionStart" as const,
+        additionalContext: preamble,
+      },
+    };
   };
 
   const onSessionEnd: HookCallback = async (input) => {
@@ -276,6 +327,7 @@ export function createSynapHooks(
     PreToolUse: [{ hooks: [onPreToolUse] }],
     PostToolUse: [{ hooks: [onPostToolUse] }],
     PostToolUseFailure: [{ hooks: [onPostToolUseFailure] }],
+    SessionStart: [{ hooks: [onSessionStart] }],
     Stop: [{ hooks: [onStop] }],
     SessionEnd: [{ hooks: [onSessionEnd] }],
   };
