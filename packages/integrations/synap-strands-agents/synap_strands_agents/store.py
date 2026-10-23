@@ -11,15 +11,13 @@ Error policy:
   blip must not crash recall.
 - ``add`` / ``add_messages`` (writes) surface :class:`SynapIntegrationError`.
 
-Why ``add_messages`` ingests through ``memories.create`` rather than
-``conversation.record_messages_batch``: recorded conversation messages feed
-**compaction / short-term context**, not the long-term extraction layer that
-``search``/``fetch`` reads (see ``sdk/ingestion.mdx``). Ingesting the assembled
-transcript via ``memories.create`` runs Synap's extraction pipeline server-side
-(no client model call) and lands memories on the same layer ``search`` queries.
-A **stable ``document_id``** makes ``MemoryManager``'s repeated, growing-
-transcript extraction submissions *update* one document instead of accumulating
-duplicates.
+``add_messages`` records the batch as conversation turns (``record_turn``: the
+gRPC stream, opened on first use, else REST) rather than ingesting the
+transcript with ``memories.create``. Synap extracts from the conversation it
+keeps, and a transcript ingested on top of turns :class:`SynapStreamHook`
+already recorded is extracted twice. Turns the hook wrote are skipped here, one
+for one, so the two compose; with no hook, this is what gets the conversation
+to Synap at all.
 """
 
 from __future__ import annotations
@@ -31,9 +29,13 @@ from typing import Any, List, Optional
 from strands.memory import MemoryEntry
 
 from maximem_synap import MaximemSynapSDK
-from synap_integrations_common import wrap_sdk_errors_async
+from synap_integrations_common import (
+    SynapIntegrationError,
+    record_turn,
+    wrap_sdk_errors_async,
+)
 
-from synap_strands_agents._util import message_text
+from synap_strands_agents._util import consume_written, message_text, note_written
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +58,9 @@ class SynapMemoryStore:
         customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
             B2C instance (user_context_isolation=equals_customer): the server
             rejects a call carrying one with HTTP 400. Leave it unset there. Empty means customer-less.
-        conversation_id: Optional Synap conversation id; also seeds the stable
-            ``document_id`` used by ``add_messages`` so repeated ingests of a
-            growing transcript update one document rather than duplicating.
+        conversation_id: Optional Synap conversation id the ``add_messages``
+            turns are recorded under (a fresh one per store when unset; pass the
+            stream hook's so both write to one conversation).
         mode: Synap fetch mode — ``"accurate"`` (default) or ``"fast"``.
         max_search_results: Default cap on ``search`` results.
 
@@ -93,12 +95,7 @@ class SynapMemoryStore:
         self._customer_id = customer_id
         self._conversation_id = conversation_id
         self._mode = mode
-        # Stable document id so add_messages re-ingests update one document.
-        self._document_id = (
-            f"strands-{conversation_id}"
-            if conversation_id
-            else f"strands-{uuid.uuid4().hex}"
-        )
+        self._turn_conversation_id = conversation_id or f"strands-{uuid.uuid4().hex}"
         # ── MemoryStore protocol config fields (exposed as attributes) ──
         self.name = "synap"
         self.description = "Maximem Synap long-term memory"
@@ -166,24 +163,33 @@ class SynapMemoryStore:
             )
 
     async def add_messages(self, messages: Any, context: Any = None) -> None:
-        """Ingest a conversation batch for server-side extraction (WRITE)."""
-        transcript = self._render_transcript(messages)
-        if not transcript:
-            return  # nothing extractable (e.g. all tool-result turns)
-        async with wrap_sdk_errors_async(
-            "strands.store.add_messages", logger, user_id=self._user_id,
-        ):
-            await self._sdk.memories.create(
-                document=transcript,
+        """Record a conversation batch as turns for server-side extraction
+        (WRITE). Raises on failure so the manager retries the batch."""
+        done: List[tuple] = []
+        for role, text in self._turns(messages):
+            if consume_written(self._user_id, role, text):
+                continue  # SynapStreamHook already wrote it
+            if not await record_turn(
+                self._sdk,
+                role=role,
+                content=text,
+                conversation_id=self._turn_conversation_id,
                 user_id=self._user_id,
-                customer_id=self._customer_id or None,
-                document_type="ai-chat-conversation",
-                document_id=self._document_id,
-            )
+                customer_id=self._customer_id,
+            ):
+                # The retry resends the whole batch: let it skip what went through.
+                for written in done:
+                    note_written(self._user_id, *written)
+                raise SynapIntegrationError(
+                    "strands.store.add_messages",
+                    "could not record the conversation turn",
+                    {"user_id": self._user_id, "conversation_id": self._turn_conversation_id},
+                )
+            done.append((role, text))
 
     @staticmethod
-    def _render_transcript(messages: Any) -> str:
-        lines: List[str] = []
+    def _turns(messages: Any) -> List[tuple]:
+        turns: List[tuple] = []
         for message in messages or []:
             if not isinstance(message, dict):
                 continue
@@ -191,10 +197,9 @@ class SynapMemoryStore:
             if role not in ("user", "assistant"):
                 continue
             text = message_text(message)
-            if not text:
-                continue
-            lines.append(f"{role}: {text}")
-        return "\n".join(lines)
+            if text:
+                turns.append((role, text))
+        return turns
 
 
 __all__ = ["SynapMemoryStore"]

@@ -12,8 +12,11 @@ pluggable backend, so Synap plugs in through the two extension points Smolagents
   calls, tool results, reasoning) and records each completed action into Synap for
   future recall. `create_synap_recorder` returns the bare callback behind it.
 
-Plus `synap_st_instructions` to fold Synap short-term context into the agent's
-static `instructions`.
+Plus `attach_synap_history`, which the recorder applies for you: it wraps the agent's
+`write_memory_to_messages` so that once Synap has compacted the conversation the model
+sees Synap's compaction in place of the agent's earlier steps; and
+`synap_st_instructions` to fold that compaction into the agent's static `instructions`
+for an agent with no recorder.
 
 Smolagents is synchronous and its tools do not support `async`, so every surface
 drives the async Synap SDK through the shared `run_async` bridge.
@@ -35,11 +38,13 @@ Typical wiring::
 
 Tools/reads degrade (a Synap blip returns a not-found message); the ``store_memory``
 tool raises ``SynapIntegrationError``; the recorder logs and never raises (it runs
-inside the agent loop, where a raising callback would abort the run). Stream
-reporting is silent unless ``sdk.instance.listen()`` is running.
+inside the agent loop, where a raising callback would abort the run). The first
+report opens the gRPC stream (``sdk.instance.listen()``) when none is open;
+``SYNAP_AUTO_LISTEN=false`` keeps everything on REST.
 """
 
 from synap_smolagents.callbacks import create_synap_recorder, synap_step_callbacks
+from synap_smolagents.history import attach_synap_history
 from synap_smolagents.short_term import synap_st_instructions
 from synap_smolagents.tools import create_synap_tools
 
@@ -48,4 +53,5 @@ __all__ = [
     "create_synap_recorder",
     "synap_step_callbacks",
     "synap_st_instructions",
+    "attach_synap_history",
 ]

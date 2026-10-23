@@ -1,6 +1,6 @@
 {
   "name": "@maximem/synap-js-sdk",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Native TypeScript SDK for Synap context and memory management",
   "repository": {
     "type": "git",
@@ -75,7 +75,9 @@
   "license": "MIT",
   "optionalDependencies": {
     "@grpc/grpc-js": "^1.12.0",
-    "@grpc/proto-loader": "^0.7.13"
+    "@grpc/proto-loader": "^0.7.13",
+    "@huggingface/tokenizers": "^0.2.0",
+    "onnxruntime-node": "^1.30.0"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.17.0",

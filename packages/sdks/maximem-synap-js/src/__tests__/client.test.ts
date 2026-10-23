@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SynapClient, type SynapSdkLike } from '../index.js';
-import { InvalidInputError } from '../errors.js';
+import { AuthenticationError, InvalidInputError } from '../errors.js';
 import { buildFetchRequest } from '../context/fetch.js';
 import { buildCreateBody } from '../memories/interface.js';
 
@@ -22,7 +22,7 @@ function client(fetchImpl: typeof fetch) {
 describe('SynapClient', () => {
   describe('credentials', () => {
     it('requires an API key', () => {
-      expect(() => new SynapClient({ _force_new: true })).toThrow(InvalidInputError);
+      expect(() => new SynapClient({ _force_new: true })).toThrow(AuthenticationError); // as Python raises it, since 0.5.13
       expect(() => new SynapClient({ _force_new: true })).toThrow(/SYNAP_API_KEY/);
     });
 
@@ -289,6 +289,16 @@ describe('SynapClient', () => {
       const out = await c.memories.wait_for_completion('ing-1', { poll_interval_seconds: 0 });
       expect(out['status']).toBe('completed');
       expect(spy).toHaveBeenCalledTimes(3);
+    });
+
+    it('wait_for_completion stops at partial_success instead of polling to the timeout', async () => {
+      const spy = vi.fn(async () => json({ status: 'partial_success' }));
+      const c = client(spy as unknown as typeof fetch);
+      const out = await c.memories.wait_for_completion('ing-1', {
+        timeout_seconds: 0.2, poll_interval_seconds: 0.01,
+      });
+      expect(out['status']).toBe('partial_success');
+      expect(spy).toHaveBeenCalledTimes(1);
     });
 
     it('wait_for_completion returns the last status on timeout rather than throwing', async () => {

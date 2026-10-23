@@ -1,12 +1,15 @@
 """Synap short-term context for Google ADK.
 
-Mirrors the LangGraph template, adapted to Google ADK's
-``LlmAgent.instruction`` mechanism (which accepts a string OR a callable
+Adapted to Google ADK's ``LlmAgent.instruction`` mechanism (which accepts a string OR a callable
 ``(ReadonlyContext) -> str | Awaitable[str]`` that the runtime invokes
 before every model call).
 
 Wraps ``sdk.conversation.context.get_context_for_prompt`` (cache-first
-behind ``SYNAP_SDK_ST_AUTHORITATIVE``).
+behind ``SYNAP_SDK_ST_AUTHORITATIVE``). It adds Synap's compaction of the
+conversation to the instruction, and nothing before the first compaction: ADK
+already sends the recent turns in the request, and ``formatted_context`` would
+send them twice. ``create_synap_callbacks`` also replaces ADK's earlier turns
+with Synap's.
 
 Quality contract identical to the LangGraph adapter:
 
@@ -85,8 +88,11 @@ async def _fetch_st_block(
         return ""
     if not getattr(response, "available", False):
         return ""
-    formatted = getattr(response, "formatted_context", None)
-    return (formatted or "").strip()
+    # `formatted_context` ends with the turns after the compaction, and ADK
+    # sends those itself in the request contents. Only the compaction (and the
+    # earlier turns history search matched) belong in the instruction.
+    parts = [getattr(response, "context_block", None), getattr(response, "history_block", None)]
+    return "\n\n".join(p.strip() for p in parts if isinstance(p, str) and p.strip())
 
 
 def _compose(

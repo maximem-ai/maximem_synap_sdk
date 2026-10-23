@@ -48,9 +48,12 @@ class _FakeAgent:
         self.tools.append(fn)
         return fn
 
-    def system_prompt(self, fn: Callable) -> Callable:
-        self.system_prompt_callbacks.append(fn)
-        return fn
+    def system_prompt(self, fn: Callable = None, *, dynamic: bool = False):
+        def register(f: Callable) -> Callable:
+            self.system_prompt_callbacks.append(f)
+            self.dynamic = dynamic
+            return f
+        return register if fn is None else register(fn)
 
 
 def _make_sdk(

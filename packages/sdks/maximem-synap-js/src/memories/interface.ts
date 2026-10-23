@@ -169,6 +169,82 @@ export interface BatchCreateOptions {
   failFast?: boolean;
 }
 
+/** Mirrors the Python ForgetMode enum. */
+export const FORGET_MODES = ['preview', 'direct'] as const;
+export type ForgetMode = (typeof FORGET_MODES)[number];
+
+export const FORGET_DESCRIPTION_MIN = 3;
+export const FORGET_DESCRIPTION_MAX = 500;
+
+export interface ForgetOptions {
+  /** What to forget, in the user's own words (3 to 500 characters). */
+  description: string;
+  user_id?: string | null;
+  userId?: string | null;
+  customer_id?: string | null;
+  customerId?: string | null;
+  /**
+   * The level to search, named in full, one entry per level down to it:
+   * `{ customer: "acme", team: "payments", user: "dana" }`. Only needed when
+   * your scope ladder has a level between customer and user.
+   */
+  scope?: Record<string, string> | null;
+  /** `"preview"` (default) or `"direct"`. See `MemoriesInterface.forget`. */
+  mode?: ForgetMode | string;
+}
+
+/** A memory the description matched. Mirrors Python's `ForgetCandidate`. */
+export interface ForgetCandidate {
+  memory_id: string;
+  content: string;
+  memory_type?: string | null;
+  /** `"memory"`, or where a copy lives: chunk, sentence, entity, triple, profile, candidate. */
+  store?: string;
+}
+
+export type ForgetStatus = 'nothing_matches' | 'preview' | 'deleted' | 'partial';
+
+/** Result of `memories.forget`. Mirrors Python's `ForgetResponse`. */
+export interface ForgetResult {
+  status: ForgetStatus;
+  request_id: string | null;
+  candidates: ForgetCandidate[];
+  deleted_ids: string[];
+  failed_ids: string[];
+  still_present_in: string[];
+  may_be_incomplete: boolean;
+}
+
+/** The body Python builds for `memories.forget`, key order included. */
+export function buildForgetBody(options: ForgetOptions): Json {
+  const description = options.description;
+  if (
+    typeof description !== 'string' ||
+    // Code points, as Python's len() and the server count; `.length` counts
+    // UTF-16 units, so 251 emoji (502 units) were refused here only.
+    [...description].length < FORGET_DESCRIPTION_MIN ||
+    [...description].length > FORGET_DESCRIPTION_MAX
+  ) {
+    throw new InvalidInputError(
+      `description must be between ${FORGET_DESCRIPTION_MIN} and ${FORGET_DESCRIPTION_MAX} characters`,
+    );
+  }
+  const mode = (options.mode as string | undefined) ?? 'preview';
+  if (!(FORGET_MODES as readonly string[]).includes(mode)) {
+    throw new InvalidInputError(
+      `Invalid mode '${mode}'. Expected one of: ${FORGET_MODES.join(', ')}`,
+    );
+  }
+  const o = options as unknown as Record<string, unknown>;
+  return {
+    description,
+    user_id: either<string>(o, 'user_id', 'userId') ?? null,
+    customer_id: either<string>(o, 'customer_id', 'customerId') ?? null,
+    scope: options.scope ?? null,
+    mode,
+  };
+}
+
 export interface MemoriesInterface {
   create(options: CreateMemoryOptions): Promise<CreateMemoryResult>;
   batch_create(options: BatchCreateOptions): Promise<BatchCreateResult>;
@@ -176,6 +252,35 @@ export interface MemoriesInterface {
   get(memoryId: string): Promise<Json>;
   update(options: UpdateMemoryOptions): Promise<Json>;
   delete(memoryId: string): Promise<Json>;
+  /**
+   * Forget memories by describing them in the user's own words. Use it when
+   * you do not hold memory ids; to delete one memory by id, use `delete()`.
+   *
+   * The call must be scoped to exactly one user: pass `user_id`, plus
+   * `customer_id` on a B2B instance. Otherwise the server answers 400, raised
+   * as `InvalidInputError`.
+   *
+   * Modes:
+   * - `"preview"` (default): files a pending request that a person approves in
+   *   the dashboard under Deletion requests. Deletes nothing. `candidates`
+   *   lists what matched.
+   * - `"direct"`: finds and soft-deletes in one call. Not idempotent as a
+   *   request: a repeat is harmless and finds nothing new, but it is a new
+   *   request.
+   *
+   * `status` is `"nothing_matches"`, `"preview"`, `"deleted"` or `"partial"`.
+   * `"partial"` means the memories are hidden but a store named in
+   * `still_present_in` may still hold the text, so do not tell an end user it
+   * was removed unless `status === "deleted"`. `failed_ids` lists memories that
+   * could not be deleted; `may_be_incomplete` is true when the match may not
+   * have covered everything.
+   *
+   * Errors: `InvalidInputError` for 400/422 or a bad `description`/`mode`
+   * caught before sending; `ServiceUnavailableError` for 503 (the matcher was
+   * unavailable and nothing was deleted, so trying again is safe; the
+   * transport applies its normal retry policy first); `RateLimitError` for 429.
+   */
+  forget(options: ForgetOptions): Promise<ForgetResult>;
   status(ingestionId: string): Promise<Json>;
   wait_for_completion(ingestionId: string, options?: WaitOptions): Promise<Json>;
 }
@@ -245,13 +350,21 @@ export interface WaitOptions {
   signal?: AbortSignal;
 }
 
-const TERMINAL_STATUSES = new Set(['completed', 'failed', 'error', 'cancelled']);
+// The server's statuses are queued, processing, completed, failed and
+// partial_success. Python stops on the last three; 'error' and 'cancelled' are
+// never emitted by the server and are kept only so an older value still stops.
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'partial_success', 'error', 'cancelled']);
 
-export function createMemoriesInterface(transport: HttpTransport): MemoriesInterface {
+export function createMemoriesInterface(
+  transport: HttpTransport,
+  // Called after a forget that deleted something, so the caller can stop serving
+  // that user's cached context. Mirrors Python's `_evict_forgotten`.
+  onForgotten?: (ids: { userId: string | null; customerId: string | null }) => void,
+): MemoriesInterface {
   return {
     async create(options) {
       const o = options as unknown as Record<string, unknown>;
-      transport.checkCustomerId(o['customer_id'] ?? o['customerId'], 'memories.create');
+      await transport.checkCustomerId(o['customer_id'] ?? o['customerId'], 'memories.create');
       return transport.request<CreateMemoryResult>('memories_create', { body: buildCreateBody(options) });
     },
 
@@ -269,10 +382,19 @@ export function createMemoriesInterface(transport: HttpTransport): MemoriesInter
     async create_from_file(options) {
       const userId = options.user_id ?? options.userId;
       const customerId = options.customer_id ?? options.customerId;
+      // Checked first, as Python checks it: a flat map of level key to id.
+      // Until 0.5.20 any shape was serialised and sent.
+      const scope = options.scope as unknown;
+      if (scope !== undefined && scope !== null && (
+        typeof scope !== 'object' || Array.isArray(scope)
+        || !Object.values(scope as Record<string, unknown>).every((v) => typeof v === 'string')
+      )) {
+        throw new InvalidInputError('scope must be a flat dict of level key to id, both strings.');
+      }
       if (!userId) throw new InvalidInputError('user_id is required');
       // Not required: rejected on B2C, so requiring it made the documented
       // default combination impossible to call.
-      transport.checkCustomerId(customerId, 'memories.create_from_file');
+      await transport.checkCustomerId(customerId, 'memories.create_from_file');
 
       const filePath = options.file_path ?? options.filePath;
       const sources = [filePath, options.file, options.text].filter((v) => v !== undefined);
@@ -290,7 +412,11 @@ export function createMemoriesInterface(transport: HttpTransport): MemoriesInter
 
       const form = new FormData();
       form.set('user_id', userId);
-      form.set('customer_id', customerId);
+      // Only when there is one. `form.set('customer_id', undefined)` sends the
+      // string "undefined", which a B2C instance refuses as a customer id.
+      if (typeof customerId === 'string' && customerId !== '') {
+        form.set('customer_id', customerId);
+      }
       form.set('relationship_type', options.relationship_type ?? options.relationshipType ?? 'b2c');
       form.set('mode', String(options.mode ?? DEFAULT_INGEST_MODE));
 
@@ -300,6 +426,11 @@ export function createMemoriesInterface(transport: HttpTransport): MemoriesInter
       if (documentType) form.set('document_type', String(documentType));
       if (options.metadata !== undefined && Object.keys(options.metadata).length > 0) {
         form.set('metadata', JSON.stringify(options.metadata));
+      }
+      // The upload route is multipart and cannot carry an object, so the scope
+      // map goes as a JSON string; the server parses it with json.loads.
+      if (options.scope && Object.keys(options.scope).length > 0) {
+        form.set('scope', JSON.stringify(options.scope));
       }
 
       if (filePath !== undefined) {
@@ -361,6 +492,28 @@ export function createMemoriesInterface(transport: HttpTransport): MemoriesInter
         );
       }
       return transport.request<Json>('memories_delete', { pathParams: { memory_id: memoryId } });
+    },
+
+    async forget(options) {
+      const o = options as unknown as Record<string, unknown>;
+      await transport.checkCustomerId(o['customer_id'] ?? o['customerId'], 'memories.forget');
+      const body = buildForgetBody(options) as Record<string, unknown>;
+      const result = await transport.request<ForgetResult>('memories_forget', { body: body as Json });
+      // A preview deletes nothing, so it evicts nothing. Never let a cache
+      // problem turn a successful delete into an error.
+      // A forget can remove only copies (a profile entry, a chunk) and so return no
+      // memory ids; those are served from the same caches.
+      const removed = !!result?.deleted_ids?.length
+        || result?.status === 'deleted' || result?.status === 'partial';
+      if (removed && onForgotten) {
+        try {
+          onForgotten({
+            userId: (body['user_id'] as string | null) ?? null,
+            customerId: (body['customer_id'] as string | null) ?? null,
+          });
+        } catch { /* eviction is best effort */ }
+      }
+      return result;
     },
 
     async status(ingestionId) {

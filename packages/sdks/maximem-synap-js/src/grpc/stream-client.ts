@@ -58,8 +58,41 @@ const SEND_QUEUE_MAX_AGE_MS = 5 * 60 * 1_000;
 // How long disconnect() waits for the buffer to go out. Short: a shutdown path
 // that blocks is worse than a lost event.
 const CLOSE_FLUSH_TIMEOUT_MS = 2_000;
+// Instance still building: the server answers events with a `throttle` signal
+// whose metadata code is `instance_not_ready`. The held events are probed again
+// after the server's retry_after_seconds, clamped to this range and jittered.
+// Same numbers as Python's GRPCTransport.NOT_READY_*.
+const NOT_READY_MIN_WAIT_MS = 5_000;
+const NOT_READY_MAX_WAIT_MS = 120_000;
+const NOT_READY_JITTER = 0.2;
+const NOT_READY_PROBE_GRACE_MS = 3_000;
+// Most events held in memory while the build runs (and until they are
+// acknowledged afterwards). At the cap the OLDEST are dropped, counted and
+// reported in one warning when the hold ends. Same value as Python's
+// GRPCTransport.NOT_READY_MAX_HELD.
+export const NOT_READY_MAX_HELD = 5_000;
+// Instance build FAILED (throttle metadata code `instance_build_failed`). Not
+// time based, so there is no hint to wait for: events are held the same way but
+// probed at this slow fixed interval plus jitter, so the stream recovers by
+// itself after a rebuild, with no reconnect loop. Same numbers as Python's
+// GRPCTransport.BUILD_FAILED_PROBE_*.
+export const BUILD_FAILED_PROBE_INTERVAL_MS = 60_000;
+export const BUILD_FAILED_PROBE_JITTER_MS = 10_000;
 /** The server may only SHORTEN the SDK default, never extend it past this floor. */
 const MIN_TTL_SECONDS = 60;
+
+/** What the server said when it refused events for an unfinished build. */
+export interface InstanceNotReadyInfo {
+  retryAfterSeconds: number;
+  instanceId: string;
+  state: string;
+  message: string;
+  /** `instance_not_ready` (building) or `instance_build_failed`. */
+  code: string;
+  /** Recovery instruction from the server; only set for `instance_build_failed`. */
+  hint?: string;
+  attempts?: string;
+}
 
 export interface StreamCredentials {
   apiKey: string;
@@ -80,6 +113,11 @@ export interface StreamClientOptions {
   onContext?: (bundle: Record<string, unknown>) => void;
   /** Fires only for `compaction_update` bundles. Backs the compaction subscriptions. */
   onCompactionUpdate?: (conversationId: string, bundle: Record<string, unknown>) => void;
+  /**
+   * The server's message count for a conversation, sent after it has written a
+   * streamed message. See `ConversationState` in the proto.
+   */
+  onConversationState?: (conversationId: string, messageCount: number) => void;
   /**
    * Where the outbox journal lives, so buffered events survive a restart.
    * Defaults to `~/.synap`, the same root Python uses. `''` turns it off, and
@@ -220,6 +258,8 @@ export interface ConversationEventInput {
   tool_call_id?: string;
   search_queries?: string[];
   context_types?: string[];
+  /** proto: ConversationEvent.scope. The conversation's rung. */
+  scope?: Record<string, string>;
   /**
    * proto: ConversationEvent.event_id. Minted here when absent, and the SAME
    * id travels on every replay — that is what the server's dedupe matches, so
@@ -249,6 +289,22 @@ export class GrpcStreamClient {
   // actually loses sessions — the write succeeded, the stream broke before the
   // server processed it, and nobody knows.
   #unacked = new Map<string, { queuedAt: number; event: ConversationEventInput }>();
+  // Set while the server refuses events because the instance is still being
+  // built. Null otherwise. See `#handleNotReady`.
+  #notReady: InstanceNotReadyInfo | null = null;
+  #notReadyWarned = false;
+  // `instanceId|series` pairs already warned about for a failed build.
+  #buildFailedWarned = new Set<string>();
+  #notReadyResignalled = false;
+  #notReadyRunning = false;
+  // Events held (tracked, not written) since the last replay.
+  #notReadyUnwritten: ConversationEventInput[] = [];
+  // Held events dropped at NOT_READY_MAX_HELD, reported when the hold ends.
+  #notReadyDropped = 0;
+  // True from the first refusal until the backlog is acknowledged, so the
+  // normal 100-event cap does not evict held events in the gap after resume.
+  #heldBacklog = false;
+  #notReadyWake: (() => void) | null = null;
   // Why the stream stopped, when it stopped for a reason the caller can act on
   // (today: a credit refusal). Mirrors Python's `last_error`.
   #lastError: SynapError | null = null;
@@ -293,6 +349,18 @@ export class GrpcStreamClient {
    * ordinary disconnect.
    */
   get lastError(): SynapError | null { return this.#lastError; }
+
+  /**
+   * Why the server is refusing events right now, or null.
+   *
+   * Set from the moment the server answers an event with an
+   * `instance_not_ready` throttle until a replay of the held events is
+   * accepted. The events are held, not dropped. Mirrors Python's
+   * `GRPCTransport.instance_not_ready`.
+   */
+  get instanceNotReady(): InstanceNotReadyInfo | null {
+    return this.#notReady === null ? null : { ...this.#notReady };
+  }
 
   async connect(): Promise<void> {
     await this.#loadGrpc();
@@ -352,6 +420,7 @@ export class GrpcStreamClient {
     // below is an error.
     this.#shutdownRequested = true;
     this.#stopHeartbeat();
+    this.#notReadyWake?.();
 
     // What is still buffered goes out before the half-close.
     this.#flushBeforeClose();
@@ -424,6 +493,14 @@ export class GrpcStreamClient {
       this.#enqueue(stamped);
       return;
     }
+    if (this.#notReady !== null) {
+      // The server is refusing events until the build finishes. Writing this
+      // one would only earn another refusal, so hold it with the rest; the
+      // probe loop replays everything in order.
+      this.#trackUnacked(stamped);
+      this.#notReadyUnwritten.push(stamped);
+      return;
+    }
     this.#write({ conversation_event: { ...stamped } });
     this.#trackUnacked(stamped);
   }
@@ -459,7 +536,19 @@ export class GrpcStreamClient {
     if (id === undefined || id === '') return;
     const cutoff = Date.now() - SEND_QUEUE_MAX_AGE_MS;
     for (const [oldestId, held] of this.#unacked) {
-      if (held.queuedAt >= cutoff && this.#unacked.size < SEND_QUEUE_MAX_DEPTH) break;
+      // While the build runs (and until the backlog is acknowledged) the age
+      // limit does not apply and the depth limit is NOT_READY_MAX_HELD: a build
+      // outlasts the 5 minute window and holding 100 events would drop data.
+      const holding = this.#notReady !== null || this.#heldBacklog;
+      const limit = holding ? NOT_READY_MAX_HELD : SEND_QUEUE_MAX_DEPTH;
+      const youngEnough = held.queuedAt >= cutoff || holding;
+      if (youngEnough && this.#unacked.size < limit) break;
+      if (holding) {
+        this.#unacked.delete(oldestId);
+        this.#journal.recordDropped(oldestId);
+        this.#notReadyDropped += 1;
+        continue;
+      }
       this.#unacked.delete(oldestId);
       this.#journal.recordDropped(oldestId);
       console.warn(
@@ -483,8 +572,16 @@ export class GrpcStreamClient {
     const unacked = [...this.#unacked.values()];
     const queued = this.#sendQueue;
     this.#sendQueue = [];
-    for (const held of [...unacked, ...queued]) {
+    for (const held of unacked) {
       this.#write({ conversation_event: { ...held.event } });
+    }
+    for (const held of queued) {
+      this.#write({ conversation_event: { ...held.event } });
+      // Written and not yet acknowledged is exactly what `#unacked` is for.
+      // Without this a refusal after the replay (an unfinished build, a stream
+      // that breaks again) lost every event the replay had just sent. Python's
+      // `_drain_send_queue` has always tracked them.
+      this.#trackUnacked(held.event);
     }
     if (unacked.length > 0 || queued.length > 0) {
       console.warn(
@@ -657,6 +754,17 @@ export class GrpcStreamClient {
         this.#unacked.delete(id);
         this.#journal.recordAcked(id);
       }
+      if (this.#notReady === null && this.#unacked.size < SEND_QUEUE_MAX_DEPTH) {
+        this.#heldBacklog = false;
+      }
+      if (
+        this.#notReady === null && (ack.event_ids ?? []).length > 0
+        && (this.#notReadyWarned || this.#buildFailedWarned.size > 0)
+      ) {
+        // The server is accepting again, so the next build gets its own warning.
+        this.#notReadyWarned = false;
+        this.#buildFailedWarned.clear();
+      }
       if (this.#journal.needsCompaction) this.#compactJournal();
       return;
     }
@@ -669,9 +777,174 @@ export class GrpcStreamClient {
       this.#missedHeartbeats = 0;
       return;
     }
-    const signal = msg['signal'] as { signal_type?: string } | undefined;
+    const state = msg['conversation_state'] as
+      | { conversation_id?: string; message_count?: number | string }
+      | undefined;
+    if (state) {
+      // int64 arrives as a string or a number depending on the loader options.
+      const count = Number(state.message_count ?? 0);
+      if (state.conversation_id && Number.isFinite(count)) {
+        this.#options.onConversationState?.(state.conversation_id, count);
+      }
+      return;
+    }
+    const signal = msg['signal'] as
+      | { signal_type?: string; reason?: string; metadata?: Record<string, string> }
+      | undefined;
+    if (signal?.signal_type === 'throttle') {
+      const metadata = signal.metadata ?? {};
+      if (metadata['code'] === 'instance_not_ready' || metadata['code'] === 'instance_build_failed') {
+        this.#handleNotReady(metadata, signal.reason ?? '');
+      } else {
+        console.warn(`[synap] server throttle signal: ${signal.reason ?? ''}`);
+      }
+      return;
+    }
     if (signal?.signal_type === 'closing') {
       void this.#handleDisconnect('server_signal_closing');
+    } else if (signal?.signal_type === 'error') {
+      // Logged, as Python logs it, and not fatal: the server sends it for one
+      // refused event or session_start and keeps the stream open. Until 0.5.18
+      // it was dropped here without a word.
+      console.warn(`[synap] server error signal (stream stays open): ${signal.reason ?? ''}`);
+    }
+  }
+
+  /**
+   * The server refused work: the instance is still being built.
+   *
+   * The refused event is still in `#unacked` (the server neither recorded nor
+   * acknowledged it), so nothing is dropped here. This does not close the
+   * stream and does not reconnect: a reconnect would replay the same events
+   * into the same refusal for the whole build. One probe loop waits
+   * `retry_after_seconds` (clamped, jittered), replays the held events and,
+   * once the server accepts them, resumes normally. Mirrors Python's
+   * `_handle_not_ready`.
+   *
+   * Logged once per build, not once per event: replaying N held events draws N
+   * refusals and a warning each would bury the log.
+   */
+  #handleNotReady(metadata: Record<string, string>, reason: string): void {
+    const code = metadata['code'] || 'instance_not_ready';
+    const failed = code === 'instance_build_failed';
+    const retry = Number(metadata['retry_after_seconds']);
+    this.#notReady = {
+      retryAfterSeconds: Number.isFinite(retry) ? Math.trunc(retry) : NOT_READY_MAX_WAIT_MS / 1000,
+      instanceId: metadata['instance_id'] || this.#credentials.instanceId,
+      state: metadata['state'] || (failed ? 'failed' : 'building'),
+      message: reason,
+      code,
+      ...(failed ? { hint: metadata['hint'] || '', attempts: metadata['attempts'] || '' } : {}),
+    };
+    this.#notReadyResignalled = true;
+    this.#heldBacklog = true;
+    if (failed) {
+      const key = `${this.#notReady.instanceId}|${metadata['series'] || ''}`;
+      if (!this.#buildFailedWarned.has(key)) {
+        this.#buildFailedWarned.add(key);
+        const hint = this.#notReady.hint;
+        console.warn(
+          `[synap] instance ${this.#notReady.instanceId}: its memory architecture build FAILED, `
+          + `so the server is refusing events. ${this.#unacked.size} event(s) are held in `
+          + `memory (up to ${NOT_READY_MAX_HELD}; beyond that the oldest are dropped and the `
+          + 'count is reported). Waiting alone will not fix this. '
+          + `${hint ? `To recover: ${hint}` : 'Rebuild the instance.'} The SDK checks again `
+          + `about every ${Math.round(BUILD_FAILED_PROBE_INTERVAL_MS / 1000)}s and resumes by `
+          + `itself after a successful rebuild. Server said: ${reason}`,
+        );
+      }
+    } else if (!this.#notReadyWarned) {
+      this.#notReadyWarned = true;
+      console.warn(
+        `[synap] instance ${this.#notReady.instanceId} is still building its memory `
+        + `architecture; the server is refusing events for now. ${this.#unacked.size} `
+        + 'event(s) are held in memory and will be re-sent automatically when it is '
+        + `ready (next check in about ${Math.round(this.#notReadyWait() / 1000)}s). Up to `
+        + `${NOT_READY_MAX_HELD} events are held; beyond that the oldest are dropped and `
+        + `the count is reported. Server said: ${reason}`,
+      );
+    }
+    if (!this.#notReadyRunning) {
+      this.#notReadyRunning = true;
+      void this.#notReadyProbeLoop();
+    }
+  }
+
+  /** Milliseconds until the next probe: the hint, clamped, with jitter. */
+  #notReadyWait(): number {
+    if (this.#notReady?.code === 'instance_build_failed') {
+      return BUILD_FAILED_PROBE_INTERVAL_MS + Math.random() * BUILD_FAILED_PROBE_JITTER_MS;
+    }
+    const hintMs = (this.#notReady?.retryAfterSeconds ?? 0) * 1000;
+    const base = Math.min(Math.max(hintMs, NOT_READY_MIN_WAIT_MS), NOT_READY_MAX_WAIT_MS);
+    const jitter = 1 - NOT_READY_JITTER + Math.random() * 2 * NOT_READY_JITTER;
+    return Math.max(base * jitter, NOT_READY_MIN_WAIT_MS);
+  }
+
+  /** Cancellable on disconnect, and never the only thing holding the process open. */
+  #notReadySleep(ms: number): Promise<void> {
+    if (this.#options.sleep) return this.#options.sleep(ms);
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(() => { this.#notReadyWake = null; resolve(); }, ms);
+      if (typeof timer.unref === 'function') timer.unref();
+      this.#notReadyWake = () => { clearTimeout(timer); this.#notReadyWake = null; resolve(); };
+    });
+  }
+
+  async #notReadyProbeLoop(): Promise<void> {
+    try {
+      while (!this.#shutdownRequested) {
+        await this.#notReadySleep(this.#notReadyWait());
+        if (this.#shutdownRequested) return;
+        // The reconnect path replays everything. If the build is still running
+        // the next refusal restarts this loop, and the warning has been given.
+        if (!this.isConnected || this.#call === null) return;
+        this.#notReadyResignalled = false;
+        // Fresh timestamps, so the age limit cannot evict a held event in the
+        // moment between the build finishing and its ack.
+        const now = Date.now();
+        for (const held of this.#unacked.values()) held.queuedAt = now;
+        // Emptied only after the replay has written every event it covers.
+        const covered = new Set(this.#unacked.keys());
+        for (const held of [...this.#unacked.values()]) {
+          this.#write({ conversation_event: { ...held.event } });
+        }
+        this.#notReadyUnwritten = this.#notReadyUnwritten.filter(
+          (e) => !covered.has(String(e.event_id)));
+        await this.#notReadySleep(NOT_READY_PROBE_GRACE_MS);
+        if (this.#shutdownRequested) return;
+        if (!this.#notReadyResignalled) {
+          // Accepted. New sends go straight out from here; write what was held
+          // after the replay or it would wait for a reconnect.
+          const instanceId = this.#notReady?.instanceId ?? this.#credentials.instanceId;
+          this.#notReady = null;
+          const late = this.#notReadyUnwritten;
+          this.#notReadyUnwritten = [];
+          for (const event of late) {
+            if (!this.#unacked.has(String(event.event_id))) continue; // dropped at the cap
+            this.#write({ conversation_event: { ...event } });
+          }
+          this.#notReadyWarned = false;
+          this.#buildFailedWarned.clear();
+          console.info(
+            `[synap] instance ${instanceId} is ready; held events were accepted and `
+            + 'the stream is back to normal',
+          );
+          return;
+        }
+      }
+    } finally {
+      this.#notReady = null;
+      this.#notReadyUnwritten = [];
+      this.#notReadyRunning = false;
+      if (this.#notReadyDropped > 0) {
+        console.warn(
+          `[synap] while the instance was building, ${this.#notReadyDropped} held event(s) `
+          + `were DROPPED (oldest first) because the in-memory limit of ${NOT_READY_MAX_HELD} `
+          + 'was reached. They were not sent.',
+        );
+        this.#notReadyDropped = 0;
+      }
     }
   }
 

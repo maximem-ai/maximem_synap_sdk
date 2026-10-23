@@ -35,6 +35,17 @@ dependencies = [
     # arrives the moment a client opens the stream. That also made anticipation
     # unreachable: the only writer to the prefetch cache is the stream's
     # on_message callback, so the cache could never be populated at all.
+    #
+    # Lower bound 4.25.0 is what the generated stubs need, and it is proven, not
+    # assumed: the stubs are generated with grpcio-tools 1.62.3 (protoc 4.25.1,
+    # gencode "Protobuf Python Version: 4.25.1", no runtime-version check) and
+    # were measured import + serialise + live gRPC stream OK on protobuf 4.24.4,
+    # 4.25.0, 4.25.8, 5.26.0, 5.29.5, 6.31.1, 6.33.6 and 7.36.2. Stubs generated
+    # by a newer protoc (6.31.1) refuse every runtime older than 6.31.1 and
+    # broke installs next to libraries that pin protobuf<6 (Google generative
+    # AI libraries). No upper bound: nothing found that breaks on 7.x. Do NOT
+    # regenerate with a newer grpcio-tools without raising this floor;
+    # tests/test_protobuf_floor.py fails if the two drift apart.
     "protobuf>=4.25.0",
 ]
 
@@ -51,6 +62,19 @@ graph = [
     "neo4j>=5.0.0",
     "pyyaml>=6.0",
 ]
+# Local embedding model (cache/encoders.py): history search after compaction,
+# and matching fetch queries to prefetched items. One int8 ONNX file, the one
+# the JS SDK runs too.
+local-search = [
+    "onnxruntime>=1.20",
+    "tokenizers>=0.20",
+    "huggingface_hub>=0.24",
+    "numpy>=1.24",
+]
+# Other encoders history_search_model can name (cache/encoders.py). Not part of
+# local-search: the default model does not need them.
+local-search-fastembed = ["fastembed>=0.9"]
+local-search-model2vec = ["model2vec>=0.3"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
