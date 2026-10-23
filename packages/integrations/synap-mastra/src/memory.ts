@@ -1,12 +1,22 @@
 // SynapMemory — a MastraMemory implementation backed by Synap.
 //
-// Drop-in for `new Agent({ memory: new SynapMemory({...}) })`. The methods
-// that the common Agent flow reaches are backed by Synap:
+// Drop-in for `new Agent({ memory: new SynapMemory({...}) })`, with or without
+// a Mastra storage attached. What Mastra's default Agent path calls on a memory
+// is `getInputProcessors` and `getOutputProcessors` (see processors.ts), and
+// those are what is Synap-backed:
+//
+//   - input: Synap's long-term context becomes a system message, and once
+//     Synap has compacted the conversation its compaction replaces the turns
+//     Mastra loaded before the current one
+//   - output: the run's turns are written to Synap (the stream, opened on
+//     first use; REST when it cannot carry them), plus tool calls, results and
+//     reasoning on the stream
+//
+// The methods below are the explicit API, for callers that invoke them:
 //
 //   - recall(): loads prior messages via sdk.conversation.context.get_context_for_prompt
-//   - saveMessages(): persists each turn via sdk.conversation.record_message
+//   - saveMessages(): writes each turn the same way the output processor does
 //   - getSystemMessage(): fetches Synap context via sdk.fetch and returns it
-//     as a preamble the Agent injects into the system prompt
 //
 // Methods that Synap doesn't natively back (thread metadata, working memory,
 // delete, clone) are implemented with in-process defaults + honest warnings.
@@ -31,6 +41,13 @@ import type {
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import type { MastraDBMessage } from "@mastra/core/agent/message-list";
 
+import {
+  COMPACTION_ID_PREFIX,
+  SynapInputProcessor,
+  SynapOutputProcessor,
+  isHistoryMessage,
+  messageText,
+} from "./processors.js";
 import { SynapMastraStreamReporter, type SynapStreamOptions } from "./stream.js";
 import type {
   SynapSdkLike,
@@ -53,9 +70,11 @@ export interface SynapMemoryOptions extends SynapIdentityOptions, SynapStreamOpt
  * Construct a Synap-backed Mastra memory.
  *
  * Error policy mirrors the rest of the Synap integrations:
- *   - read failures degrade gracefully (empty recall, null system message)
- *   - write failures throw so the Agent loop surfaces ingestion outages
+ *   - read failures degrade gracefully (the framework's own history stands, no
+ *     Synap context is added)
+ *   - turn writes never throw: a failed write is logged and the run goes on
  */
+
 export class SynapMemory extends MastraMemory {
   private readonly sdk: SynapSdkLike;
   private readonly userId: string;
@@ -114,7 +133,6 @@ export class SynapMemory extends MastraMemory {
         conversation_id: input.threadId ?? null,
         user_id: this.userId,
         customer_id: this.customerId || null,
-        search_query: null,
         max_results: 20,
         mode: this.mode,
         include_conversation_context: false,
@@ -160,6 +178,26 @@ export class SynapMemory extends MastraMemory {
       const messages = raw
         .filter((m) => !!m && typeof m.content === "string" && m.content.trim() !== "")
         .map((m) => this.toMastraMessage(m, primaryThreadId, args.resourceId));
+      // The compaction block (and the earlier turns the SDK found for the
+      // latest message) stands in for the turns it covers: recent_messages
+      // holds only the turns after it. Older SDKs send neither.
+      const preamble = [response.context_block, response.history_block].filter((p) => !!p).join("\n\n");
+      if (preamble) {
+        const first = raw.find((m) => !!m && typeof m.timestamp === "string");
+        messages.unshift(
+          this.toMastraMessage(
+            {
+              role: "system",
+              content: preamble,
+              // Just before the first recent turn, so it sorts ahead of them.
+              timestamp: first ? new Date(Date.parse(first.timestamp) - 1).toISOString() : new Date(0).toISOString(),
+              message_id: `${COMPACTION_ID_PREFIX}${primaryThreadId}`,
+            },
+            primaryThreadId,
+            args.resourceId,
+          ),
+        );
+      }
       return {
         messages,
         total: messages.length,
@@ -178,16 +216,83 @@ export class SynapMemory extends MastraMemory {
   }
 
   /**
-   * Persist each message by relaying it through sdk.conversation.record_message.
-   * Unknown/tool roles are skipped (Synap conversation records are
-   * user/assistant/system only).
+   * The input processors Mastra's Agent runs before the model: Synap's
+   * long-term context and history (see processors.ts).
    *
-   * Stream first, REST second, never both. When the caller has an
-   * `sdk.instance.listen()` stream open, the turn goes out as a stream event
-   * and the server persists it from that event; writing it over REST as well
-   * would store it twice. When there is no stream — which is every caller who
-   * has not opted in — the reporter returns false before it touches anything
-   * and the REST write below is exactly what it has always been.
+   * With a Mastra storage attached, Mastra's own processors (message history,
+   * working memory, semantic recall) come first and Synap's runs after them, so
+   * its compaction can replace the history they loaded. Without one the base
+   * class would throw "Memory requires a storage provider", so only Synap's
+   * runs and Synap's turns are the history.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async getInputProcessors(configured?: any[], context?: any): Promise<any[]> {
+    const own = this._storage !== undefined
+      ? await (super.getInputProcessors as (...a: unknown[]) => Promise<unknown[]>)
+          .call(this, configured ?? [], context)
+      : [];
+    return [
+      ...own,
+      new SynapInputProcessor({
+        sdk: this.sdk,
+        userId: this.userId,
+        customerId: this.customerId,
+        mode: this.mode,
+        injectSystemContext: this.injectSystemContext,
+      }),
+    ];
+  }
+
+  /** The output processors: Mastra's own when storage is attached, then Synap's. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async getOutputProcessors(configured?: any[], context?: any): Promise<any[]> {
+    const own = this._storage !== undefined
+      ? await (super.getOutputProcessors as (...a: unknown[]) => Promise<unknown[]>)
+          .call(this, configured ?? [], context)
+      : [];
+    return [
+      ...own,
+      new SynapOutputProcessor({
+        persist: (messages, threadId) => this.persist(messages, threadId),
+      }),
+    ];
+  }
+
+  /**
+   * Write messages to Synap. Each turn goes through `recordTurn` (the stream,
+   * opened on first use, REST when it cannot carry it; never both), and tool
+   * calls, results and reasoning go on the stream. A message Mastra saves again
+   * (it re-saves one when a tool result is filled in) is not written twice.
+   * Never throws.
+   */
+  private async persist(messages: unknown[], fallbackThreadId = ""): Promise<unknown[]> {
+    const out: unknown[] = [];
+    for (const m of messages) {
+      const role = typeof (m as { role?: unknown })?.role === "string" ? (m as { role: string }).role : "";
+      if (role !== "user" && role !== "assistant") continue;
+      // Synap's own history, put there by the input processor or recall(), is
+      // not something somebody said.
+      if (isHistoryMessage(m)) continue;
+
+      const content = messageText(m);
+      const own = (m as { threadId?: unknown })?.threadId;
+      const threadId = typeof own === "string" && own ? own : fallbackThreadId;
+
+      // Above the text guard on purpose. An assistant message whose only parts
+      // are tool calls carries no text at all, and those tool events are the
+      // whole reason to report it: they have no other durable home.
+      const written = await this.stream.report(m, { threadId, role, text: content });
+      if (written) out.push(m);
+    }
+    return out;
+  }
+
+  /**
+   * Write each message to Synap, the way the output processor does. Mastra's
+   * Agent calls this itself only with `savePerStep`.
+   *
+   * System messages are the instructions, not turns: they are written over
+   * REST as before and never put on the stream.
    */
   async saveMessages(args: {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -197,31 +302,19 @@ export class SynapMemory extends MastraMemory {
     observabilityContext?: any;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   }): Promise<any> {
-    const out: unknown[] = [];
-    for (const m of args.messages ?? []) {
-      const role = typeof m?.role === "string" ? m.role : "";
-      if (role !== "user" && role !== "assistant" && role !== "system") continue;
-
-      const content = extractText(m);
+    const messages = args.messages ?? [];
+    const out = await this.persist(messages);
+    for (const m of messages) {
+      if (m?.role !== "system" || isHistoryMessage(m)) continue;
+      const content = messageText(m);
       const threadId = typeof m?.threadId === "string" ? m.threadId : "";
-
-      // Above the text guard on purpose. An assistant message whose only parts
-      // are tool calls carries no text at all, and those tool events are the
-      // whole reason to report it: they have no other durable home.
-      const sent = await this.stream.report(m, { threadId, role, text: content });
-
       if (!content || !threadId) continue;
-      if (sent) {
-        out.push(m);
-        continue;
-      }
-
       await this.sdk.conversation.record_message({
         conversation_id: threadId,
-        role,
+        role: "system",
         content,
         user_id: this.userId,
-        customer_id: this.customerId,
+        ...(this.customerId ? { customer_id: this.customerId } : {}),
       });
       out.push(m);
     }
@@ -384,26 +477,4 @@ export class SynapMemory extends MastraMemory {
       this.workingMemoryWarned = true;
     }
   }
-}
-
-function extractText(m: unknown): string {
-  if (!m || typeof m !== "object") return "";
-  const obj = m as Record<string, unknown>;
-  const content = obj.content;
-  if (typeof content === "string") return content.trim();
-  if (content && typeof content === "object") {
-    const c = content as Record<string, unknown>;
-    if (Array.isArray(c.parts)) {
-      const texts: string[] = [];
-      for (const part of c.parts) {
-        if (part && typeof part === "object" && (part as Record<string, unknown>).type === "text") {
-          const t = (part as Record<string, unknown>).text;
-          if (typeof t === "string") texts.push(t);
-        }
-      }
-      return texts.join("").trim();
-    }
-    if (typeof c.text === "string") return c.text.trim();
-  }
-  return "";
 }

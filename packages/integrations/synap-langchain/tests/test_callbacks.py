@@ -273,16 +273,16 @@ async def test_on_llm_end_swallows_sdk_error(handler, mock_sdk):
 
 @pytest.mark.asyncio
 async def test_on_llm_end_logs_error_on_failure(handler, mock_sdk, caplog):
-    """SDK failure during on_llm_end is logged at ERROR level."""
+    """SDK failure during on_llm_end is logged (by record_turn) and swallowed."""
     import logging
     mock_sdk.conversation.record_message.side_effect = RuntimeError("boom")
     gen = MagicMock(text="text")
     response = MagicMock(generations=[[gen]])
 
-    with caplog.at_level(logging.ERROR, logger="synap_langchain.callbacks"):
+    with caplog.at_level(logging.WARNING):
         await handler.on_llm_end(response=response, run_id=uuid4())
 
-    assert len(caplog.records) >= 1
+    assert any("turn write failed" in r.getMessage() for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -511,3 +511,19 @@ class TestToolArgsAreTheParsedDict:
         await _handler_for(sdk).on_tool_start(
             {"name": "lookup"}, "raw", run_id=uuid4())
         assert sdk.instance.record_tool_call.await_args.args[1] == {"input": "raw"}
+
+
+@pytest.mark.asyncio
+async def test_the_chat_model_is_sent_with_each_turn():
+    """Synap sizes compaction to the agent's model (COMPACTION_V3_PLAN.md §4.3)."""
+    from unittest.mock import AsyncMock, MagicMock
+    from langchain_core.messages import HumanMessage
+    from synap_langchain.callbacks import SynapCallbackHandler
+
+    sdk = MagicMock()
+    sdk.instance.is_listening = False
+    sdk.conversation.record_message = AsyncMock()
+    handler = SynapCallbackHandler(sdk=sdk, conversation_id="conv-1", user_id="user-1", customer_id="cust-1")
+    await handler.on_chat_model_start({}, [[HumanMessage(content="hi")]], run_id=uuid4(),
+                                      invocation_params={"model": "gpt-4o-mini"})
+    assert sdk.conversation.record_message.call_args.kwargs["metadata"] == {"agent_model": "gpt-4o-mini"}

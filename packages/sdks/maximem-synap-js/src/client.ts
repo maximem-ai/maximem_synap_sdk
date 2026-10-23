@@ -13,10 +13,11 @@
  * They return different shapes on purpose. See gotcha G-B.
  */
 
-import { InvalidInputError } from './errors.js';
+import type { AgentModel } from './agent-model.js';
+import { AuthenticationError, InvalidInputError } from './errors.js';
 import { getEnv } from './util/env.js';
 import { HttpTransport, type Credentials, type HttpTransportOptions } from './transport/http.js';
-import { fetchContext } from './context/fetch.js';
+import { fetchContext, responseShapeOf } from './context/fetch.js';
 import { normalizeContextResponse } from './context/normalize.js';
 import {
   AnticipationCache, type AnticipationCacheSnapshot,
@@ -36,11 +37,16 @@ import { createInstanceNamespace, type InstanceNamespace } from './instance/inte
 import type { FetchOptions, Json, NormalisedContext, RawContext } from './context/types.js';
 import { SDK_VERSION } from './version.js';
 import * as registry from './registry.js';
-import { ShortTermStore } from './cache/short-term-store.js';
+import { ShortTermStore, isComplete, type ShortTermTurn } from './cache/short-term-store.js';
+import { TurnStore, type TurnInput } from './cache/turn-store.js';
+import { renderExcerpts, searchTurns, toolResultText, type Encoder } from './cache/history-search.js';
+import { SEMANTIC_MATCH } from './behavior/contract.js';
 import { overlayLocalRecentTurns } from './context/overlay.js';
 import { renderForPrompt, renderCompacted } from './context/local-prompt.js';
 import { TurnCounter, mergeUserSummary } from './context/user-summary.js';
-import { tryServeFromCache, servedItemIds, type Scope as AnticipationScope } from './context/anticipated.js';
+import {
+  tryServeFromCache, servedItemIds, distinctQueryCount, type Scope as AnticipationScope,
+} from './context/anticipated.js';
 import { rungKey } from './context/anticipation-cache.js';
 import type { FetchHooks } from './context/fetch.js';
 import { buildAssembledEvent } from './context/assembled.js';
@@ -97,17 +103,60 @@ export interface SynapClientOptions {
    */
   st_verbatim_overlay?: boolean | undefined;
   stVerbatimOverlay?: boolean | undefined;
+  /**
+   * The model the agent runs on, and optionally its context window. Sent with
+   * every recorded turn so the server sizes compaction to the agent's window
+   * (it compacts at ~11.7% of it: 15K tokens on a 128K model). A name is
+   * enough; the server knows common models' windows. Unset = 128K. Python's
+   * `SDKConfig.agent_model` / `agent_context_window`; per-call `model` /
+   * `context_window` override them.
+   */
+  agent_model?: string | undefined;
+  agentModel?: string | undefined;
+  agent_context_window?: number | undefined;
+  agentContextWindow?: number | undefined;
 
   /**
    * Let the SDK answer `get_context_for_prompt` and `get_compacted` from its
    * own short-term store when the conversation is warm, skipping the cloud
-   * round trip. Off by default. `SYNAP_SDK_ST_AUTHORITATIVE` also enables it.
+   * round trip. Off by default. `SYNAP_SDK_ST_AUTHORITATIVE` overrides this in
+   * either direction.
+   *
+   * Leave it off for an application that runs more than one process against
+   * the same conversation. A process learns the server's message count only
+   * when it writes. If it reads before it writes (build the prompt, then
+   * record the turn), it cannot know that another process recorded a turn in
+   * between, and it answers without that turn. Turn it on where one process
+   * owns a conversation for its whole life, such as a voice agent.
    *
    * This is the COST switch. `st_verbatim_overlay` is the correctness one and
    * is independent of it.
    */
   sdk_st_authoritative?: boolean | undefined;
   sdkStAuthoritative?: boolean | undefined;
+
+  /**
+   * Your own embedding model for history search after compaction
+   * (cache/history-search.ts), any `{ model, encode }`. It replaces the
+   * SDK's model for history search; the anticipation cache uses it only if it
+   * is the model its thresholds were tuned on (`history_search_model`).
+   */
+  history_search_encoder?: Encoder | undefined;
+  historySearchEncoder?: Encoder | undefined;
+
+  /**
+   * The local embedding model, as Python's `history_search_model`: history
+   * search after compaction, and matching fetch queries to prefetched items by
+   * meaning. "auto" (default) runs the SDK's multilingual model in Node when
+   * the optional `onnxruntime-node` and `@huggingface/tokenizers` packages are
+   * installed: downloaded once (about 135 MB) into ~/.synap/models when the
+   * first stream starts or the first history search runs, then loaded in the
+   * background. An "onnx:<repo>@<revision>/<file>" names another (history
+   * search only). null keeps keyword matching. Never loaded on Edge or in a
+   * browser.
+   */
+  history_search_model?: string | null | undefined;
+  historySearchModel?: string | null | undefined;
 
   /**
    * Where the SDK's diagnostics go. Defaults to `console.warn` prefixed with
@@ -148,6 +197,18 @@ export interface ConfigureOptions {
   session_timeout_minutes?: number;
   /** Accepted and ignored. Python-only. */
   log_level?: string;
+  /** The agent's model; see `SynapClientOptions.agent_model`. */
+  agent_model?: string;
+  agentModel?: string;
+  agent_context_window?: number;
+  agentContextWindow?: number;
+  /**
+   * The local model for history search and matching a fetch to prefetched
+   * context by meaning: "auto" (default) or a model id, null for keyword
+   * matching only. As Python's SDKConfig.history_search_model. Since 0.5.19.
+   */
+  history_search_model?: string | null;
+  historySearchModel?: string | null;
   /** Replaces the diagnostic sink, same as the constructor option. */
   logger?: SynapLogger | undefined;
 }
@@ -171,12 +232,28 @@ export interface UnifiedFetchOptions {
   types?: string[];
   mode?: string;
   precision_level?: string;
+  /** The moment the question is being asked. See FetchOptions.query_date. */
+  query_date?: string;
+  /** A share of the response per search query. See FetchOptions.max_results_per_query. */
+  max_results_per_query?: number;
   include_conversation_context?: boolean;
   scopes?: string[];
   include_scope_labels?: boolean;
   context_mode?: string;
   include_profile?: boolean;
   last_n_conversations?: number;
+  /**
+   * `"by_type"` (default) or `"ranked"`. Ranked asks every scope for its
+   * ranked list and merges them into `items`, best first across scopes and
+   * types, by each item's `rank_score`; `formatted_context` is then one
+   * numbered list in that order. The typed lists are filled either way.
+   */
+  response_shape?: string;
+}
+
+/** `SYNAP_SDK_LOCAL_MODEL=off` keeps the local embedding model from loading. Python: the same. */
+function localModelOff(): boolean {
+  return ['off', '0', 'false', 'no', 'none'].includes((getEnv('SYNAP_SDK_LOCAL_MODEL') ?? '').trim().toLowerCase());
 }
 
 export class SynapClient {
@@ -204,10 +281,20 @@ export class SynapClient {
 
   #closed = false;
   #initialized = false;
+  #identity: Promise<void> | undefined;
   readonly #registryKeys!: string[];
   readonly #compactionSubscribers!: CompactionSubscribers;
   readonly #shortTerm!: ShortTermStore;
+  /** Every raw turn, past compaction, for local history search. */
+  readonly #turnStore!: TurnStore;
+  /** A local embedding model for history search; null = keywords only. */
+  #localEncoder: Encoder | null = null;
+  /** `history_search_model`: "auto", an "onnx:..." name, or null for none. */
+  #localModelName: string | null = 'auto';
+  #localModelStarted = false;
+  readonly #backfillAfter = new Map<string, number>();
   readonly #stVerbatimOverlay!: boolean | undefined;
+  #agentModel: AgentModel = {};
   #logger!: SynapLogger | undefined;
   readonly #stAuthoritative!: boolean | undefined;
   readonly #turns!: TurnCounter;
@@ -267,13 +354,24 @@ export class SynapClient {
       userAgent: `@maximem/synap-js-sdk/${SDK_VERSION}`,
     });
     if (options.heartbeat) this.#transport.startHeartbeat();
+    this.#transport.identityResolver = () => this.#resolveIdentity();
 
     this.#anticipationCache = new AnticipationCache();
 
     this.#fetchHooks = {
-      beforeFetch: (scope, options) => {
+      beforeFetch: async (scope, options) => {
         const o = options as Record<string, unknown>;
-        const attempt = tryServeFromCache(
+        // A prefetched bundle was assembled with no period restriction, so it
+        // cannot answer a request that names one. Same class as the scope_path
+        // defect described below: a bundle built for one question served to a
+        // different one, entirely inside this process and invisible to every
+        // server log. Skipping the cache costs one round trip; serving a bundle
+        // that ignores the date costs the answer.
+        if (o['query_date'] ?? o['queryDate']) return null;
+        // A prefetched bundle was not assembled under a per-query share
+        // either, and its items do not say which query found them.
+        if (o['max_results_per_query'] ?? o['maxResultsPerQuery']) return null;
+        const attempt = await tryServeFromCache(
           this.#anticipationCache,
           scope as AnticipationScope,
           {
@@ -298,6 +396,8 @@ export class SynapClient {
           response: attempt.response,
           servedItemIds: servedItemIds(attempt.hit),
           bundleId: attempt.hit.bundleIds[0] ?? '',
+          borderline: attempt.hit.band === 'borderline',
+          raceDeadlineMs: SEMANTIC_MATCH.race_deadline_ms,
         };
       },
       onAssembled: (scope, options, response, startedAt) => {
@@ -308,6 +408,31 @@ export class SynapClient {
         // loop: per-prefetch outcome scoring, per-pattern hit rates. Carries
         // ids and scope only, never prompt content.
         this.#emitContextUsed(options as Record<string, unknown>, _scope, served);
+      },
+      // The periodic user-summary splice, as Python runs it at the end of the
+      // user, customer and client fetches (the conversation fetch does its own
+      // through `onFetched`). Until 0.5.12 only the conversation fetch had it,
+      // so the same usage gave the model different context in JS.
+      // Python's `_should_skip_server_st`: when this process already holds the
+      // conversation's compaction and every turn after it, the server is told
+      // not to assemble them again.
+      skipServerShortTerm: (conversationId) => {
+        if (!this.#isStAuthoritative()) return false;
+        const entry = this.#shortTerm.get(conversationId);
+        return entry !== null && entry.compactionId !== null && isComplete(entry);
+      },
+      onResponse: (scope, options, response) => {
+        if (scope === 'conversation') return;
+        const o = options as Record<string, unknown>;
+        const owner = scope === 'user'
+          ? (o['user_id'] ?? o['userId'])
+          : scope === 'customer' ? (o['customer_id'] ?? o['customerId']) : '_client';
+        this.#injectUserSummary(
+          response,
+          (o['conversation_id'] ?? o['conversationId']) as string | undefined,
+          owner as string | undefined,
+          rungKey((o['scope_path'] ?? o['scopePath']) as Record<string, string> | undefined),
+        );
       },
     };
 
@@ -320,9 +445,22 @@ export class SynapClient {
     this.client = { context: { fetch: async (o = {}) => fetchContext(this.#transport, 'client', o, this.#fetchHooks) } };
     this.#compactionSubscribers = new CompactionSubscribers();
     this.#shortTerm = new ShortTermStore();
+    // Every raw turn, kept past compaction for local search (turn-store.ts).
+    this.#turnStore = new TurnStore();
+    this.#shortTerm.attachArchive(this.#turnStore);
     this.#stVerbatimOverlay = options.st_verbatim_overlay ?? options.stVerbatimOverlay;
+    this.#agentModel = {
+      model: options.agent_model ?? options.agentModel,
+      contextWindow: options.agent_context_window ?? options.agentContextWindow,
+    };
     this.#logger = options.logger;
     this.#stAuthoritative = options.sdk_st_authoritative ?? options.sdkStAuthoritative;
+    this.#localEncoder = options.history_search_encoder ?? options.historySearchEncoder ?? null;
+    const modelOption = options.history_search_model !== undefined
+      ? options.history_search_model
+      : options.historySearchModel;
+    this.#localModelName = modelOption === undefined ? 'auto' : modelOption;
+    if (this.#localEncoder?.model === SEMANTIC_MATCH.model) this.#anticipationCache.setEncoder(this.#localEncoder);
     this.#turns = new TurnCounter();
     this.conversation = createConversationNamespace(
       this.#transport,
@@ -339,8 +477,12 @@ export class SynapClient {
       },
       // Buffer the turn locally so the next fetch sees it, ahead of the server
       // having persisted and compacted it.
-      ({ conversationId, role, content, timestamp }) => {
-        this.#shortTerm.appendTurn(conversationId, role, content, timestamp);
+      ({ conversationId, role, content, timestamp, messageId, serverMessageCount, inFlight }) => {
+        this.#shortTerm.appendTurn(conversationId, role, content, timestamp, {
+          messageId,
+          serverMessageCount,
+          inFlight,
+        });
       },
       (response, conversationId, userId, scopePath) => {
         overlayLocalRecentTurns(response, this.#shortTerm, conversationId, this.#stVerbatimOverlay);
@@ -349,9 +491,24 @@ export class SynapClient {
       {
         prompt: (conversationId, style) => this.#localPrompt(conversationId, style),
         compacted: (conversationId, format) => this.#localCompacted(conversationId, format),
+        reseed: (conversationId, response) => this.#reseedShortTerm(conversationId, response),
+        historyExcerpts: (conversationId, response, query) => this.#withHistoryExcerpts(conversationId, response, query),
       },
+      () => this.#agentModel,
+      // The same hooks as the other three scopes: the anticipation cache first,
+      // as Python's conversation fetch does, and the audit events. Until 0.5.13
+      // the conversation fetch was built without them, so every JS conversation
+      // fetch was a billed round trip, including ones the stream had answered.
+      this.#fetchHooks,
     );
-    this.memories = createMemoriesInterface(this.#transport);
+    // After a forget that deleted something, drop that user's cached bundles so
+    // they are not served until the TTL runs out. Unconditional, unlike the
+    // invalidate-on-write hook: a forgotten memory must not be served.
+    this.memories = createMemoriesInterface(this.#transport, ({ userId, customerId }) => {
+      for (const id of new Set([userId, customerId])) {
+        if (id) this.#anticipationCache.dropEntity(id);
+      }
+    });
     this.credits = createCreditsNamespace(this.#transport);
     this.cache = createCacheNamespace(this.#anticipationCache);
     this.instance = createInstanceNamespace(
@@ -360,11 +517,23 @@ export class SynapClient {
       ({ conversationId, role, content }) => {
         this.#shortTerm.appendTurn(conversationId, role, content);
       },
+      () => this.#agentModel,
+      ({ conversationId, result, toolName }) => this.archive_tool_result(conversationId, result, { tool_name: toolName }),
+      (customerId, where) => this.#transport.checkCustomerId(customerId, where),
     );
     // A compaction folds turns into the server's summary, so the local copies
     // of those turns must go or they keep being spliced back in.
+    // Prefetched bundles start arriving with the stream: load the local model
+    // then, not at construction, so a process that never listens or searches
+    // never downloads it.
+    this.instance._internal.setOnListen(() => this.#startLocalModel());
     this.instance._internal.setCompactionApplier((bundle) => {
       this.#shortTerm.applyCompaction(bundle);
+    });
+    // The server's message count after each streamed write, which is how the
+    // store learns whether it holds the whole conversation.
+    this.instance._internal.setConversationStateHandler((conversationId, messageCount) => {
+      this.#shortTerm.noteServerCount(conversationId, messageCount);
     });
 
     if (options._force_new !== true) {
@@ -495,19 +664,32 @@ export class SynapClient {
   /**
    * Resolve `client_id` and `instance_id` from the API key.
    *
-   * Mirrors Python's `initialize()`. Calling it is optional here (unlike
-   * Python, which raises "SDK not initialized" from `_ensure_initialized`)
-   * because every HTTP route authenticates on the API key alone. It matters
-   * for the anticipation cache: a bundle shared at client scope is filtered on
-   * `client_id`, and an empty one fails that filter for every bundle. That was
-   * a silent cache-scope bug in Python before whoami bootstrapping existed.
+   * Mirrors Python's `initialize()`. Python raises "SDK not initialized" on
+   * any call made before it; here the first request runs the same resolution
+   * instead (`identityResolver` on the transport), so skipping this call costs
+   * nothing and breaks no existing caller. It matters for the anticipation
+   * cache: a bundle shared at client scope is filtered on `client_id`, and an
+   * empty one fails that filter for every bundle.
+   *
+   * Calling it explicitly still locks `configure()`, as in Python. Resolving
+   * on first use does not, because a caller who never called it could always
+   * configure after a request, and that keeps working.
    *
    * Best-effort and idempotent. A whoami failure leaves whatever the
    * constructor resolved and is not fatal.
    */
   async initialize(): Promise<void> {
-    if (this.#initialized) return;
     this.#initialized = true;
+    await this.#resolveIdentity();
+  }
+
+  /** Runs whoami at most once, however many calls arrive together. */
+  #resolveIdentity(): Promise<void> {
+    this.#identity ??= this.#whoami();
+    return this.#identity;
+  }
+
+  async #whoami(): Promise<void> {
     const credentials = this.#transport.currentCredentials();
     if (credentials.clientId !== '' && credentials.instanceId !== '') return;
     try {
@@ -590,6 +772,21 @@ export class SynapClient {
       this.#transport.setRetryPolicy(options.retryPolicy ?? options.retry_policy ?? null);
     }
     if (options.logger !== undefined) this.#logger = options.logger;
+    // As Python's SDKConfig.history_search_model. Until 0.5.19 only the
+    // constructor took it here. It applies to the model the SDK loads when it
+    // first needs one; once that has started, changing it does nothing.
+    const historyModel = options.history_search_model !== undefined
+      ? options.history_search_model
+      : options.historySearchModel;
+    if (historyModel !== undefined && !this.#localModelStarted) this.#localModelName = historyModel;
+    const model = options.agent_model ?? options.agentModel;
+    const window = options.agent_context_window ?? options.agentContextWindow;
+    if (model !== undefined || window !== undefined) {
+      this.#agentModel = {
+        model: model ?? this.#agentModel.model,
+        contextWindow: window ?? this.#agentModel.contextWindow,
+      };
+    }
   }
 
   /**
@@ -617,15 +814,24 @@ export class SynapClient {
       types,
       mode = 'fast',
       precision_level: precisionLevel = 'high',
+      query_date: queryDate,
+      max_results_per_query: maxResultsPerQuery,
       include_conversation_context: includeConversationContext = true,
       scopes,
       include_scope_labels: includeScopeLabels = false,
       context_mode: contextMode = 'in-conversation',
       include_profile: includeProfile = true,
       last_n_conversations: lastNConversations = 1,
+      response_shape: responseShape = 'by_type',
     } = options;
 
+    // First, as Python checks it: on B2C a customer_id is refused even when
+    // `scopes` leaves out every sub-fetch that would have carried it.
+    await this.#transport.checkCustomerId(customerId, 'sdk.fetch');
     validateConversationId(conversationId);
+    // Up front, as Python does: a bad value inside a scope fetch would be an
+    // InvalidInputError too, but only once a scope is queried.
+    responseShapeOf({ response_shape: responseShape });
 
     const wants = (scope: string): boolean => scopes === undefined || scopes.includes(scope);
     const shared = {
@@ -634,6 +840,12 @@ export class SynapClient {
       types,
       mode,
       precision_level: precisionLevel,
+      // In `shared` so it reaches all four branches at once. The Python edit
+      // threaded three call sites by hand and missed the client branch, which
+      // sits one indent deeper; spreading removes that whole class of miss.
+      query_date: queryDate,
+      max_results_per_query: maxResultsPerQuery,
+      response_shape: responseShape,
     };
 
     const labels: string[] = [];
@@ -767,6 +979,11 @@ export class SynapClient {
         scope,
         source_bundle_ids: served.bundleId ? [served.bundleId] : [],
         timestamp_ms: Date.now(),
+        // How many distinct search queries the fetch carried. A hit never
+        // reaches the fetch route, so this event is how the server learns it
+        // happened and what it is charged by. The count only: this event must
+        // not carry the caller's words.
+        query_count: distinctQueryCount(options['search_query'] ?? options['searchQuery']),
       });
     } catch {
       // Non-fatal by design.
@@ -832,26 +1049,153 @@ export class SynapClient {
   /**
    * Whether the SDK is authoritative for short-term context.
    *
-   * Resolution order matches Python's `_is_st_authoritative`: the explicit
-   * option first, then `SYNAP_SDK_ST_AUTHORITATIVE` (truthy strings only).
-   * Defaults to false, so nothing changes for a caller who never sets it.
+   * Resolution order matches Python's `_is_st_authoritative`:
+   * `SYNAP_SDK_ST_AUTHORITATIVE` first, as an explicit override in either
+   * direction, then the option. Off by default. Being enabled does not mean
+   * the local store is used: that also takes an entry that holds the whole
+   * conversation, see `isComplete`.
    */
   #isStAuthoritative(): boolean {
-    if (this.#stAuthoritative === true) return true;
     const raw = (getEnv('SYNAP_SDK_ST_AUTHORITATIVE') ?? '').trim().toLowerCase();
-    return ['1', 'true', 'yes', 'on'].includes(raw);
+    if (['0', 'false', 'no', 'off'].includes(raw)) return false;
+    if (['1', 'true', 'yes', 'on'].includes(raw)) return true;
+    return this.#stAuthoritative === true;
   }
 
   /**
    * Render `get_context_for_prompt` from the local store, or null to fall
-   * through to the network. Warm means a compaction landed OR raw turns are
-   * buffered: with neither there is nothing to render and the server's answer
-   * is the only real one.
+   * through to the network.
+   *
+   * The store answers only when it holds the whole conversation: the server
+   * has confirmed a count the entry accounts for. An entry that is merely
+   * present is not enough. After a restart or an eviction it holds one turn,
+   * and rendering that as the conversation drops everything said before it.
    */
+  /**
+   * `response` with the earlier turns that best match `query` (by default the
+   * latest user message) appended, when a compaction exists. The search runs
+   * here, over the turn archive. Python: `_with_history_excerpts`.
+   */
+  async #withHistoryExcerpts(conversationId: string, response: Json, query: string | undefined): Promise<Json> {
+    const r = (response ?? {}) as Record<string, unknown>;
+    const store = this.#turnStore;
+    const recent = (Array.isArray(r['recent_messages']) ? r['recent_messages'] : []) as Array<Record<string, unknown>>;
+    store.addMany(
+      conversationId,
+      recent.map((m) => ({
+        role: String(m['role'] ?? 'user'),
+        content: String(m['content'] ?? ''),
+        timestamp: String(m['timestamp'] ?? ''),
+        message_id: typeof m['message_id'] === 'string' ? m['message_id'] : null,
+      })),
+    );
+    const entry = this.#shortTerm.get(conversationId);
+    const total = Math.max(Number(r['total_message_count'] ?? 0) || 0, Number(entry?.serverMessageCount ?? 0) || 0);
+    this.#maybeBackfillTurns(conversationId, total);
+    if (!r['context_block']) return response;
+    const turns = store.turns(conversationId);
+    let q = query;
+    if (!q) {
+      const latest = [...recent].reverse().find((m) => m['role'] === 'user');
+      q = latest ? String(latest['content'] ?? '') : ([...turns].reverse().find((t) => t.role === 'user')?.content ?? '');
+    }
+    if (!q) return response;
+    const exclude = new Set<string>();
+    for (const m of recent) {
+      if (typeof m['message_id'] === 'string' && m['message_id']) exclude.add(m['message_id']);
+      exclude.add(String(m['content'] ?? ''));
+    }
+    this.#startLocalModel();
+    const hits = await searchTurns(turns, q, { exclude, encoder: this.#localEncoder, store });
+    if (hits.length === 0) return response;
+    const block = renderExcerpts(hits, turns.length ? turns[turns.length - 1]!.timestamp : '');
+    return {
+      ...r,
+      history_excerpts: hits.map((h) => ({ position: h.position, role: h.role, text: h.text })),
+      history_block: block,
+      formatted_context: (String(r['formatted_context'] ?? '').trimEnd() + '\n\n' + block).trim(),
+    } as Json;
+  }
+
+  /**
+   * Keep what a tool returned in this process's turn archive, so history search
+   * can find it after a compaction. Never sent anywhere: the server's
+   * conversation holds what people said, and a compaction is made from that.
+   * `instance.record_tool_result` calls this too. Python: `archive_tool_result`.
+   */
+  archive_tool_result(
+    conversationId: string,
+    result: unknown,
+    options: { tool_name?: string | null; toolName?: string | null; timestamp?: string } = {},
+  ): void {
+    if (!conversationId || result === null || result === undefined) return;
+    try {
+      this.#turnStore.add(conversationId, 'tool', toolResultText(result, options.tool_name ?? options.toolName),
+        options.timestamp ?? new Date().toISOString());
+    } catch {
+      // The archive is a convenience: never fail the agent's call.
+    }
+  }
+
+  static readonly BACKFILL_COOLDOWN_MS = 60_000;
+  static readonly BACKFILL_PAGE = 500;
+
+  /** Fetch, in the background, turns the server holds and the archive does not. */
+  /**
+   * Load the local embedding model in the background, once. Searches and
+   * lookups before it is ready match by words. Python: `_start_history_encoder`.
+   */
+  #startLocalModel(): void {
+    if (this.#localModelStarted) return;
+    this.#localModelStarted = true;
+    if (localModelOff()) return;
+    const name = this.#localModelName === 'auto' ? SEMANTIC_MATCH.model : this.#localModelName;
+    if (!name) return;
+    const callerEncoder = this.#localEncoder;
+    void import('./cache/onnx-encoder.js')
+      .then(({ canRunLocalModel, loadOnnxEncoder }) => (canRunLocalModel() ? loadOnnxEncoder(name) : null))
+      .then((encoder) => {
+        if (encoder === null) return;
+        // A caller's own encoder keeps history search.
+        if (callerEncoder === null) this.#localEncoder = encoder;
+        // The anticipation thresholds hold for one model only.
+        if (encoder.model === SEMANTIC_MATCH.model) this.#anticipationCache.setEncoder(encoder);
+      })
+      .catch(() => {
+        /* words only, as without a model */
+      });
+  }
+
+  #maybeBackfillTurns(conversationId: string, total: number): void {
+    if (total <= this.#turnStore.count(conversationId)) return;
+    const now = Date.now();
+    if (now < (this.#backfillAfter.get(conversationId) ?? 0)) return;
+    this.#backfillAfter.set(conversationId, now + SynapClient.BACKFILL_COOLDOWN_MS);
+    void this.#backfillTurns(conversationId, total);
+  }
+
+  async #backfillTurns(conversationId: string, total: number): Promise<void> {
+    try {
+      let start = 1;
+      while (start <= total) {
+        const result = await this.#transport.request<Json>('conversation_turns', {
+          pathParams: { conversation_id: conversationId },
+          query: { start, limit: SynapClient.BACKFILL_PAGE },
+        });
+        const page = (((result ?? {}) as Record<string, unknown>)['turns'] ?? []) as TurnInput[];
+        this.#turnStore.addMany(conversationId, page);
+        if (page.length < SynapClient.BACKFILL_PAGE) break;
+        start += SynapClient.BACKFILL_PAGE;
+      }
+    } catch (error) {
+      this.#warn(`Turn backfill for ${conversationId} failed: ${String(error)}`);
+    }
+  }
+
   #localPrompt(conversationId: string, style: string): Json | null {
     if (!this.#isStAuthoritative()) return null;
     const entry = this.#shortTerm.get(conversationId);
-    if (entry === null) return null;
+    if (entry === null || !isComplete(entry)) return null;
     if (entry.compactionId === null && entry.recentTurns.length === 0) return null;
     return renderForPrompt(entry, style) as unknown as Json;
   }
@@ -860,8 +1204,29 @@ export class SynapClient {
   #localCompacted(conversationId: string, format: string): Json | null {
     if (!this.#isStAuthoritative()) return null;
     const entry = this.#shortTerm.get(conversationId);
-    if (entry === null || entry.compactionId === null) return null;
+    if (entry === null || entry.compactionId === null || !isComplete(entry)) return null;
     return renderCompacted(entry, format);
+  }
+
+  /**
+   * Bring the local store back in step from the server's answer.
+   *
+   * Only for a conversation this process writes to. The server's answer lists
+   * every message its summary does not cover, which is exactly what the entry
+   * was missing.
+   */
+  #reseedShortTerm(conversationId: string, response: Json): void {
+    if (!this.#isStAuthoritative()) return;
+    const entry = this.#shortTerm.get(conversationId);
+    if (entry === null || !entry.participant) return;
+    const r = (response ?? {}) as Record<string, unknown>;
+    const recent = Array.isArray(r['recent_messages']) ? r['recent_messages'] : [];
+    this.#shortTerm.reseed(conversationId, {
+      compactionId: typeof r['compaction_id'] === 'string' ? r['compaction_id'] : null,
+      recentMessages: recent as ShortTermTurn[],
+      compactedMessageCount: Number(r['compacted_message_count'] ?? 0) || 0,
+      totalMessageCount: Number(r['total_message_count'] ?? 0) || 0,
+    });
   }
 
   /** Every diagnostic the SDK emits passes through here. */
@@ -910,8 +1275,11 @@ function resolveBaseUrl(options: SynapClientOptions): string | undefined {
 function resolveCredentials(options: SynapClientOptions): Credentials {
   // Read at call time, not module load, so a late process.env mutation works.
   const apiKey = options.apiKey ?? getEnv('SYNAP_API_KEY');
+  // An AuthenticationError, as Python raises it (auth/manager.py), so one
+  // `catch` handles "no usable key" in both SDKs. Until 0.5.13 this was an
+  // InvalidInputError.
   if (!apiKey) {
-    throw new InvalidInputError(
+    throw new AuthenticationError(
       'No Synap API key found. Set SYNAP_API_KEY in your environment, or pass ' +
         'apiKey to the SynapClient constructor.',
     );
