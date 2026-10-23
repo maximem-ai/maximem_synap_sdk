@@ -11,6 +11,8 @@ only needed to pin a specific instance.
 """
 
 import asyncio
+import secrets
+
 from maximem_synap import MaximemSynapSDK
 
 
@@ -19,7 +21,9 @@ async def main():
     await sdk.initialize()
 
     try:
-        user_id = "alice"
+        # This script writes a real (small) memory. Its user id follows the skill's test-id
+        # convention test_user_<purpose>_<8 random chars>, so scripts/cleanup_test_data.py can remove it.
+        user_id = f"test_user_demo_{secrets.token_hex(4)}"
 
         # 1. Ingest a turn (user-scoped: we pass user_id).
         # This is the B2C shape: user_id and nothing else. On a B2B instance

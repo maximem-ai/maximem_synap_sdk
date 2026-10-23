@@ -2,6 +2,8 @@
 
 The hardest thing to get right with any memory system is scoping for B2B SaaS. This file walks through the four common patterns. Use these as templates.
 
+Ids such as `alice` and `acme` below are placeholders for your app's real user and customer ids. Any id you create to TEST against a live instance must instead be `test_user_<purpose>_<8 random chars>` (see `reference/integration-checklist.md`), so it can be cleaned up.
+
 Patterns 2, 3 and 4 are **B2B only**: they need an instance whose `user_context_isolation` is `strict`. On a B2C instance (`equals_customer`) pattern 1 is the only shape that exists, and any `customer_id` you send is rejected with HTTP 400. Call `GET /api/v1/auth/whoami` and read `user_context_isolation` before you pick a pattern.
 
 ## 1. Single-user personal assistant (and every B2C instance)

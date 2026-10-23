@@ -54,6 +54,7 @@ Wire the app's OUTCOME or summary where the app has one (a decision, a result, a
 - **Pin the versions**: the SDK package and the CLI version you used.
 - **Dependency pre-flight before offering or wiring the stream:** check the installed packages for conflicts with the SDK (for example the protobuf version range against other Google or gRPC libraries). A conflict that stops the stream is reported to the human as a dependency issue with options; it is not left behind as a warning.
 - **Update `.env.example` and the README run section** with the new variables.
+- **Test user ids**: every test or probe user id (the project's own tests, the sentinel check, verify) is `test_user_<purpose>_<8 random chars>` (`python scripts/cleanup_test_data.py --suggest-id <purpose>`), so the cleanup before sign-out can find and remove it. Never use a real user's id, or ids like `alice`, as test data against a live instance.
 - **Tests**: at least one that mocks Synap failing and shows the app still answers, one for the 409 not-ready path, and one for redaction if the app redacts.
 - **Skill files**: the installer adds `.agents/`, `.claude/` and `skills-lock.json`; say so and ask whether to commit or ignore them.
 
@@ -62,7 +63,7 @@ Wire the app's OUTCOME or summary where the app has one (a decision, a result, a
 `verify_synap.py` proves Synap works for this key; it is not the app. Also:
 
 1. Run `python scripts/check_integration_wiring.py <project dir>` and paste its output. It lists write sites, read sites, dead read helpers and whether the stream is wired, and fails when the project writes but never reads.
-2. Drive the app's own endpoint with a sentinel phrase, then recall the sentinel through the app's own read code (after compaction, which can take about five minutes for recorded turns), or state that this was not done.
+2. Drive the app's own endpoint with a sentinel phrase, under a `test_user_<purpose>_<8 random chars>` id, then recall the sentinel through the app's own read code (after compaction, which can take about five minutes for recorded turns), or state that this was not done.
 3. Report whether the recalled text is actually used in a model prompt, and where.
 
 ## 8. A known defect is fixed before you report

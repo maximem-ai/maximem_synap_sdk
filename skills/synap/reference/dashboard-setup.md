@@ -3,7 +3,7 @@
 > **Read this next:** [CLI overview](https://docs.maximem.ai/cli/overview.md); [CLI command reference](https://docs.maximem.ai/cli/commands.md); [AI coding agents](https://docs.maximem.ai/integrations/ai-coding-agents.md); [Clients and instances](https://docs.maximem.ai/concepts/memory-scopes.md). The live docs win over this file.
 
 The Synap CLI creates the instance and the API key, so the coding agent does it. Run it as
-`<cli> <command>`, where `<cli>` is `maximem-synap` from PATH if `maximem-synap --version` reports 0.3.0 or newer, otherwise `npx @maximem/synap-cli@latest` (npx is only the installer: it puts the Python CLI on the PATH, so that form needs Node and Python 3.10+). Put `--output json` before the subcommand when you need to parse the result,
+`<cli> <command>`, where `<cli>` is `maximem-synap` from PATH if `maximem-synap --version` reports 0.3.2 or newer, otherwise `npx @maximem/synap-cli@latest` (npx is only the installer: it puts the Python CLI on the PATH, so that form needs Node and Python 3.10+). Put `--output json` before the subcommand when you need to parse the result,
 for example `... --output json instances get <id>`. The procedure order is in `SKILL.md`; the questions to
 ask are in `onboarding-ask-rules.md`.
 
@@ -23,7 +23,8 @@ answers it. Exit codes: 0 ok, 1 generic, 2 usage, 3 auth, 4 not found, 5 permiss
 | Ask | `onboard ask "<question>"` / `onboard ask --clear` | Lets an open dashboard show that your agent is waiting. Always ask the human in the session too. |
 | Report | `onboard report <step> <status> [--detail TEXT]` | Steps: `use_case_drafted`, `use_case_approved`, `integrating`, `env_written`. Status: `in_progress`, `done`, `failed`. |
 | Create | `instances create --name NAME --relationship b2c\|b2b --from-file usecase.md` | `--relationship` has no safe default: pass what the human confirmed. Also takes `--agent-type`. Starts the build (15 to 20 minutes). |
-| Key | `api-keys create -i <instance_id> --write-env` | Writes `SYNAP_API_KEY` and `SYNAP_INSTANCE_ID` into `./.env` (or the path you give), keeps the file git-ignored, and prints only a masked key. |
+| Key | `api-keys create -i <instance_id> --write-env [--env-suffix NAME] [--force]` | Writes `SYNAP_API_KEY` and `SYNAP_INSTANCE_ID` into `./.env` (or the path you give), keeps the file git-ignored, and prints only a masked key. With `--env-suffix NAME` (CLI 0.3.2 and newer; letters, digits, underscore) it writes `SYNAP_API_KEY_<NAME>` and `SYNAP_INSTANCE_ID_<NAME>` instead and leaves other instances' lines alone: use it whenever the project will have more than one instance. Without a suffix it refuses (exit 6) to overwrite another instance's plain variables unless you pass `--force`. |
+| List | `instances list --json` | What the workspace already has (name, status, who uses it). Run it right after sign-in and tell the human in plain words (`instances-explained.md`). |
 | Wait | `instances wait <instance_id> [--timeout S] [--interval S]` | Run it in the background with output to a log file and poll the log or `onboard status`, so the human can keep talking to you. Usually 15 to 20 minutes. Prints "attempt 2 of 3, about 6 min left" or "taking longer than usual" (Synap restarts a dead build by itself, up to 3 attempts). Exit 0 ready, 7 timeout, 1 failed (reason and the rebuild command printed). Final JSON has `attempt`, `max_attempts`, `elapsed_seconds`, `estimated_remaining_seconds`, `restartable`. Until it reports ready, runtime writes and fetches (including `verify_synap.py`) are rejected with HTTP 409 `instance_not_ready`. |
 | Rebuild | `instances rebuild <instance_id>` | Only after a failed build. Re-runs from the stored use-case (nothing to re-approve), starts a new series of 3 attempts, then `instances wait` again. At most 3 per instance per 24 hours: a 429 says so with the server's message; a 409 means the build is not failed. |
 | Verify | `python scripts/verify_synap.py` | Not a CLI command. Real write then recall. Waits the retry time the server gives while the build runs (message "The memory architecture is still being built: waiting N s"); exit 2 = still building when time ran out, 3 = the build failed (run `instances rebuild`). |
@@ -33,7 +34,7 @@ answers it. Exit codes: 0 ok, 1 generic, 2 usage, 3 auth, 4 not found, 5 permiss
 
 ## Things to surface to the human
 
-- **B2C vs B2B is chosen once, at create time, and cannot be changed.** It changes how you call the SDK:
+- **B2C vs B2B is chosen when the instance is created; once created, a change also goes through a request by email to gaurav@maximem.ai.** It changes how you call the SDK:
   - **B2C** (`user_context_isolation = "equals_customer"`): memory is per end-user. Send `user_id` and nothing
     else, on every call, including the turn-by-turn `record_message`. A `customer_id` is rejected with HTTP 400,
     and the Python SDK from 0.4.7 raises before the request leaves the process. Never pass the user id as a
@@ -45,8 +46,8 @@ answers it. Exit codes: 0 ok, 1 generic, 2 usage, 3 auth, 4 not found, 5 permiss
 - **Roles:** Owner and Admin can create instances and keys; Member is read-only.
 - **The instance is resolved from the API key.** You do not pass an instance ID on each call. Set
   `SYNAP_INSTANCE_ID` as an env var if you want to pin it; never as an `instance_id=` constructor argument.
-- **One key = one instance.** Use separate instances (and keys) for staging and production.
-- **Staging vs production hosts.** The SDK talks to production unless you also set `SYNAP_BASE_URL`,
+- **One key = one instance.** Use a separate instance (and key) for each agent and for each deployment of the customer's own (dev, test, live). With more than one instance, the variables are named per instance (`sdk-setup.md`, "Several instances").
+- **Connection settings.** The SDK talks to Synap's default servers unless you also set `SYNAP_BASE_URL`,
   `SYNAP_GRPC_HOST`, `SYNAP_GRPC_PORT` and `SYNAP_GRPC_USE_TLS` (see `sdk-setup.md`). Set the key and the four
   host variables from the same deployment, always.
 

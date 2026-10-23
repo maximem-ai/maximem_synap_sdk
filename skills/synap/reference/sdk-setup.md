@@ -151,27 +151,52 @@ export SYNAP_GRPC_PORT="443"
 export SYNAP_GRPC_USE_TLS="true"
 ```
 
-⚠ **An API key belongs to exactly one instance, and an instance lives in one
-deployment.** So pointing at a different host also means using that
-deployment's key: a production key against a staging host authenticates to
-nothing. `verify_synap.py` now fails on that rather than printing green, but
-the quiet version of this mistake is writing real customer turns into the
-wrong environment, which nothing catches.
+⚠ **An API key belongs to exactly one instance (the instance is resolved from the key). If the project will have more
+than one Synap instance (several agents, the customer's own dev, test and live versions of the app, tenants with
+an instance each), or you are not sure, ask the human, and mint each key with the CLI flag `--env-suffix NAME`
+(CLI 0.3.2 and newer; if `api-keys create --help` does not list it, use `npx @maximem/synap-cli@latest`):
 
-Set all four together or none of them. `SYNAP_BASE_URL` alone leaves the
-stream pointed at production while reads go elsewhere, which looks like
-anticipation silently not working.
-
-With this set, the SDK auto-loads it — no constructor args needed. The instance is
-resolved from the API key during `initialize()`, so `SYNAP_INSTANCE_ID` is **not**
-required.
-
-Set it only when a key has access to more than one instance and you want to pin a
-specific one:
-
-```bash
-export SYNAP_INSTANCE_ID="inst_a1b2c3d4e5f67890"   # optional
+```sh
+<cli> api-keys create -i <support_inst_id> --write-env --env-suffix SUPPORT_BOT
+<cli> api-keys create -i <sales_inst_id>   --write-env --env-suffix SALES_BOT
 ```
+
+Each call prints only a masked key and writes the two variables for that instance into `.env`:
+
+```
+SYNAP_API_KEY_SUPPORT_BOT=synap_...        SYNAP_INSTANCE_ID_SUPPORT_BOT=inst_...
+SYNAP_API_KEY_SALES_BOT=synap_...          SYNAP_INSTANCE_ID_SALES_BOT=inst_...
+```
+
+What the flag does (code: `synap/cli/commands/api_keys.py`):
+
+- NAME is letters, digits and underscore (the CLI upper-cases it). Name it after the instance or the agent, so
+  the variable says which key it is. `--env-suffix` needs `--write-env`.
+- Other instances' lines in `.env` are never touched. Running it again for the same instance replaces only that
+  instance's two lines. Connection settings for another server (`SYNAP_BASE_URL`, `SYNAP_GRPC_HOST`,
+  `SYNAP_GRPC_PORT`, `SYNAP_GRPC_USE_TLS`) keep their plain names and are written once.
+- Without a suffix, `--write-env` replaces `SYNAP_API_KEY` and `SYNAP_INSTANCE_ID`. If those already hold a
+  DIFFERENT instance, the CLI refuses with exit 6 (`env_conflict`) before it mints anything, and tells you to use a
+  suffix or `--force`. The same refusal applies when the suffixed names already hold another instance. Add a
+  suffix; use `--force` only when the human says to replace that key.
+
+The app must read the right variable for the right agent and pass it explicitly, because the SDK only
+auto-reads the unnamed `SYNAP_API_KEY`:
+
+```python
+support = MaximemSynapSDK(api_key=os.environ["SYNAP_API_KEY_SUPPORT_BOT"])
+sales = MaximemSynapSDK(api_key=os.environ["SYNAP_API_KEY_SALES_BOT"])
+```
+```ts
+const support = new SynapClient({ apiKey: process.env.SYNAP_API_KEY_SUPPORT_BOT });
+```
+
+Use one key per instance per process. The startup log line names the instance, never the key. List every named
+variable in `.env.example` (empty values) and in the final report. To verify a named instance without printing
+the key: `python scripts/verify_synap.py --suffix SUPPORT_BOT` (or `SYNAP_VERIFY_SUFFIX=SUPPORT_BOT`). It reads
+`SYNAP_API_KEY_SUPPORT_BOT` and `SYNAP_INSTANCE_ID_SUPPORT_BOT` from the environment or `.env`; without the flag it
+reads only the plain `SYNAP_API_KEY`.
+A single instance may keep the unnamed `SYNAP_API_KEY` and `SYNAP_INSTANCE_ID`.
 
 ## Basic init
 

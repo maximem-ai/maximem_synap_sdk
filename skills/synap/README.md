@@ -33,7 +33,8 @@ skills/synap/
 │   ├── docs-map.md             # Full docs map
 │   ├── agent-rules-cheatsheet.md  # The former long AGENTS.md
 │   ├── codex-edition-notes.md  # Text moved out of the Codex wrapper files
-│   ├── onboarding-ask-rules.md # What to ask the human, failure handling, resume checklist
+│   ├── onboarding-ask-rules.md # What to ask the human (each question with a recommendation, a tip and the docs to read), failure handling, resume checklist
+│   ├── instances-explained.md  # What an instance is and what its status words mean, in plain words
 │   ├── use-case-markdown.md    # Use-case .md template, what the agent may infer vs must ask
 │   └── frameworks/
 │       ├── _index.md           # Per-framework router
@@ -62,8 +63,18 @@ skills/synap/
 │   └── multi-tenant-scoping.md # Scoping patterns + verification
 └── scripts/
     ├── verify_synap.py         # Real write-then-recall check — run as the final step
+    ├── cleanup_test_data.py    # Removes the test_user_* memories the agent created, before sign-out
     └── check_integration_wiring.py  # Does the project read as well as write? Dead read helpers?
 ```
+
+## What the agent does to your repo
+
+- **It never commits.** The coding agent never runs `git commit`, `git add -A`, `git push`, `git stash` or an amend. Everything it changes stays uncommitted and every new file stays untracked, so you review the diff and commit it yourself. Its final report says "Nothing was committed" and lists the files it created and changed.
+- **Every question comes with a recommendation and a tip.** When it asks you something (which agent gets memory first, B2C or B2B, what identifies a returning person, compliance, what matters, what must never be stored), it says what it suggests and why, and how Synap will use your answer.
+- **One instance per agent, one key per instance.** If your repo has several agents it asks which one gets memory first; further agents each need their own instance later. With more than one instance, the agent mints each key with `api-keys create --write-env --env-suffix NAME`, which writes `SYNAP_API_KEY_<NAME>` and `SYNAP_INSTANCE_ID_<NAME>` into `.env` (and `verify_synap.py --suffix NAME` checks it).
+- **It shows what already exists, and cleans up after itself.** Right after sign-in it lists the instances already in your workspace in plain words and asks whether to reuse one (only if it is for this agent) or create a new one. Every test user id it creates is `test_user_<purpose>_<8 random chars>`; before sign-out it removes those test memories with `scripts/cleanup_test_data.py` (a dry run first) and lists in its report what it could not remove. It never deletes an id that does not start with `test_user_`.
+- **Plain words.** It does not show raw status words and never talks about Synap "environments"; `reference/instances-explained.md` is its glossary.
+- **The use-case file.** Once it is sent, it can only be changed by making a request through email to gaurav@maximem.ai.
 
 ## Installing — Claude Code (CLI)
 

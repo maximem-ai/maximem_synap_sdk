@@ -14,6 +14,7 @@
  */
 
 import { SynapClient } from "@maximem/synap-js-sdk";
+import { randomBytes } from "node:crypto";
 import { v5 as uuidv5 } from "uuid";
 
 const NAMESPACE_URL = "6ba7b811-9dad-11d1-80b4-00c04fd430c8";
@@ -23,7 +24,9 @@ async function main() {
   await sdk.init(); // note: init(), not initialize()
 
   try {
-    const userId = "alice";
+    // This script writes a real (small) memory. Its user id follows the skill's test-id convention
+    // test_user_<purpose>_<8 random chars>, so scripts/cleanup_test_data.py can remove it.
+    const userId = `test_user_demo_${randomBytes(4).toString("hex")}`;
     // B2C shape: userId and nothing else. On a B2B instance (whoami reports
     // user_context_isolation="strict") add customerId to the calls below. On B2C a
     // customerId is rejected with HTTP 400, so never pass the user id as one.

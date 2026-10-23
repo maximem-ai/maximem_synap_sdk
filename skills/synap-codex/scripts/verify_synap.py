@@ -19,6 +19,18 @@ The key is read from SYNAP_API_KEY. If that is unset, a `.env` file in the
 current directory is read (the file `api-keys create --write-env` writes).
 The key itself is never printed.
 
+A project with several Synap instances keeps one key per instance, written by
+`api-keys create -i <id> --write-env --env-suffix NAME` as SYNAP_API_KEY_<NAME> and
+SYNAP_INSTANCE_ID_<NAME>. To verify that instance, name it:
+
+    python scripts/verify_synap.py --suffix SUPPORT_BOT
+    SYNAP_VERIFY_SUFFIX=SUPPORT_BOT python scripts/verify_synap.py
+
+NAME is letters, digits and underscore (upper-cased, as the CLI does). The script then
+reads SYNAP_API_KEY_<NAME> and SYNAP_INSTANCE_ID_<NAME> (from the environment or
+`.env`) and uses them in place of the plain names; it prints the variable name, never
+the value. If the suffixed key is missing it stops and says which variable to add.
+
 The output always ends with exactly two lines: `RESULT: PASS` or `RESULT: FAIL <reason>`,
 then `EXIT CODE: <n>` (the code the script exits with). Paste the whole output, including
 every [WARN] line, unedited. A [WARN] is reported and explained, never dropped.
@@ -55,10 +67,15 @@ ConflictError; only then is the message text matched. Exit codes for this case:
 good (InstanceBuildFailedError, [BUILD FAILED]): run `instances rebuild <id>`,
 wait, and re-run. 1 is any other failure.
 
-The write creates one small throwaway memory under a user id starting with
-"verify-". It is harmless but real; tell the user it was written.
+The write creates one small throwaway memory under a user id of the form
+`test_user_verify_<8 random chars>`, and the stream check sends one event as
+`test_user_verify_probe_<8 random chars>` (the single test-id convention of this skill,
+`test_user_<purpose>_<8 random chars>`). It is harmless but real; tell the user it was
+written. Both ids are printed (lines `[WRITE]`, `[PROBE]`, `[TEST IDS]`): record them and
+pass them to `scripts/cleanup_test_data.py` before signing out.
 """
 
+import argparse
 import asyncio
 import os
 import re
@@ -67,6 +84,44 @@ import uuid
 from pathlib import Path
 
 from maximem_synap import MaximemSynapSDK
+
+_SUFFIX_RE = re.compile(r"^[A-Za-z0-9_]+$")
+# Every test user id this run created, so they can be printed once and recorded.
+TEST_IDS: list = []
+
+
+def _test_id(purpose: str) -> str:
+    """`test_user_<purpose>_<8 random chars>`, the one test-id shape of this skill."""
+    uid = f"test_user_{purpose}_{uuid.uuid4().hex[:8]}"
+    TEST_IDS.append(uid)
+    return uid
+
+
+def _apply_suffix(suffix) -> None:
+    """Point the SDK at SYNAP_API_KEY_<NAME> / SYNAP_INSTANCE_ID_<NAME>.
+
+    The SDK reads only the plain names, so the suffixed values are copied over them
+    for this process. Only variable NAMES are printed.
+    """
+    name = (suffix or "").strip()
+    if not name:
+        return
+    if not _SUFFIX_RE.match(name):
+        print(f"[ERROR] --suffix {suffix!r} is not a valid name: use letters, digits and underscore only.")
+        raise SystemExit(1)
+    name = name.upper()
+    key_var, id_var = f"SYNAP_API_KEY_{name}", f"SYNAP_INSTANCE_ID_{name}"
+    if not os.environ.get(key_var):
+        print(f"[ERROR] {key_var} is not set (and no .env with it in this directory).")
+        print(f"        Run: maximem-synap api-keys create -i <instance_id> --write-env --env-suffix {name}")
+        raise SystemExit(1)
+    os.environ["SYNAP_API_KEY"] = os.environ[key_var]
+    if os.environ.get(id_var):
+        os.environ["SYNAP_INSTANCE_ID"] = os.environ[id_var]
+    else:
+        # Never let another instance's plain id pin the wrong instance.
+        os.environ.pop("SYNAP_INSTANCE_ID", None)
+    print(f"[OK] Using {key_var}" + (f" and {id_var}" if os.environ.get(id_var) else ""))
 
 
 def _load_dotenv(path: str = ".env") -> None:
@@ -86,11 +141,13 @@ def _load_dotenv(path: str = ".env") -> None:
             os.environ[key] = value
 
 
-async def verify() -> None:
+async def verify(suffix=None) -> None:
     _load_dotenv()
+    _apply_suffix(suffix)
     if not os.environ.get("SYNAP_API_KEY"):
         print("[ERROR] SYNAP_API_KEY is not set (and no .env with it in this directory).")
         print("        Run: maximem-synap api-keys create (or: npx @maximem/synap-cli@latest api-keys create) -i <instance_id> --write-env")
+        print("        (a project with several instances: add --env-suffix NAME, then run this script with --suffix NAME)")
         raise SystemExit(1)
 
     # No instance_id needed: it is resolved from the API key on initialize().
@@ -119,6 +176,10 @@ async def verify() -> None:
 
         if not os.environ.get("SYNAP_VERIFY_SKIP_STREAM"):
             await _stream(sdk)
+
+        if TEST_IDS:
+            print("[TEST IDS] " + ", ".join(TEST_IDS)
+                  + " (record them; clean up with scripts/cleanup_test_data.py before sign-out)")
 
         await sdk.shutdown()
         print("[OK] SDK shut down cleanly")
@@ -244,8 +305,8 @@ def _items(ctx) -> list:
 
 async def _roundtrip(sdk: MaximemSynapSDK) -> None:
     """Write one throwaway fact, then poll until it is recalled (or time runs out)."""
-    run = uuid.uuid4().hex[:8]
-    user_id = f"verify-{run}"
+    user_id = _test_id("verify")
+    run = user_id.rsplit("_", 1)[-1]
     marker = f"Bluefin-{run}"
 
     # B2C sends user_id alone. B2B (user_context_isolation="strict") also needs a
@@ -334,9 +395,11 @@ async def _stream(sdk: MaximemSynapSDK) -> None:
         raise SystemExit(1)
 
     probe_conversation = str(uuid.uuid4())
+    probe_user = _test_id("verify_probe")
+    print(f"[PROBE] user_id={probe_user} (one stream event)")
     await sdk.instance.send_message(
         conversation_id=probe_conversation,
-        user_id="synap-verify-probe",
+        user_id=probe_user,
         event_type="user_message",
         role="user",
         content="synap verify probe",
@@ -381,11 +444,17 @@ def main() -> None:
     """
     import sys
 
+    parser = argparse.ArgumentParser(description="Write then recall one throwaway memory on your own instance.")
+    parser.add_argument("--suffix", metavar="NAME", default=os.environ.get("SYNAP_VERIFY_SUFFIX"),
+                        help="verify the instance whose key is SYNAP_API_KEY_<NAME> "
+                             "(env SYNAP_VERIFY_SUFFIX); written by api-keys create --env-suffix NAME")
+    args = parser.parse_args()
+
     tee = _Tee(sys.stdout)
     sys.stdout = tee
     code = 0
     try:
-        asyncio.run(verify())
+        asyncio.run(verify(args.suffix))
     except SystemExit as e:
         code = e.code if isinstance(e.code, int) else (0 if e.code in (None, 0) else 1)
     except BaseException as e:  # noqa: BLE001

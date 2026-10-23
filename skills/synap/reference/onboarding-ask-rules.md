@@ -7,15 +7,24 @@ Read this before step 4 of the procedure in `SKILL.md`. Step 0 (learn Synap) com
 ## The rule
 
 Ask the human whenever you cannot know the answer from the code. Never guess. A wrong guess costs a new
-instance and 15 to 20 minutes, and two of the answers (B2C or B2B, and the use-case text) cannot be changed
-after create.
+instance and 15 to 20 minutes. Once the use-case file is sent, **it can only be changed by making a request
+through email to gaurav@maximem.ai**; B2C or B2B is chosen when the instance is created, and a change also goes
+through that email. Say this when you ask for approval of the file.
 
 ## How to ask
 
 - **One question at a time.** Wait for the answer before the next.
 - **Show the evidence first, then ask anyway.** For example: "I found a `tenants` table and an `org_id` on every
   user row, which looks like B2B. Is that right?" Evidence is not an answer.
-- Plain words, no Synap jargon. Offer 2 to 3 concrete options when the answer is a choice.
+- **Every question carries two extra parts, written by you for this repo:**
+  1. **My recommendation:** what you suggest and why, from what the repo shows ("I suggest B2B, because every
+     user row has an `org_id`"). If the repo shows nothing, say that and recommend the safest choice for the
+     goal; never leave the human with a bare question.
+  2. **Tip:** one or two plain sentences on how Synap uses this answer and what it changes in the result. Write
+     it ONLY after you have READ the docs page(s) listed for that question in the table below, in this
+     session. Use what the page says; if the page does not say it, leave it out. Never write a tip from memory.
+- Plain words, no Synap jargon (see `instances-explained.md`). Offer 2 to 3 concrete options when the answer is a
+  choice.
 - Every question is asked here, in this session. Also run `onboard ask "<the question>"` so an open dashboard
   can show it, but the human must never need the dashboard to answer or to find out what is happening.
   When answered, run `onboard ask --clear`.
@@ -23,12 +32,34 @@ after create.
 
 ## The questions (all required, in this order, all BEFORE you draft the use-case)
 
-1. **Who uses the agent?** B2C (each end user has their own private memory) or B2B (users belong to a customer
-   organization and memory is per organization). *Immutable once the instance exists.* If the repo shows both
-   patterns, or neither, say so and ask.
-2. **What identifies a returning person in this app (a stable user id)?** If there is none, memory can only be
-   per session. Show what the code has (a login id, an account id, a device id, only a random session id) and
-   still ask. The answer maps to the SDK scope:
+Question 0 is asked only when the repo has more than one agent. The docs to read are `https://docs.maximem.ai`
+pages (add `.md`); read them before writing the tip. What each tip must be based on is in the last column.
+
+| # | Question | Recommend from | Docs to read first | The tip must say (from those pages) |
+|---|---|---|---|---|
+| 0 | **Which agent gets memory now?** Only if the repo has more than one agent (several agent classes, services, personas, bots). | the agent with the most returning users or the most repeat context; name the file and class. | /concepts/agent-topologies, /concepts/memory-scopes ("What is an Instance?") | One instance has one memory architecture, built from one use-case file, so it is built for one agent's job. Agents that share the same users and behave the same way can share one instance; agents with different jobs, extraction needs or compliance rules need their own instance each, and per-user memory does not cross instances. Say: further agents each need their own instance later, with their own key (`sdk-setup.md`, "Several instances"). |
+| 1 | **Who uses the agent?** B2C (each end user has their own private memory) or B2B (users belong to a customer organization; memory is per organization and per person). If the repo shows both patterns, or neither, say so. | the user model, tenant or org tables, auth. | /concepts/memory-scopes ("B2C vs B2B"), /getting-started/use-case | It sets how memory is scoped: B2C uses `user_id` only (a `customer_id` is refused); B2B needs `customer_id` and `user_id` on every call. It is chosen when the instance is created and a change goes through the email in "The rule". |
+| 2 | **What identifies a returning person in this app (a stable user id)?** | the login id or account id the code has; flag device ids and session ids as weak. | /concepts/memory-scopes, /guides/multi-user-scoping, /guides/erasure | Memories are tied to the `user_id` you send (and `customer_id` on B2B); the same id on a later visit gets the same memory. With only a session id, each visit is a new person: no returning memory, no profile, no per-person erasure. Erasure of one person is requested by email to privacy@maximem.ai with the `user_id`. |
+| 3 | **Compliance and sensitive data.** Does the agent see health, financial, children's or other regulated data? Any rules (GDPR, HIPAA, SOC 2, data residency)? | the fields and domain the code handles. | /guides/pii-protection, /guides/erasure, /concepts/memory-architecture | What Synap does differently: it finds sensitive values, replaces them with placeholders at rest and gives your app the real value back; seven kinds (card numbers, security codes, PINs, passwords, secret keys, private keys, raw biometrics) are never stored; the policy is approved by the human in the dashboard and applies going forward only; names and street addresses are not detected. Plus the sensitive-data rule below. |
+| 4 | **What matters most to remember?** Top two or three kinds of facts, preferences or events that make the agent better next time. | what the prompts and features of the agent already use. | /guides/configuring-memory, /concepts/memory-architecture | These words go into the use-case file, and Synap generates the memory design from it: which kinds of memory it extracts, how retrieval ranks, how long things live. The clearer the priorities, the better the design. |
+| 5 | **What must never be stored?** Secrets, payment details, health details, anything else. | the fields the code already redacts or the data it passes through. | /guides/pii-protection, /guides/configuring-memory | It goes in the use-case file as the never-store list, and your answer shapes what the memory design avoids. Whether a value is actually removed depends on the approved sensitive-data policy and on the app's own redaction; the seven always-blocked kinds need no setting. |
+| 6 | **Live stream (the confirmation below).** | long-lived process or not. | /concepts/real-time-anticipation, /concepts/grpc-vs-rest | What the stream gives and why it needs a long-lived process (see "The integration-path confirmation"). |
+| 7 | **Approve the exact use-case file, then create.** | the file you drafted. | /getting-started/use-case, /concepts/memory-architecture | The file is stored on the instance and the memory design is built from it in about 15 to 20 minutes; once sent it can only be changed by the email in "The rule". |
+
+**Worked example** (question 1, a support bot whose database has `organizations` and `users.org_id`):
+
+> "Who uses this agent: individual people with private memory (B2C), or people who belong to a customer
+> organization (B2B)? I found an `organizations` table and `users.org_id` on every user, which points to B2B.
+> **My recommendation:** B2B, because each user row belongs to an organization, so memory can be kept per
+> organization and per person. **Tip:** in Synap this decides how memory is scoped: on B2B every call carries
+> both the organization id and the person id; on B2C only the person id, and an organization id is refused. It
+> is chosen when the instance is created; changing it later goes through a request by email to
+> gaurav@maximem.ai."
+
+Both labels (`My recommendation`, `Tip`) appear in every question, including yes/no confirmations and the
+approval of the file.
+
+**Details for question 2.** The answer maps to the SDK scope:
    - **B2C:** that id is the `user_id`, and a `customer_id` is never sent.
    - **B2B:** the organization's id is the `customer_id` and the person's id is the `user_id`; both are required.
    - **Shared devices:** a device id is shared when two people use one phone or computer; the second person would be shown the first person's memory. Use a device id only with a visible opt-in such as "continue my last session?", or use a login.
@@ -36,12 +67,6 @@ after create.
    - **Goal vs identity:** with a per-session id each visit is a new person. If the approved goal is "remember returning users" (or anything across sessions), say so
      plainly BEFORE approval, offer the options (add a stable id, an anonymous device id, or accept per-session
      memory and change the goal text), and ask again. Do not draft a use-case the integration cannot serve.
-3. **Compliance and sensitive data.** Does the agent see health, financial, children's or other regulated data?
-   Any rules to follow (GDPR, HIPAA, SOC 2, data residency)? Which fields are sensitive? See the sensitive-data
-   rule below.
-4. **What matters most to remember?** Top two or three kinds of facts, preferences or events that make the
-   agent better the next time.
-5. **What must never be stored?** Secrets, payment details, health details, anything else.
 
 ### Sensitive-data rule (general)
 
@@ -61,7 +86,7 @@ such a domain:
 
 ## The integration-path confirmation
 
-Asked after the five questions above and before you draft the use-case. Background, verified benefits and sources: `integration-depth.md`. This is a **confirmation with default yes**, not a menu:
+Asked after the questions above and before you draft the use-case. Like every question it carries your recommendation and a tip (the wording below already does). Background, verified benefits and sources: `integration-depth.md`. This is a **confirmation with default yes**, not a menu:
 
 - **Always use the SDK, never raw HTTP calls.** Both paths are SDK paths.
 - **Lead with the live stream (the implicit path) as the default** for an app that can run a long-lived process (server, worker, container, voice agent, desktop or CLI agent). Never call it optional and never list it as one of three equal options.
@@ -86,7 +111,7 @@ Examples (adapt the evidence, keep the shape):
 Report the choice with `onboard report integrating in_progress --detail "path=implicit|explicit-no|explicit-host"` and in the final report ("stream ON by default", "human said no because ...", or "host cannot run it").
 
 Anything else you cannot resolve from code (agent purpose, who the end users are, which framework when the repo
-has two) is also a question. Do not ask what the code answers (language, framework, package manager).
+has two) is also a question, with its own recommendation and tip. Do not ask what the code answers (language, framework, package manager).
 
 ## On ambiguity
 
@@ -95,8 +120,9 @@ has two) is also a question. Do not ask what the code answers (language, framewo
   ("memory will not know to avoid X"), and ask once more whether they want to answer before you create.
 - The human changes an answer after approval but before create: redraft, show it, get approval again, and
   report `use_case_drafted` again.
-- After `instances create` nothing in the use-case or B2C/B2B can change. A change means a new instance, which
-  needs the human's explicit yes (another 15 to 20 minute build).
+- After the use-case file is sent, it can only be changed by making a request through email to
+  gaurav@maximem.ai (B2C or B2B is chosen at creation, and a change also goes through that email). Do not create a
+  second instance to get around it without the human's explicit yes (another 15 to 20 minute build).
 
 ## Reporting progress
 
@@ -133,13 +159,14 @@ anything from it. The one exception is the first sign-in.
 | Failure | What to do |
 |---|---|
 | CLI calls return 401 or 403 although you just signed in | `SYNAP_API_KEY` (a runtime key from `.env`) is set in your shell and overrides the CLI's sign-in. Re-run with `env -u SYNAP_API_KEY ...` or `unset SYNAP_API_KEY`. |
-| Code rejected as invalid at the first sign-in, and the prompt names an environment | The `--env <name>` flag (or `SYNAP_ENV`) was most likely left out, so the code went to the wrong server. Retry **once** with it before telling the human to copy a fresh prompt. |
+| Code rejected as invalid at the first sign-in, and the prompt names an environment | (Never say "environment" to the human.) The `--env <name>` flag (or `SYNAP_ENV`) was most likely left out, so the code went to the wrong server. Retry **once** with it before telling the human to copy a fresh prompt. |
 | Code missing, expired or already used at the **first** sign-in (`auth login --code` exits 3) | Nothing has started yet, so this is the one place to say: "this code is missing, expired or used; please copy a fresh prompt from the dashboard." Give the single reason if the CLI names it. Do not use the browser login unless the human asks. |
 | Key expired or rejected later (exit 3 on another command) | The onboarding key lasts exactly 7 days and cannot be renewed (`auth refresh` is refused for it: do not try it). Run `onboard status` and `auth whoami` to see the reason. If the profile on disk is gone or the key expired, state that one reason and ask the human for a fresh prompt (new one-time code; this is the same exception as the first sign-in). |
-| Key in `.env` lost, rejected, or the human deleted it | Run `api-keys create -i <instance_id> --write-env` for a new key. To retire the old one, `api-keys list -i <instance_id>` then `api-keys revoke <credential_id>` (ask first). `api-keys rotate <credential_id>` also works, but it has no `--write-env`, so use it only if you can store the key without printing it. |
+| Key in `.env` lost, rejected, or the human deleted it | Run `api-keys create -i <instance_id> --write-env` for a new key (with several instances in the project add `--env-suffix NAME`, see `sdk-setup.md`, "Several instances"). To retire the old one, `api-keys list -i <instance_id>` then `api-keys revoke <credential_id>` (ask first). `api-keys rotate <credential_id>` also works, but it has no `--write-env`, so use it only if you can store the key without printing it. |
 | Not enough credits (a runtime memory call fails with a credits error carrying `balance_credits` and `minimum_required_credits`) | Quote the numbers from the error in the chat and do not invent figures. Say what each option costs: reduce what you ask for, wait, or the human adds credits by whatever route they prefer. Ask which. Do not send them away without saying why, do not retry in a loop, and resume from `onboard status` once they answer. |
-| Neither `maximem-synap` (0.3.0+) on PATH nor `npx`, or the CLI will not start | The `npx` package is only an installer: it puts the Python CLI on the PATH, so the host needs **both Node (for `npx`) and Python 3.10+**. Say exactly which is missing and ask the human to install it. `pipx install maximem-synap-cli` is not available yet (not on PyPI), so do not suggest it. |
+| Neither `maximem-synap` (0.3.2+) on PATH nor `npx`, or the CLI will not start | The `npx` package is only an installer: it puts the Python CLI on the PATH, so the host needs **both Node (for `npx`) and Python 3.10+**. Say exactly which is missing and ask the human to install it. `pipx install maximem-synap-cli` is not available yet (not on PyPI), so do not suggest it. |
 | Python missing for `verify_synap.py` | The SDK needs Python 3.11+. Say so. If the project is TypeScript only, write and run an equivalent write-then-recall in the project's language and quote its output. If you cannot run it, give the human the exact command and say plainly that verification has not happened. Never skip it silently. |
+| HTTP 409 `instance_name_taken` from `instances create` | Say plainly: "an instance with that name already exists in your workspace". Ask ONE question, with your recommendation and tip: reuse that instance (only if it is for this agent; one instance serves one agent) or choose another name. Pick nothing yourself. Handled only if returned; the server is about to refuse duplicate names. |
 | Exit 5 (scope) or 6 (conflict, such as a name already used) | Report the CLI's message. For a name conflict, pick nothing yourself: ask for another name. Do not retry with a different flag to get around it. |
 | Exit 7 (`instances wait` timeout) | The build may still be running (it prints "attempt n of 3, about N min left" or "taking longer than usual"). Run `instances wait` again once. If still not ready, tell the human how long it has been, report `onboard report integrating in_progress --detail "build still running"`, and ask whether to keep waiting. Why: a slow build that is still alive is never restarted, so waiting is the right move. |
 | Build failed (`instances wait` exit 1, or `maca_failed`) | Synap already retried it by itself (attempt 3 of 3), so it is not a blip. Quote the reason verbatim, tell the human in one line, then run `instances rebuild <instance_id>` (re-runs from the stored use-case, nothing to re-approve, at most 3 rebuilds per 24 hours) and `instances wait` again. Why you act without asking: nothing new is created and nothing the human approved changes. Ask first only if the rebuild is refused (429 = the daily limit, with the server's message; 409 = the build is not in a failed state, so just wait) or a rebuild fails too. Do not create a second instance for this. |
@@ -152,19 +179,21 @@ anything from it. The one exception is the first sign-in.
 ## Resume checklist (re-running the prompt is safe, in a new session too)
 
 A **new agent session** needs no dashboard visit. The sign-in profile is stored on disk by the CLI, so start with
-`onboard status` and `auth whoami`, and continue from the first step that is not true. Within 7 days of the first sign-in a new session resumes from the profile. Only if the profile is
+`onboard status` and `auth whoami`. `onboard status` describes the whole workspace: trust only the steps you reported yourself in this
+session, treat another session's steps as someone else's work, and never skip drafting, approval or creation because they look done
+(if they look done, ask the human whether that instance is theirs and for this agent: that is the reuse path in `no-code-path.md`). Within 7 days of the first sign-in a new session resumes from the profile. Only if the profile is
 gone **or** the key has expired (7 days fixed, no renewal): tell the human the single reason ("your sign-in on this machine is gone or
 the 7-day key has expired") and ask them for a fresh prompt. The code in that prompt starts a new sign-in;
 everything already created (instance, `.env`, integration code) is kept and reused.
 
 1. Signed in? (`auth whoami` works.) If not, see the paragraph above.
-2. Use-case approved? If `onboard status` says so and the instance exists, do not redo it. Otherwise redo steps
+2. Use-case approved? Only your own report in this session, or the human telling you so for an instance they chose to reuse, counts. Otherwise redo steps
    3 to 5 of the procedure.
-3. Instance exists? `instances list`. **Never create a second instance** if one already matches the project
-   name or the human says it is theirs. Ask which one to use.
+3. Instance exists? `instances list --json` (step 2b). **Never create a second instance** if one already matches the project
+   name or the human says it is theirs. Ask which one to use; a duplicate name is refused with 409 `instance_name_taken`.
 4. Integration code present in the repo? Check `git status` and grep for `maximem_synap` or
    `@maximem/synap-js-sdk`. Continue from what is there; do not duplicate it.
-5. Key in `.env`? Check the file has `SYNAP_API_KEY=` (do not print the value). If not, run
+5. Key in `.env`? Check the file has `SYNAP_API_KEY=` (or this instance's `SYNAP_API_KEY_<NAME>=`, written by `--env-suffix NAME`; do not print the value). If not, run
    `api-keys create -i <id> --write-env`. If it is there, do not mint another.
 6. Build ready? `instances wait <id>` (a failed build: `instances rebuild <id>`, then wait again). Run no ingestion or retrieval, and not `verify_synap.py`, before it reports ready.
 7. Verified? Run `scripts/verify_synap.py` again; it writes one more throwaway memory, which is fine.
