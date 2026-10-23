@@ -84,9 +84,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/maximem-synap/sdk-python"
-Documentation = "https://docs.synap.example.com"
-Repository = "https://github.com/maximem-synap/sdk-python"
+Homepage = "https://docs.maximem.ai"
+Documentation = "https://docs.maximem.ai"
+Repository = "https://github.com/maximem-ai/maximem_synap_sdk/tree/main/packages/sdks/maximem-synap"
+Issues = "https://github.com/maximem-ai/maximem_synap_sdk/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -98,6 +99,7 @@ include = ["maximem_synap*"]
 # FileNotFoundError at runtime -- invisible in a source checkout, fatal
 # in an installed package.
 [tool.setuptools.package-data]
+"maximem_synap" = ["py.typed"]
 "maximem_synap.behavior" = ["*.json"]
 
 [tool.setuptools.dynamic]
