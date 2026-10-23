@@ -25,9 +25,14 @@ from synap_integrations_common import SynapIntegrationError
 
 
 def _make_response(formatted: str | None, available: bool):
+    """`formatted` is the compaction. `formatted_context` is what the server sends
+    beside it: the compaction AND the recent turns, which the pipeline already
+    passes, so it must never reach the prompt."""
     resp = MagicMock()
     resp.available = available
-    resp.formatted_context = formatted
+    resp.context_block = formatted
+    resp.history_block = None
+    resp.formatted_context = f"{formatted}\nRECENT-TURNS-DUPLICATE" if formatted else None
     return resp
 
 
@@ -37,6 +42,19 @@ def _fake_sdk(formatted: str | None = "Customer is on Pro plan.", available: boo
         return_value=_make_response(formatted, available)
     )
     return sdk
+
+
+class TestNoDuplicatedTurns:
+    def test_emits_the_compaction_and_not_the_recent_turns(self):
+        sdk = _fake_sdk(formatted="## Conversation so far (compacted 1x)\nThey asked about refunds.")
+        out = SynapShortTermContext(sdk, "conv_abc", system="Be brief.").run()["synap_st"]
+        assert "They asked about refunds." in out
+        assert "RECENT-TURNS-DUPLICATE" not in out
+
+    def test_no_compaction_yet_emits_only_the_system_text(self):
+        sdk = _fake_sdk(formatted=None, available=True)
+        sdk.conversation.context.get_context_for_prompt.return_value.formatted_context = "recent"
+        assert SynapShortTermContext(sdk, "conv_abc", system="Be brief.").run()["synap_st"] == "Be brief."
 
 
 # ---------------------------------------------------------------------------

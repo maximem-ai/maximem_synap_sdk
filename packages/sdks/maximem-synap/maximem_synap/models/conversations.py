@@ -75,6 +75,11 @@ class TranscriptIngestResponse(BaseModel):
     turns_recorded: int
     summary_status: Literal["in_progress", "already_compacted", "skipped"]
     queued_at: datetime
+    # What the server could not do with this push, in its own words: no event
+    # time was supplied (recency ranking cannot order these memories), or the
+    # conversation already had turns and they were kept. Until 0.5.17 these
+    # were reachable only through `.raw`.
+    warnings: List[str] = []
 
     model_config = {"extra": "allow"}
 
@@ -101,6 +106,7 @@ class TranscriptIngestResponse(BaseModel):
             turns_recorded=int(data.get("turns_recorded", 0)),
             summary_status=data["summary_status"],
             queued_at=_parse_dt(data.get("queued_at")) or datetime.now(),
+            warnings=[str(w) for w in (data.get("warnings") or [])],
             raw_data=data,
         )
 

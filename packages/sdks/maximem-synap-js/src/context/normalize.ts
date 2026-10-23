@@ -20,7 +20,7 @@
 import type {
   ConversationContext, ContextMetadata, Emotion, Episode, Fact, Json,
   NormalisedContext, Preference, RawContext, RawContextItem,
-  RawConversationContext, TemporalEvent, TemporalFields,
+  RawConversationContext, RetrievalHealth, TemporalEvent, TemporalFields,
 } from './types.js';
 
 /** Returns the first argument that is not `undefined`. `null` counts as a value. */
@@ -35,9 +35,18 @@ function pick<T>(...values: (T | undefined)[]): T {
 
 const obj = (v: unknown): Json => (v as Json) ?? {};
 
+/** Always an array, so a caller can group by it without a null check. */
+function matchedQueries(item: RawContextItem = {}): string[] {
+  const raw = item['matchedQueries'] ?? item.matched_queries;
+  return Array.isArray(raw) ? (raw as string[]) : [];
+}
+
 function normalizeTemporalFields(item: RawContextItem = {}): TemporalFields {
   return {
     eventDate: pick(item['eventDate'] as string, item.event_date, null),
+    eventEnd: pick(item['eventEnd'] as string, item.event_end as string, null),
+    eventPrecision: pick(item['eventPrecision'] as string, item.event_precision as string, null),
+    saidAt: pick(item['saidAt'] as string, item.said_at, null),
     validUntil: pick(item['validUntil'] as string, item.valid_until, null),
     temporalCategory: pick(item['temporalCategory'] as string, item.temporal_category, null),
     temporalConfidence: pick(item['temporalConfidence'] as number, item.temporal_confidence, 0),
@@ -53,6 +62,7 @@ export function normalizeFact(item: RawContextItem = {}): Fact {
     extractedAt: pick(item['extractedAt'] as string, item.extracted_at, null),
     metadata: obj(item.metadata),
     ...normalizeTemporalFields(item),
+    matchedQueries: matchedQueries(item),
   };
 }
 
@@ -66,6 +76,7 @@ export function normalizePreference(item: RawContextItem = {}): Preference {
     extractedAt: pick(item['extractedAt'] as string, item.extracted_at, null),
     metadata: obj(item.metadata),
     ...normalizeTemporalFields(item),
+    matchedQueries: matchedQueries(item),
   };
 }
 
@@ -78,6 +89,7 @@ export function normalizeEpisode(item: RawContextItem = {}): Episode {
     participants: (item['participants'] as unknown[]) || [],
     metadata: obj(item.metadata),
     ...normalizeTemporalFields(item),
+    matchedQueries: matchedQueries(item),
   };
 }
 
@@ -90,6 +102,7 @@ export function normalizeEmotion(item: RawContextItem = {}): Emotion {
     context: (item['context'] as string) || '',
     metadata: obj(item.metadata),
     ...normalizeTemporalFields(item),
+    matchedQueries: matchedQueries(item),
   };
 }
 
@@ -98,6 +111,9 @@ export function normalizeTemporalEvent(item: RawContextItem = {}): TemporalEvent
     id: item.id || '',
     content: item.content || '',
     eventDate: pick(item['eventDate'] as string, item.event_date, null),
+    eventEnd: pick(item['eventEnd'] as string, item.event_end as string, null),
+    eventPrecision: pick(item['eventPrecision'] as string, item.event_precision as string, null),
+    saidAt: pick(item['saidAt'] as string, item.said_at, null),
     validUntil: pick(item['validUntil'] as string, item.valid_until, null),
     temporalCategory: pick(item['temporalCategory'] as string, item.temporal_category, ''),
     temporalConfidence: pick(item['temporalConfidence'] as number, item.temporal_confidence, 0),
@@ -105,6 +121,7 @@ export function normalizeTemporalEvent(item: RawContextItem = {}): TemporalEvent
     source: item.source || '',
     extractedAt: pick(item['extractedAt'] as string, item.extracted_at, null),
     metadata: obj(item.metadata),
+    matchedQueries: matchedQueries(item),
   };
 }
 
@@ -137,6 +154,18 @@ export function normalizeConversationContext(
   };
 }
 
+function normalizeRetrievalHealth(raw: unknown): RetrievalHealth | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Json;
+  const warnings = r['warnings'];
+  return {
+    degraded: r['degraded'] === undefined ? true : Boolean(r['degraded']),
+    level: (r['level'] as string) ?? null,
+    code: (r['code'] as string) ?? null,
+    warnings: Array.isArray(warnings) ? warnings.map((w) => String(w)) : [],
+  };
+}
+
 /** Accepts either a bare context or a `{ context: ... }` envelope, as the wrapper did. */
 export function normalizeContextResponse(result: Json = {}): NormalisedContext {
   const context = (result['context'] as RawContext) ?? (result as RawContext);
@@ -156,6 +185,16 @@ export function normalizeContextResponse(result: Json = {}): NormalisedContext {
       ),
     ),
     metadata: normalizeContextMetadata(obj(context.metadata)),
+    // `retrieval` is a SIBLING of `context` in the body, so it is read off the
+    // envelope first and only then off a bare context. Reading it from
+    // `context` alone is how the Python SDK dropped it.
+    retrieval: normalizeRetrievalHealth(
+      pick((result as Json)['retrieval'] as Json, (context as Json)['retrieval'] as Json, null),
+    ),
     rawResponse: pick(context['rawResponse'] as Json, context['raw_response'] as Json, {}),
+    // Only for a ranked fetch, so a by-type result has exactly the keys it had.
+    ...(Array.isArray(context.items)
+      ? { items: context.items, excerpts: Array.isArray(context.excerpts) ? context.excerpts : [] }
+      : {}),
   };
 }

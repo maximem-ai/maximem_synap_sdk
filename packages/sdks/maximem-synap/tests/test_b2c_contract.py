@@ -64,6 +64,16 @@ def test_the_error_is_a_valueerror():
     assert issubclass(CustomerIdNotAcceptedError, ValueError)
 
 
+def test_the_error_is_an_invalid_input_error_exported_from_the_package():
+    """The JS SDK raises the same class, a subclass of InvalidInputError, so
+    one `except InvalidInputError` covers it in both SDKs."""
+    import maximem_synap
+
+    assert issubclass(CustomerIdNotAcceptedError, maximem_synap.InvalidInputError)
+    assert maximem_synap.CustomerIdNotAcceptedError is CustomerIdNotAcceptedError
+    assert "CustomerIdNotAcceptedError" in maximem_synap.__all__
+
+
 # ---------------------------------------------------------------------------
 # The wiring
 # ---------------------------------------------------------------------------

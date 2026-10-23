@@ -1,13 +1,15 @@
 """In-memory TTL cache for context bundles pushed over gRPC."""
 
 import logging
+import math
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from ..behavior import recall_query_patterns, thresholds
+from ..behavior import recall_query_patterns, semantic_match_params, thresholds
 from .bm25 import BM25, tokenize
 
 logger = logging.getLogger("synap.sdk.cache.anticipation")
@@ -16,6 +18,33 @@ logger = logging.getLogger("synap.sdk.cache.anticipation")
 # cannot drift. See synap/sdk/CONTRACT/README.md. Do NOT re-inline them here.
 _DEFAULT_BM25_THRESHOLD = thresholds()["bm25"]
 _DEFAULT_NOVEL_TERM_THRESHOLD = thresholds()["novel_term"]
+_SEMANTIC = semantic_match_params()
+MATCHERS = ("bm25", "semantic")
+
+
+def _matcher_setting() -> str:
+    """``SYNAP_SDK_CACHE_MATCHER`` (bm25 or semantic) over the contract's mode."""
+    raw = os.environ.get("SYNAP_SDK_CACHE_MATCHER", "").strip().lower()
+    return raw if raw in MATCHERS else _SEMANTIC["mode"]
+
+
+def _cosine(a: List[float], b: List[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+def _asked_kind_patterns(queries: List[str]) -> List["re.Pattern[str]"]:
+    """Value patterns for the kinds of value the queries ask for (a time of
+    day, a duration, an amount), from semantic_match.asked_details."""
+    out = []
+    for name, spec in (_SEMANTIC.get("asked_details") or {}).items():
+        if name.startswith("$") or not isinstance(spec, dict):
+            continue
+        if any(re.search(spec["query"], q, re.IGNORECASE) for q in queries):
+            out.append(re.compile(spec["value"], re.IGNORECASE))
+    return out
 
 
 def _honor_ttl_hint_enabled() -> bool:
@@ -163,6 +192,22 @@ def _rung_serves(bundle_rung: Optional[str], request_rung: Optional[str]) -> boo
     return (bundle_rung or None) == (request_rung or None)
 
 
+def _unowned_elsewhere(entry_entity: str, entry_conversation: Optional[str],
+                       conversation_id: Optional[str]) -> bool:
+    """A bundle the server pushed with no user or customer stamp, tied to a
+    conversation other than the one this request names (or to one when the
+    request names none).
+
+    Nothing on such a bundle says whose it is: it is stamped "_any" because
+    the request that triggered it named no user. Its conversation is the only
+    owner it has, so outside that conversation it is served to nobody.
+    Without this, a user-scope or client-scope fetch, which names no
+    conversation, could be answered from another user's conversation.
+    """
+    return (entry_entity == "_any" and entry_conversation is not None
+            and entry_conversation != conversation_id)
+
+
 def invalidate_on_write_enabled() -> bool:
     """When true, SDK write paths drop the writing user's cached bundles.
 
@@ -219,10 +264,35 @@ class _ItemRecord:
     item_type: str
     bundle_id: str
     confidence: float = 1.0
+    # The item's vector under `vec_model`, filled off the lookup path once a
+    # model is loaded. None until then: the item is matched by BM25 alone.
+    vec: Optional[List[float]] = None
+    vec_model: str = ""
+    # The questions the memory answers (its HQEs), sent with the bundle item,
+    # and their vectors under `vec_model`.
+    questions: List[str] = field(default_factory=list)
+    qvecs: List[List[float]] = field(default_factory=list)
+
+
+def canonical_query(query: str) -> str:
+    """The asker's own pronouns in the third person memories are stored in."""
+    out = query
+    for lang, rules in (_SEMANTIC.get("self_pronouns") or {}).items():
+        if lang.startswith("$"):
+            continue
+        for pattern, repl in rules:
+            out = re.sub(pattern, repl, out, flags=re.IGNORECASE)
+    return out
+
+
+def _item_questions(item_dict: Dict) -> List[str]:
+    qs = item_dict.get("questions") if isinstance(item_dict, dict) else None
+    return [q.strip() for q in qs if isinstance(q, str) and q.strip()] if isinstance(qs, list) else []
 
 
 class AnticipationCache:
-    """In-memory TTL cache with item-level BM25 matching."""
+    """In-memory TTL cache with item-level matching: BM25, and by meaning
+    with a local embedding model when one is loaded (``matcher="semantic"``)."""
 
     def __init__(
         self,
@@ -230,11 +300,39 @@ class AnticipationCache:
         max_entries: int = 100,
         bm25_threshold: float = _DEFAULT_BM25_THRESHOLD,
         novel_term_threshold: float = _DEFAULT_NOVEL_TERM_THRESHOLD,
+        *,
+        encoder: Any = None,
+        matcher: Optional[str] = None,
+        min_cosine: Optional[float] = None,
+        serve_min_cosine: Optional[float] = None,
+        asked_kind: Optional[bool] = None,
+        item_questions: Optional[bool] = None,
+        canonical: Optional[str] = None,
+        bundle_serve_min_cosine: Optional[float] = None,
+        sure_min_cosine: Optional[float] = None,
+        embed_in_background: bool = True,
     ):
         self._ttl = ttl_seconds
         self._max_entries = max_entries
         self._bm25_threshold = bm25_threshold
         self._novel_term_threshold = novel_term_threshold
+
+        # Semantic matching. The encoder is the SDK's history-search model,
+        # handed over once it has loaded (set_encoder); until then, and with
+        # matcher "bm25", lookups are BM25 only, as before.
+        self._encoder = encoder
+        self._matcher = matcher if matcher in MATCHERS else _matcher_setting()
+        self._min_cosine = float(_SEMANTIC["min_cosine"] if min_cosine is None else min_cosine)
+        self._serve_min_cosine = float(
+            _SEMANTIC["serve_min_cosine"] if serve_min_cosine is None else serve_min_cosine)
+        self._asked_kind = bool(_SEMANTIC["asked_kind"] if asked_kind is None else asked_kind)
+        self._item_questions = bool(_SEMANTIC["item_questions"] if item_questions is None else item_questions)
+        self._canonical = str(_SEMANTIC["canonical_query"] if canonical is None else canonical)
+        self._bundle_serve_min_cosine = float(
+            _SEMANTIC["bundle_serve_min_cosine"] if bundle_serve_min_cosine is None else bundle_serve_min_cosine)
+        self._sure_min_cosine = float(_SEMANTIC["sure_min_cosine"] if sure_min_cosine is None else sure_min_cosine)
+        self._embed_in_background = embed_in_background
+        self._embed_lock = threading.Lock()
 
         self._entries: Dict[str, _CacheEntry] = {}
 
@@ -255,6 +353,52 @@ class AnticipationCache:
         self._corpus_vocab: Set[str] = set()
         self._bm25: Optional[BM25] = None
         self._bm25_dirty: bool = True
+
+    def set_encoder(self, encoder: Any) -> None:
+        """Hand over the local embedding model once it has loaded. Items
+        already cached are embedded off the lookup path."""
+        self._encoder = encoder
+        self._embed_items(list(self._items))
+
+    @property
+    def semantic(self) -> bool:
+        return self._matcher == "semantic" and self._encoder is not None
+
+    def _embed_items(self, items: List["_ItemRecord"]) -> None:
+        """Give ``items`` their vectors: in a background thread, so neither a
+        bundle arriving on the stream nor a lookup waits for the model. A
+        lookup before they are ready matches those items by BM25 alone."""
+        encoder = self._encoder
+        if encoder is None or self._matcher != "semantic":
+            return
+        todo = [i for i in items if i.vec_model != getattr(encoder, "model", "")]
+        if not todo:
+            return
+
+        def run() -> None:
+            with self._embed_lock:
+                texts: List[str] = []
+                for i in todo:
+                    texts.append(i.content)
+                    if self._item_questions:
+                        texts.extend(i.questions)
+                try:
+                    vecs = [list(v) for v in encoder.encode(texts)]
+                except Exception:
+                    logger.warning("anticipation_cache: embedding items failed", exc_info=True)
+                    return
+                model = getattr(encoder, "model", "")
+                k = 0
+                for item in todo:
+                    n = len(item.questions) if self._item_questions else 0
+                    item.vec, item.qvecs = vecs[k], vecs[k + 1:k + 1 + n]
+                    item.vec_model = model
+                    k += 1 + n
+
+        if self._embed_in_background:
+            threading.Thread(target=run, name="synap-anticipation-embed", daemon=True).start()
+        else:
+            run()
 
     def register_lookup_hook(self, hook: Optional[LookupHook]) -> None:
         """Install a callback fired AFTER every cache lookup.
@@ -379,6 +523,7 @@ class AnticipationCache:
         items_by_type = bundle.get("items_by_type", {})
         items_added = 0
         items_deduped = 0
+        first_new = len(self._items)
         for item_type, items_list in items_by_type.items():
             if not isinstance(items_list, list):
                 continue
@@ -391,9 +536,10 @@ class AnticipationCache:
                     items_deduped += 1
                     continue
                 self._item_dedup.add(dedup_key)
+                # Kept with no word tokens too (Hindi, say, which the BM25
+                # tokenizer drops): BM25 cannot match it, the embedding can.
+                # The JS SDK always kept these.
                 tokens = tokenize(content)
-                if not tokens:
-                    continue
                 self._items.append(_ItemRecord(
                     content=content,
                     tokens=tokens,
@@ -401,6 +547,7 @@ class AnticipationCache:
                     item_type=item_type,
                     bundle_id=bundle_id,
                     confidence=item_dict.get("confidence", 1.0),
+                    questions=_item_questions(item_dict),
                 ))
                 self._corpus_vocab.update(tokens)
                 items_added += 1
@@ -420,9 +567,10 @@ class AnticipationCache:
                     items_deduped += 1
                     continue
                 self._item_dedup.add(dedup_key)
+                # Kept with no word tokens too (Hindi, say, which the BM25
+                # tokenizer drops): BM25 cannot match it, the embedding can.
+                # The JS SDK always kept these.
                 tokens = tokenize(content)
-                if not tokens:
-                    continue
                 self._items.append(_ItemRecord(
                     content=content,
                     tokens=tokens,
@@ -435,6 +583,7 @@ class AnticipationCache:
                 items_added += 1
 
         self._bm25_dirty = True
+        self._embed_items(self._items[first_new:])
 
         logger.info(
             "Bundle stored: bundle_id=%s type=%s queries=%s "
@@ -530,7 +679,7 @@ class AnticipationCache:
         has_query = search_query and any(q.strip() for q in search_query if q)
 
         if not has_query:
-            return self._freshness_lookup(entity_id, scope_rung=scope_rung)
+            return self._freshness_lookup(entity_id, conversation_id, scope_rung=scope_rung)
 
         # WS4 recall bypass: an explicit memory-recall question must never be
         # answered from a pre-fetched bundle — a stale false-hit here makes the
@@ -585,6 +734,7 @@ class AnticipationCache:
         customer_id: Optional[str] = None,
         client_id: Optional[str] = None,
         scope_rung: Optional[str] = None,
+        lexical_only: bool = False,
     ) -> Optional[Dict]:
         # Pre-build the telemetry skeleton — the hook fires on every exit
         # path. Most fields are filled below; we never reach `return None`
@@ -617,10 +767,16 @@ class AnticipationCache:
 
         query_text = " ".join(q for q in search_query if q)
         query_tokens = tokenize(query_text)
+        semantic = self.semantic and not lexical_only
+        hook_payload["matcher"] = "semantic" if semantic else "bm25"
+        if semantic:
+            return self._semantic_lookup(
+                search_query, query_tokens, hook_payload, entity_id, conversation_id,
+                max_items, customer_id=customer_id, client_id=client_id, scope_rung=scope_rung)
         if not query_tokens:
             hook_payload["exit_reason"] = "no_query_tokens"
             self._fire_lookup_hook(hook_payload)
-            return self._freshness_lookup(entity_id, scope_rung=scope_rung)
+            return self._freshness_lookup(entity_id, conversation_id, scope_rung=scope_rung)
 
         hook_payload["bm25_query_tokens"] = list(query_tokens)
 
@@ -764,6 +920,19 @@ class AnticipationCache:
                 self._fire_lookup_hook(hook_payload)
                 return None
 
+        return self._serve(top_items, hook_payload, search_query, effective_threshold, coverage)
+
+    def _serve(
+        self,
+        top_items: List[Tuple[float, "_ItemRecord"]],
+        hook_payload: Dict[str, Any],
+        search_query: List[str],
+        threshold: float,
+        coverage: Optional[float],
+        score_key: str = "bm25_score",
+    ) -> Dict:
+        """A hit: renew the leases of the bundles used, report, and merge the
+        picked items into one response."""
         items_by_type: Dict[str, list] = {}
         for score, item in top_items:
             items_by_type.setdefault(item.item_type, []).append(item.item_dict)
@@ -792,24 +961,26 @@ class AnticipationCache:
         best_score = top_items[0][0]
 
         logger.info(
-            "Cache HIT: score=%.2f threshold=%.2f items=%d coverage=%.2f query=%s",
+            "Cache HIT (%s): score=%.2f threshold=%.2f items=%d coverage=%s query=%s",
+            score_key,
             best_score,
-            effective_threshold,
+            threshold,
             len(top_items),
-            coverage,
+            "-" if coverage is None else f"{coverage:.2f}",
             search_query[:80] if search_query else None,
         )
 
         # Populate the picked items for the hook before returning.
-        # Each picked item records the bm25_score, its origin bundle, and
-        # a content preview for the dashboard's drill-down.
+        # Each picked item records its score (bm25_score, or cosine for a
+        # semantic match), its origin bundle, and a content preview for the
+        # dashboard's drill-down.
         for rank, (score, item) in enumerate(top_items):
             hook_payload["items_picked"].append({
                 "item_index": self._items.index(item) if item in self._items else rank,
                 "bundle_id": item.bundle_id,
                 "item_type": item.item_type,
                 "content_first_240": item.content[:240],
-                "bm25_score": round(float(score), 4),
+                score_key: round(float(score), 4),
                 "passed_threshold": True,
                 "confidence": float(item.confidence),
             })
@@ -830,6 +1001,142 @@ class AnticipationCache:
             "_anticipation_conversation_id": base_entry.conversation_id if base_entry else None,
             "_bundle_type": "anticipation",
         }
+
+
+    def _semantic_lookup(
+        self,
+        search_query: List[str],
+        query_tokens: List[str],
+        hook_payload: Dict[str, Any],
+        entity_id: Optional[str],
+        conversation_id: Optional[str],
+        max_items: int,
+        *,
+        customer_id: Optional[str] = None,
+        client_id: Optional[str] = None,
+        scope_rung: Optional[str] = None,
+    ) -> Optional[Dict]:
+        """Match by meaning: a lookup is a hit when an item's cosine to a query
+        reaches ``min_cosine``, and the hit also serves the items at
+        ``serve_min_cosine`` or above. An item with no vector yet is matched by
+        BM25 with its novel-term gate, as before.
+
+        BM25 does not also get a say over embedded items: on the bench, letting
+        either signal serve brought back the near misses (an item on the asked
+        topic without the asked detail shares its words) and served wrongly as
+        often as BM25 alone. The coverage gate is a word-overlap test, exactly
+        what a paraphrase or another language fails, so it does not apply.
+        """
+        hook_payload["bm25_query_tokens"] = list(query_tokens)
+        queries = [q.strip() for q in search_query if q and q.strip()][: int(_SEMANTIC["max_queries"])]
+        encoder = self._encoder
+        model = getattr(encoder, "model", "")
+        # The query as asked, and/or with the asker's pronouns in the third
+        # person the memories are written in (canonical_query).
+        asked = list(queries)  # the detail check reads the queries as asked
+        if self._canonical in ("canon", "both"):
+            canon = [canonical_query(q) for q in queries]
+            changed = [c for c, q in zip(canon, queries) if c != q]
+            queries = (queries + changed) if self._canonical == "both" else canon
+        try:
+            qvecs = [list(v) for v in (getattr(encoder, "encode_query", None) or encoder.encode)(queries)]
+        except Exception:
+            logger.warning("anticipation_cache: query embedding failed; BM25 only", exc_info=True)
+            return self._item_lookup(
+                search_query, entity_id, conversation_id, max_items,
+                customer_id=customer_id, client_id=client_id, scope_rung=scope_rung, lexical_only=True)
+
+        if query_tokens and (self._bm25_dirty or self._bm25 is None) and self._items:
+            self._bm25 = BM25([item.tokens for item in self._items])
+            self._bm25_dirty = False
+        bm25_scores = self._bm25.scores(query_tokens) if query_tokens and self._bm25 else [0.0] * len(self._items)
+        effective_threshold = max(
+            _EFFECTIVE_FLOOR,
+            min(self._bm25_threshold, _QUERY_TOKEN_SCALE * max(len(query_tokens), 1)),
+        )
+        hook_payload["bm25_threshold"] = round(float(effective_threshold), 4)
+        hook_payload["min_cosine"] = self._min_cosine
+        # Items not embedded yet are matched as before, BM25 with its
+        # novel-term gate: without the gate BM25 served wrongly to 27% of the
+        # bench's queries, against 12% with it.
+        unique_stems = set(query_tokens)
+        novel_ratio = (len(unique_stems - self._corpus_vocab) / len(unique_stems)) if unique_stems else 1.0
+        hook_payload["novel_term_ratio"] = round(float(novel_ratio), 4)
+        word_route = bool(query_tokens) and not (
+            len(self._corpus_vocab) >= _MIN_CORPUS_FOR_NOVEL_GATE
+            and novel_ratio >= self._novel_term_threshold)
+
+        valid_bundles = self._get_valid_bundle_ids(
+            entity_id, conversation_id,
+            customer_id=customer_id, client_id=client_id, scope_rung=scope_rung,
+        )
+        picked: List[Tuple[float, _ItemRecord]] = []
+        # Items that do not decide a hit but are served with one: a query that
+        # needs two items rarely has both at the hit bar.
+        companions: List[Tuple[float, _ItemRecord]] = []
+        rejected: List[Tuple[float, Dict[str, Any]]] = []
+        for idx, item in enumerate(self._items):
+            b = float(bm25_scores[idx]) if idx < len(bm25_scores) else 0.0
+            if item.bundle_id not in valid_bundles:
+                # Scope first: another user's items are never scored.
+                rejected.append((b, {
+                    "item_index": idx, "bundle_id": item.bundle_id, "item_type": item.item_type,
+                    "content_first_120": item.content[:120], "bm25_score": round(b, 4),
+                    "cosine": None, "reason": "scope_filter_excluded",
+                }))
+                continue
+            if item.vec is not None and item.vec_model == model and qvecs:
+                # The memory's own text, and the questions it answers.
+                cos = max(_cosine(q, v) for q in qvecs for v in [item.vec, *item.qvecs])
+                passes = cos >= self._min_cosine
+                rank = cos
+            else:
+                cos = None
+                passes = word_route and b >= effective_threshold
+                rank = self._min_cosine  # not embedded yet: ranked at the threshold
+            if not passes and cos is not None and cos >= min(self._serve_min_cosine, self._bundle_serve_min_cosine):
+                companions.append((cos, item))
+                continue
+            if not passes:
+                rejected.append((rank, {
+                    "item_index": idx, "bundle_id": item.bundle_id, "item_type": item.item_type,
+                    "content_first_120": item.content[:120], "bm25_score": round(b, 4),
+                    "cosine": None if cos is None else round(cos, 4), "reason": "below_threshold",
+                }))
+                continue
+            picked.append((rank, item))
+
+        rejected.sort(key=lambda x: -x[0])
+        hook_payload["items_rejected"] = [r[1] for r in rejected[:20]]
+        if not picked:
+            hook_payload["exit_reason"] = "no_items_above_threshold"
+            self._fire_lookup_hook(hook_payload)
+            return None
+        picked.sort(key=lambda x: -x[0])
+        # Served with a hit: items above the serve bar, and items from a bundle
+        # that holds a hit above the lower same-bundle bar (the server fetched
+        # them together, for one anticipated topic).
+        hit_bundles = {item.bundle_id for _, item in picked}
+        companions = [(c, it) for c, it in companions
+                      if c >= self._serve_min_cosine
+                      or (it.bundle_id in hit_bundles and c >= self._bundle_serve_min_cosine)]
+        companions.sort(key=lambda x: -x[0])
+        top_items = (picked + companions)[:max_items]
+
+        # A question for a kind of value (a number to call, an amount, a date)
+        # is not answered by items on its topic that hold no such value.
+        if self._asked_kind:
+            patterns = _asked_kind_patterns(asked)
+            if patterns and not any(p.search(item.content) for p in patterns for _, item in top_items):
+                hook_payload["exit_reason"] = "asked_kind_missing"
+                self._fire_lookup_hook(hook_payload)
+                return None
+
+        served = self._serve(top_items, hook_payload, search_query, self._min_cosine, None, score_key="cosine")
+        # Below the sure bar a hit is borderline: the caller may still ask the
+        # server, with a short deadline, and serve this only if it is late.
+        served["_match_band"] = "sure" if picked[0][0] >= self._sure_min_cosine else "borderline"
+        return served
 
     def _build_accepted_scope(
         self,
@@ -897,7 +1204,13 @@ class AnticipationCache:
         for bid, entry in self._entries.items():
             if not _rung_serves(entry.scope_rung, scope_rung):
                 continue
-            if entity_id is not None and entry.entity_id not in accepted_scope:
+            # Always, including when the request names no user: skipping this
+            # check for a missing user_id served every user's bundles to a
+            # conversation fetch that left user_id out. With no user named,
+            # only customer-, client- and "_any"-stamped bundles remain.
+            if entry.entity_id not in accepted_scope:
+                continue
+            if _unowned_elsewhere(entry.entity_id, entry.conversation_id, conversation_id):
                 continue
             if conversation_id is not None:
                 # Accept exact match OR a user-scope bundle (no conv_id
@@ -934,17 +1247,22 @@ class AnticipationCache:
     def _freshness_lookup(
         self,
         entity_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
         *,
         scope_rung: Optional[str] = None,
     ) -> Optional[Dict]:
         # This path serves a WHOLE bundle on no query at all, so it is the
         # least filtered way out of this cache and needs the rung as much as
-        # the scored path does.
+        # the scored path does. With no user named it serves only "_any"
+        # summaries: it used to serve the freshest summary of ANY user, so a
+        # conversation fetch with no user_id and no query got a stranger's.
+        owners = (entity_id, "_any") if entity_id else ("_any",)
         summary_candidates = {
             bid: e for bid, e in self._entries.items()
             if e.bundle_type == "user_summary"
             and _rung_serves(e.scope_rung, scope_rung)
-            and (entity_id is None or e.entity_id in (entity_id, "_any"))
+            and e.entity_id in owners
+            and not _unowned_elsewhere(e.entity_id, e.conversation_id, conversation_id)
         }
         if not summary_candidates:
             return None
@@ -983,6 +1301,7 @@ class AnticipationCache:
             if entry.bundle_type == "user_summary"
             and _rung_serves(entry.scope_rung, scope_rung)
             and entry.entity_id in (entity_id, "_any")
+            and not _unowned_elsewhere(entry.entity_id, entry.conversation_id, None)
         }
         if not candidates:
             return None
@@ -1027,7 +1346,11 @@ class AnticipationCache:
             self._corpus_vocab.update(item.tokens)
             entry = self._entries.get(item.bundle_id)
             entity_id = entry.entity_id if entry else "_any"
-            self._item_dedup.add(self._dedup_key(entity_id, item.content))
+            # With the rung, as store() writes it: without it every rebuild
+            # turned a rung's keys into the no-rung keys, and a later no-rung
+            # bundle's identical items were swallowed against them.
+            self._item_dedup.add(self._dedup_key(
+                entity_id, item.content, entry.scope_rung if entry else None))
 
     def _effective_ttl(self, entry: "_CacheEntry", honor_hint: bool) -> float:
         """Global TTL, optionally bounded by the bundle's server-sent hint.

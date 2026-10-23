@@ -28,6 +28,7 @@ from agent_framework import (
     Message,
 )
 
+from synap_integrations_common import set_auto_listen
 from synap_microsoft_agent.context_provider import SynapContextProvider
 from synap_microsoft_agent.history_provider import SynapHistoryProvider
 from synap_microsoft_agent.stream import (
@@ -50,6 +51,14 @@ def streaming_sdk(is_listening: bool = True, order: list | None = None):
     """An SDK whose stream is open (or not), with every reporting call wired."""
     sdk = MagicMock()
     sdk.instance.is_listening = is_listening
+
+    async def listen():
+        sdk.instance.is_listening = True
+
+    # Closed streams stay closed unless a test turns auto-listen on, so a test
+    # that says "no stream" means REST rather than whatever a MagicMock does.
+    sdk.instance.listen = AsyncMock(side_effect=listen)
+    set_auto_listen(sdk, False)
 
     def _log(name):
         async def _call(*args, **kwargs):
@@ -545,16 +554,17 @@ class TestTheHistoryProviderIsStreamFirst:
         sdk.instance.send_message.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_a_system_message_keeps_the_rest_path(self):
-        """It has no stream event, and reporting it would file the system
-        prompt as something the assistant said."""
+    async def test_a_system_message_is_not_a_turn(self):
+        """It has no stream event, reporting it would file the system prompt as
+        something the assistant said, and `record_message` takes user or
+        assistant only: it used to raise ValueError and drop the rest."""
         sdk = streaming_sdk(True)
         provider = SynapHistoryProvider(sdk=sdk, user_id="alice", customer_id="acme")
         await provider.save_messages(
             "conv-1", [Message(role="system", contents=["be helpful"])]
         )
         sdk.instance.send_message.assert_not_awaited()
-        assert sdk.conversation.record_message.await_args.kwargs["role"] == "system"
+        sdk.conversation.record_message.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

@@ -11,11 +11,19 @@ Pydantic AI lets you register dynamic system prompts via the
 Pydantic AI prepends to the model's input on every run.
 
 This module exposes :func:`register_synap_st_system_prompt`, which
-registers an async system_prompt callable on the agent. The callable
+registers an async system_prompt callable on the agent and installs the history
+processor that puts Synap's compaction in place of the earlier turns
+(:func:`synap_history_processor`). The callable
 reads ``sdk`` and ``conversation_id`` from :class:`SynapDeps` at run
 time — Pydantic AI's idiomatic "explicit per-run" mechanism. If
 ``conversation_id`` is unset on the deps, ST injection is skipped (the
 user's static ``system`` string is returned, never wiped).
+
+The ST block holds the recent turns, so it is injected only when the run is
+given no ``message_history``: with one, the framework already sends those
+turns (and the history processor swaps in Synap's compaction), and the block
+would send them twice. The prompt is registered ``dynamic`` so a run given a
+history re-evaluates it instead of keeping the first run's block.
 
 Quality contract matches the LangGraph adapter:
 
@@ -126,8 +134,9 @@ def register_synap_st_system_prompt(
     ``SynapDeps`` per ``agent.run(...)`` / ``agent.run_sync(...)``
     invocation — that's the explicit per-run binding.
 
-    When ``deps.conversation_id`` is unset, ST injection is skipped and
-    the static ``system`` argument is returned (never wiped).
+    When ``deps.conversation_id`` is unset, or the run is given a
+    ``message_history`` (the turns are already being sent), ST injection is
+    skipped and the static ``system`` argument is returned (never wiped).
 
     Args:
         agent: A ``pydantic_ai.Agent`` instance with
@@ -163,10 +172,14 @@ def register_synap_st_system_prompt(
     # pattern in synap_pydantic_ai.deps.register_synap_tools.
     from pydantic_ai import RunContext
 
-    @agent.system_prompt
+    from synap_pydantic_ai.history import install_synap_history
+
+    install_synap_history(agent)
+
+    @agent.system_prompt(dynamic=True)
     async def _synap_st(ctx: RunContext[SynapDeps]) -> str:
         deps = ctx.deps
-        if deps is None or not deps.conversation_id:
+        if deps is None or not deps.conversation_id or getattr(ctx, "messages", None):
             return system.strip()
         st_block = await _fetch_st_block(
             deps.sdk,

@@ -161,7 +161,7 @@ except SDKError as e:
 - `ContextType.PREFERENCES`: User preferences
 - `ContextType.EPISODES`: Conversation episodes
 - `ContextType.EMOTIONS`: Emotional context
-- `ContextType.TEMPORAL`: Time-based context
+- `ContextType.TEMPORAL`: Time-based context (sent as `temporal_events`)
 - `ContextType.ALL`: All context types
 
 ## Compaction Levels

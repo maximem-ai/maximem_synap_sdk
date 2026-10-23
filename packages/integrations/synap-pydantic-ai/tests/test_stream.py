@@ -1,6 +1,7 @@
 """Tests for the Pydantic AI live-stream reporting.
 
-The rule these pin is "stream first, REST only as a fallback, never both".
+The rule these pin is "stream first (opened by the first turn), REST only as a
+fallback, never both".
 The server persists ``user_message`` and ``assistant_message`` from the
 stream itself, so a ``record_message`` on top of a delivered stream event
 writes the same turn twice and extracts it twice.
@@ -27,6 +28,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from synap_integrations_common import set_auto_listen
 from synap_pydantic_ai.deps import SynapDeps
 from synap_pydantic_ai.stream import (
     SynapEventStreamHandler,
@@ -164,6 +166,9 @@ async def _stream(*events):
 def _streaming_sdk(is_listening: bool):
     sdk = MagicMock()
     sdk.instance.is_listening = is_listening
+    if not is_listening:
+        # these tests are about the REST fallback; opening a stream is test_history's
+        set_auto_listen(sdk, False)
     sdk.instance.send_message = AsyncMock()
     sdk.instance.record_thinking = AsyncMock()
     sdk.instance.record_tool_call = AsyncMock()
@@ -726,3 +731,13 @@ class TestSynapRunSync:
         assert [c.kwargs["event_type"]
                 for c in sdk.instance.send_message.await_args_list] == [
             "user_message", "assistant_message"]
+
+
+def test_the_runs_model_is_named_for_compaction_sizing():
+    from types import SimpleNamespace
+    from synap_pydantic_ai.stream import _agent_model
+
+    assert _agent_model(SimpleNamespace(model="openai:gpt-4o"), {}) == "gpt-4o"
+    assert _agent_model(SimpleNamespace(model=SimpleNamespace(model_name="claude-sonnet-4-5")), {}) == "claude-sonnet-4-5"
+    assert _agent_model(SimpleNamespace(model="openai:gpt-4o"), {"model": "groq:llama-3.3-70b-versatile"}) == "llama-3.3-70b-versatile"
+    assert _agent_model(SimpleNamespace(model=None), {}) is None
