@@ -1,11 +1,15 @@
 {
   "name": "@maximem/synap-js-sdk",
-  "version": "0.6.0",
+  "version": "0.6.2",
   "description": "Native TypeScript SDK for Synap context and memory management",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/maximem-ai/maximem_synap.git",
-    "directory": "synap/sdk/js"
+    "url": "git+https://github.com/maximem-ai/maximem_synap_sdk.git",
+    "directory": "packages/sdks/maximem-synap-js"
+  },
+  "homepage": "https://docs.maximem.ai",
+  "bugs": {
+    "url": "https://github.com/maximem-ai/maximem_synap_sdk/issues"
   },
   "type": "module",
   "main": "./dist/index.cjs",

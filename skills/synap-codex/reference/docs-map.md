@@ -19,5 +19,6 @@ Prefix every path with `https://docs.maximem.ai`. "Re-visit" says when to open t
 | Privacy and data control | /guides/pii-protection, /guides/erasure, /guides/instance-visibility, /dashboard/pii-and-data-controls | When the human names compliance or sensitive data |
 | Production and errors | /guides/production-checklist, /sdk/error-handling, /sdk-reference/errors, /resources/performance-limits | Before step 9, and on any error |
 | Credits and instances | /sdk-reference/credits/get-balance, /sdk-reference/credits/estimate | On a credits error |
+| Instances (what they are, their states) | /concepts/memory-scopes ("What is an Instance?"), /dashboard/overview ("Managing instances"), /concepts/agent-topologies, /setup/authentication ("Multiple keys per instance"); plain-words glossary: `instances-explained.md` | Before explaining any status word; when the repo has several agents |
 | Dashboard (optional view) | /dashboard/overview | Only if the human asks |
 

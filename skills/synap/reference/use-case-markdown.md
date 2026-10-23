@@ -7,7 +7,7 @@ instance's **Memory Architecture (MACA)**: what kinds of facts, preferences, epi
 and how it weights them at retrieval. A good brief makes extraction sharper; a vague or invented one makes
 memory noisy.
 
-**It cannot be edited after the instance is created.** So the human approves the draft first, and you never
+**Once the file is sent, it can only be changed by making a request through email to gaurav@maximem.ai.** So the human approves the draft first, and you never
 fill a gap with a guess. Write the literal text `not stated` instead.
 
 - Accepted formats: `.md`, `.markdown`, `.txt`, up to 512 KB.
@@ -20,7 +20,7 @@ fill a gap with a guess. Write the literal text `not stated` instead.
 | Section | Required | May the agent infer it from code? | Rule |
 |---|---|---|---|
 | Agent Objective | Yes | Yes: README, prompts, entry points | Quote what you found. Ask if the repo does not say what "remembering well" means. |
-| Target Users | Yes | **No. Always ask.** | Includes B2C vs B2B and what identifies a returning person (a stable user id; none means per-session memory only, which the goal text must not contradict). Show the evidence (user model, tenant or org tables, auth) and still ask. Immutable after create; must match `--relationship`. |
+| Target Users | Yes | **No. Always ask.** | Includes B2C vs B2B and what identifies a returning person (a stable user id; none means per-session memory only, which the goal text must not contradict). Show the evidence (user model, tenant or org tables, auth) and still ask. B2C or B2B is chosen when the instance is created, and a later change also goes through that email; it must match `--relationship`. |
 | Task Examples | Yes | Partly: real utterances from tests, fixtures, prompts | Use real examples found in the repo, marked as such, and ask the human for the ones that matter. Never invent utterances. |
 | Interaction Pattern (if the template has it) | Optional | Partly: voice or text from the code | Modality and average turn speed. Ask once and reuse the answer for the integration path step; never ask twice. |
 | Behavioral Guidelines | Optional | Only if the code states them | Otherwise `not stated`. |

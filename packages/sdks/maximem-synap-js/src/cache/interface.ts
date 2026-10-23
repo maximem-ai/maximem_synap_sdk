@@ -1,5 +1,8 @@
 /**
- * Cache namespace. Mirrors `CacheInterface` in the Python SDK.
+ * Cache namespace. Same method names as `CacheInterface` in the Python SDK,
+ * but it covers only the in-memory cache of prefetched context: `stats()`
+ * returns `{ bundles, items }`, not Python's `enabled`, `total_entries`,
+ * `total_bytes` and `backends`. There is no on-disk cache in JS.
  *
  * This is a deliberately narrow facade over the AnticipationCache rather than
  * the cache object itself. Exposing the instance directly leaked internals
