@@ -7,14 +7,30 @@ is a plain object that owns *all* Synap SDK interaction, and the retriever/write
 shape ``synap_langgraph.SynapStore`` follows for LangGraph — the store is the
 center of gravity; everything else delegates to it.
 
-Why a memory store (and not the generic ``ChatMessageStore`` protocol)? Memory —
-unlike a verbatim chat log — is *semantic and cross-conversation*: writes are
-extracted/synthesised server-side, reads are query-driven. So this implements
-Mem0's ``add_memories`` / ``search_memories`` contract rather than Haystack's
-recency-based ``ChatMessageStore`` protocol (``write_messages`` /
-``retrieve_messages`` keyed by ``chat_history_id``), which is designed for
-verbatim turn storage. This is the same reason Mem0 deliberately did not conform
-to ``ChatMessageStore``.
+It implements two contracts, because Haystack's experimental ``Agent`` has two
+slots and Synap fits both:
+
+- Mem0's ``add_memories`` / ``search_memories`` (the ``memory_store=`` slot):
+  semantic and cross-conversation, writes extracted server-side, reads
+  query-driven.
+- Haystack's ``ChatMessageStore`` protocol (the ``chat_message_store=`` slot):
+  ``write_messages`` / ``retrieve_messages`` / ``count_messages`` /
+  ``delete_*``, with ``chat_history_id`` as the Synap conversation id. This is the
+  one place a Haystack agent's history is decided: the agent's
+  ``ChatMessageRetriever`` asks for the last ten messages and puts them before
+  the new ones. Here that history is Synap's compaction of the conversation (a
+  system message) followed by the turns after it, so once Synap has compacted,
+  the model sees the compaction instead of a ten-message window. Haystack has no
+  compaction of its own to leave in place; the window is the fallback when Synap
+  has nothing yet. Give the agent the store in both slots if you want both::
+
+      store = SynapMemoryStore(sdk, user_id="alice", conversation_id="conv-1")
+      agent = Agent(chat_generator=..., chat_message_store=store, memory_store=store)
+      agent.run(messages=[...], chat_message_store_kwargs={"chat_history_id": "conv-1"})
+
+  The agent hands both stores the same messages, history included, so a message
+  this store has recorded or retrieved carries ``meta["synap_recorded"]`` and is
+  never recorded or reported a second time.
 
 Scope:
 
@@ -52,7 +68,8 @@ tool message, and ``ReasoningContent(reasoning_text)`` on either.
 it as ``origin.id``, which is what ties a call to its result.
 
 Only the turns are also memory, and they follow the one rule that matters:
-**stream first, REST only as a fallback, never both**. The server persists
+**on the gRPC stream (opened by the first event, no ``listen()`` call needed;
+``SYNAP_AUTO_LISTEN=false`` turns that off), REST only as a fallback, never both**. The server persists
 ``user_message`` and ``assistant_message`` straight off the stream
 (``grpc/servicer.py``), so a ``record_message`` on top of a delivered stream
 event writes the turn twice and extracts it twice. Tool calls, tool results
@@ -67,7 +84,10 @@ reports nothing extra instead of failing to import.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import threading
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
 from haystack import Document
@@ -76,6 +96,7 @@ from haystack.dataclasses import ChatMessage
 
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import SynapIntegrationError, run_async
+from synap_integrations_common.history import HISTORY_CLOSE, HISTORY_OPEN
 from synap_integrations_common.stream_events import (
     report_reasoning,
     report_tool_call,
@@ -88,6 +109,18 @@ logger = logging.getLogger(__name__)
 # Roles we ingest as memory. Synap extracts from the conversation channel, so
 # only user/assistant turns carry signal; system/tool messages are skipped.
 _WRITE_ROLES = frozenset(("user", "assistant"))
+
+# Set in a message's meta once this store has recorded or retrieved it.
+RECORDED_KEY = "synap_recorded"
+
+# The stamp does not always survive: Haystack 3's ``State.get`` returns a deep
+# copy, so a hook that stamps what it read stamps copies, and an app that feeds
+# the agent's returned messages back as history sends the unstamped originals.
+# The store therefore also keeps, per conversation, how many times it has
+# recorded each (role, content) pair. Bounded: past these limits the oldest
+# entries go, and a message that falls out is recorded once more.
+_LEDGER_KEYS_PER_CONVERSATION = 4096
+_LEDGER_CONVERSATIONS = 256
 
 
 class SynapMemoryStore:
@@ -145,6 +178,9 @@ class SynapMemoryStore:
         self.max_results = max_results
         self.include_conversation_context = include_conversation_context
         self._delete_warned = False
+        # conversation_id -> {fingerprint: times recorded}, least recently used first.
+        self._ledger: "OrderedDict[str, OrderedDict[str, int]]" = OrderedDict()
+        self._ledger_lock = threading.Lock()
 
     # ── write ────────────────────────────────────────────────────────────────
 
@@ -200,8 +236,28 @@ class SynapMemoryStore:
 
         ids = {"conversation_id": conv_id, "user_id": uid or "", "customer_id": cid or ""}
 
+        # The k-th time a message appears in this list is the k-th time the
+        # conversation said it, so a repeated "yes" is two turns, not one.
+        seen: Dict[str, int] = {}
+
         for msg in messages:
             role = _role_of(msg)
+            key = _fingerprint(msg)
+            nth = seen.get(key, 0)
+            seen[key] = nth + 1
+
+            # Recorded or retrieved by this store already: an agent hands the
+            # same messages (history included) to its chat store and its memory
+            # store, and to either again on the next run. The stamp can be lost
+            # on the way back (see RECORDED_KEY); the ledger is the second check.
+            if _is_recorded(msg):
+                self._ledger_note(conv_id, key, nth)
+                results.append({"role": role, "status": "skipped", "reason": "already recorded"})
+                continue
+            if self._ledger_has(conv_id, key, nth):
+                self._mark(msg, conv_id, key, nth)
+                results.append({"role": role, "status": "skipped", "reason": "already recorded"})
+                continue
 
             # ── the live stream ──────────────────────────────────────────
             # Reported for every role, including the ones that are never
@@ -218,6 +274,22 @@ class SynapMemoryStore:
                     role,
                     sorted(_WRITE_ROLES),
                 )
+                if role != "system":
+                    self._mark(msg, conv_id, key, nth)  # its tool results went out above
+                continue
+
+            text = msg.text or ""
+            calls = getattr(msg, "tool_calls", None)
+            if not text.strip() or (role == "assistant" and calls):
+                # A tool call lap is not an answer: its words (when it has any)
+                # narrate a step, and the anticipation event for "a turn ended"
+                # is the final reply. With no words at all it used to go out as
+                # an empty turn, which the stream dropped and REST refused, so
+                # the message counted as a failed write.
+                results.append({"role": role, "status": "skipped",
+                                "reason": "tool call" if text.strip() else "no text"})
+                await self._report_tool_calls(msg, ids)
+                self._mark(msg, conv_id, key, nth)
                 continue
 
             # Stream first, REST only as a fallback, never both.
@@ -230,7 +302,7 @@ class SynapMemoryStore:
             # fallback and lose it silently. REST fails loudly instead, which
             # is what this store did before there was a stream at all.
             if uid and await report_turn(
-                self.sdk, role=role, content=msg.text or "", **ids
+                self.sdk, role=role, content=text, **ids
             ):
                 written += 1
                 results.append({
@@ -244,7 +316,7 @@ class SynapMemoryStore:
                     resp = await self.sdk.conversation.record_message(
                         conversation_id=conv_id,
                         role=role,
-                        content=msg.text or "",
+                        content=text,
                         user_id=uid or None,
                         customer_id=cid,
                     )
@@ -269,6 +341,8 @@ class SynapMemoryStore:
 
             # After the turn: the model says its piece, then asks for tools.
             await self._report_tool_calls(msg, ids)
+            if results[-1]["status"] == "written":
+                self._mark(msg, conv_id, key, nth)
 
         processed = written + failed
         if processed > 0 and written == 0:
@@ -281,6 +355,30 @@ class SynapMemoryStore:
             )
 
         return results
+
+    def _mark(self, msg: Any, conv_id: str, key: str, nth: int) -> None:
+        _mark_recorded(msg, conv_id)
+        self._ledger_note(conv_id, key, nth)
+
+    def _ledger_has(self, conv_id: str, key: str, nth: int) -> bool:
+        with self._ledger_lock:
+            counts = self._ledger.get(conv_id)
+            return counts is not None and counts.get(key, 0) > nth
+
+    def _ledger_note(self, conv_id: str, key: str, nth: int) -> None:
+        """Record that the conversation's ``nth`` (0-based) copy of ``key`` is out."""
+        with self._ledger_lock:
+            counts = self._ledger.get(conv_id)
+            if counts is None:
+                counts = self._ledger[conv_id] = OrderedDict()
+                while len(self._ledger) > _LEDGER_CONVERSATIONS:
+                    self._ledger.popitem(last=False)
+            else:
+                self._ledger.move_to_end(conv_id)
+            counts[key] = max(counts.get(key, 0), nth + 1)
+            counts.move_to_end(key)
+            while len(counts) > _LEDGER_KEYS_PER_CONVERSATION:
+                counts.popitem(last=False)
 
     # ── the three events this store never reported ──────────────────────────
     #
@@ -428,6 +526,93 @@ class SynapMemoryStore:
         )
         return [Document(content=r["content"], meta=r["meta"]) for r in records]
 
+    # ── Haystack's ChatMessageStore protocol ───────────────────────────────────
+    #
+    # `chat_history_id` is the Synap conversation id.
+
+    def write_messages(self, chat_history_id: str, messages: List[ChatMessage]) -> int:
+        """Record the messages this store has not seen. Returns how many turns it wrote.
+
+        An agent's chat writer passes the whole run, history and system prompt
+        included; only what is new and said by a user or the assistant is a
+        turn. Tool calls, results and reasoning go on the stream.
+        """
+        return run_async(self.awrite_messages(chat_history_id, messages))
+
+    async def awrite_messages(self, chat_history_id: str, messages: List[ChatMessage]) -> int:
+        results = await self.aadd_memories(messages=messages, conversation_id=chat_history_id)
+        return sum(1 for r in results if r.get("status") == "written")
+
+    def retrieve_messages(self, chat_history_id: str, last_k: Optional[int] = None) -> List[ChatMessage]:
+        """Synap's history of the conversation, oldest first.
+
+        Once Synap has compacted the conversation: its compaction as a system
+        message, then the turns after it. Before that: the recent turns.
+        ``last_k`` keeps only that many of the turns (the compaction is always
+        kept). Degrades to ``[]`` on SDK failure.
+        """
+        return run_async(self.aretrieve_messages(chat_history_id, last_k))
+
+    async def aretrieve_messages(
+        self, chat_history_id: str, last_k: Optional[int] = None
+    ) -> List[ChatMessage]:
+        ctx = await self._acontext(chat_history_id)
+        if ctx is None:
+            return []
+        out: List[ChatMessage] = []
+        compaction = getattr(ctx, "context_block", None)
+        if getattr(ctx, "available", True) is not False and isinstance(compaction, str) \
+                and compaction.strip():
+            parts = [compaction.strip()]
+            found = getattr(ctx, "history_block", None)
+            if isinstance(found, str) and found.strip():
+                parts.append(found.strip())
+            out.append(ChatMessage.from_system(
+                f"{HISTORY_OPEN}\n" + "\n\n".join(parts) + f"\n{HISTORY_CLOSE}"))
+        turns: List[ChatMessage] = []
+        for rm in getattr(ctx, "recent_messages", None) or []:
+            role, content = getattr(rm, "role", None), getattr(rm, "content", None)
+            if not isinstance(content, str) or not content.strip():
+                continue
+            meta = {RECORDED_KEY: chat_history_id}
+            if role == "user":
+                turns.append(ChatMessage.from_user(content, meta=meta))
+            elif role == "assistant":
+                turns.append(ChatMessage.from_assistant(content, meta=meta))
+        if last_k is not None and last_k >= 0:
+            turns = turns[-last_k:] if last_k else []
+        return out + turns
+
+    def count_messages(self, chat_history_id: str) -> int:
+        """How many messages Synap holds for the conversation (0 on SDK failure)."""
+        return run_async(self.acount_messages(chat_history_id))
+
+    async def acount_messages(self, chat_history_id: str) -> int:
+        ctx = await self._acontext(chat_history_id)
+        total = getattr(ctx, "total_message_count", 0) if ctx is not None else 0
+        return total if isinstance(total, int) else 0
+
+    def delete_messages(self, chat_history_id: str) -> None:
+        """No-op: Synap has no public delete API (warns once)."""
+        self._warn_delete()
+
+    def delete_all_messages(self) -> None:
+        """No-op: Synap has no public delete API (warns once)."""
+        self._warn_delete()
+
+    async def _acontext(self, chat_history_id: str) -> Any:
+        try:
+            return await self.sdk.conversation.context.get_context_for_prompt(
+                conversation_id=chat_history_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — read-side degrades gracefully
+            logger.error(
+                "SynapMemoryStore.retrieve_messages: get_context_for_prompt failed "
+                "conversation_id=%s error=%s",
+                chat_history_id, exc, exc_info=True,
+            )
+            return None
+
     # ── delete (no public Synap delete API) ────────────────────────────────────
 
     def delete_memory(self, memory_id: str, **kwargs: Any) -> None:
@@ -523,6 +708,34 @@ class SynapMemoryStore:
 def _role_of(message: ChatMessage) -> str:
     role = getattr(message, "role", "user")
     return getattr(role, "value", role)
+
+
+def _is_recorded(message: ChatMessage) -> bool:
+    meta = getattr(message, "meta", None)
+    return isinstance(meta, dict) and bool(meta.get(RECORDED_KEY))
+
+
+def _fingerprint(message: ChatMessage) -> str:
+    """A short digest of what a message says: role, text, tool calls and results,
+    reasoning. Two messages with the same digest are the same words."""
+    parts: List[str] = [_role_of(message), getattr(message, "text", None) or ""]
+    for call in getattr(message, "tool_calls", None) or []:
+        parts.append(f"call|{getattr(call, 'id', '')}|{getattr(call, 'tool_name', '')}|"
+                     f"{getattr(call, 'arguments', '')!r}")
+    for res in getattr(message, "tool_call_results", None) or []:
+        origin = getattr(res, "origin", None)
+        parts.append(f"result|{getattr(origin, 'id', '')}|{getattr(res, 'result', '')!r}")
+    for part in getattr(message, "reasonings", None) or []:
+        parts.append(f"reasoning|{getattr(part, 'reasoning_text', '')}")
+    return hashlib.sha1("\x1f".join(parts).encode("utf-8", "replace")).hexdigest()
+
+
+def _mark_recorded(message: ChatMessage, conversation_id: str) -> None:
+    """Stamp a message so no store records it twice. `meta` is a plain dict on a
+    frozen dataclass, so this does not need to rebuild the message."""
+    meta = getattr(message, "meta", None)
+    if isinstance(meta, dict):
+        meta[RECORDED_KEY] = conversation_id
 
 
 def _message_id(resp: Any) -> Optional[str]:

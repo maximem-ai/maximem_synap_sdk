@@ -8,11 +8,25 @@ import {
 import { makeSdk, makeFailingSdk, makeCtx, promptContext } from "./helpers.js";
 
 describe("fetchSynapShortTerm", () => {
-  it("returns available context (happy path)", async () => {
-    const sdk = makeSdk();
+  it("returns the compaction, not the recent turns (happy path)", async () => {
+    const promptCtx = {
+      ...promptContext(),
+      context_block: "## Conversation so far (compacted at 5)\nUser is a senior engineer.",
+    };
+    const sdk = makeSdk({ promptCtx });
     const res = await fetchSynapShortTerm({ sdk, conversationId: "conv-1" });
     expect(res.available).toBe(true);
-    expect(res.formattedContext).toContain("senior engineer");
+    expect(res.formattedContext).toBe(
+      "<synap_conversation_history>\n## Conversation so far (compacted at 5)\nUser is a senior engineer.\n</synap_conversation_history>",
+    );
+    // formatted_context carries the recent turns, which eve's own history has.
+    expect(res.formattedContext).not.toContain("Prefers email updates");
+  });
+
+  it("is empty before the first compaction, however much formatted_context there is", async () => {
+    const sdk = makeSdk();
+    const res = await fetchSynapShortTerm({ sdk, conversationId: "conv-1" });
+    expect(res.formattedContext).toBe("");
   });
 
   it("returns unavailable when the server reports none", async () => {
@@ -76,11 +90,12 @@ describe("createSynapInstructions (dynamic resolver)", () => {
   }
 
   it("returns a defineInstructions payload with the recalled markdown (happy path)", async () => {
-    const sdk = makeSdk();
+    const sdk = makeSdk({ promptCtx: { ...promptContext(), context_block: "## Conversation so far (compacted at 5)\nx" } });
     const resolver = getResolver(createSynapInstructions({ sdk }));
     const out = (await resolver({}, makeCtx({ sessionId: "conv-7" }))) as { markdown?: string } | null;
     expect(out).not.toBeNull();
     expect(out?.markdown).toContain("synap_short_term_context");
+    expect(out?.markdown).toContain("synap_conversation_history");
     expect(sdk.conversation.context.get_context_for_prompt).toHaveBeenCalledWith(
       expect.objectContaining({ conversation_id: "conv-7" }),
     );

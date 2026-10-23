@@ -37,10 +37,23 @@ captured when you build the listener; see ``loop`` and :meth:`bind_loop`.
 
 Two rules hold throughout, and they come from ``stream_events``.
 
-*Silent without a stream.* Everything here needs an active
-``sdk.instance.listen()``. Most callers do not have one, and for them every
-handler returns immediately. Adding this listener must not change behaviour
-for someone who has not opted into streaming.
+*The stream is the default.* The first event opens ``sdk.instance.listen()``
+if you have not, and every turn, tool call, tool result and reasoning step
+goes on it. ``SYNAP_AUTO_LISTEN=false`` (or
+``synap_integrations_common.set_auto_listen(sdk, False)``) turns that off; the
+user and assistant turns are then written over REST
+(``sdk.conversation.record_message``) and the rest is dropped. With no loop
+captured the report runs on the common background loop, which is also where
+the stream then opens.
+
+*Synap's compaction replaces CrewAI's history.* The listener also registers a
+``before_llm_call`` hook. On the first model call of an executor, once Synap has
+compacted the conversation, the messages CrewAI built (anything before the
+current request, such as a history passed to ``agent.kickoff(messages=...)``)
+are replaced by Synap's compaction and the turns after it. Before the first
+compaction, or when Synap cannot answer, CrewAI's messages are untouched. The
+hook is process-wide, like every CrewAI LLM hook, so it applies to each crew
+that runs while the listener is live.
 
 *Never raises.* A handler runs inside CrewAI's own dispatch. Nothing here
 raises into it, and nothing here blocks it: the report is handed to the
@@ -50,7 +63,9 @@ listening loop and the handler returns.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from crewai.events import (
@@ -67,22 +82,33 @@ from crewai.events import (
 
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
+    fetch_compacted_history,
+    is_synap_history,
+    record_turn,
     report_reasoning,
     report_tool_call,
     report_tool_result,
-    report_turn,
+    run_async,
+    run_blocking,
+    splice_history,
     stream_is_active,
 )
 
 logger = logging.getLogger(__name__)
 
 _NO_LOOP_WARNING = (
-    "SynapCrewAIListener: a Synap stream is open but no event loop was "
-    "captured, so nothing can be reported. CrewAI runs event handlers on its "
-    "own threads, and a gRPC stream can only be written from the loop that "
+    "SynapCrewAIListener: a Synap stream you opened is live but no event loop "
+    "was captured, so nothing can be reported. CrewAI runs event handlers on "
+    "its own threads, and a gRPC stream can only be written from the loop that "
     "sdk.instance.listen() runs on. Build the listener from inside that loop, "
-    "pass loop=..., or call listener.bind_loop() from a coroutine running on "
-    "it."
+    "pass loop=..., call listener.bind_loop() from a coroutine running on it, "
+    "or leave listen() to the listener."
+)
+
+# The static block build_synap_st_backstory puts in a backstory. Once Synap's
+# own history is spliced in it says the same thing, older.
+_ST_BLOCK = re.compile(
+    r"<synap_short_term_context>.*?</synap_short_term_context>\s*", re.DOTALL
 )
 
 
@@ -95,8 +121,9 @@ class SynapCrewAIListener(BaseEventListener):
     undo it.
 
     Args:
-        sdk: A configured :class:`MaximemSynapSDK`. Without an active
-            ``listen()`` stream every handler is a no-op.
+        sdk: A configured :class:`MaximemSynapSDK`. The first event opens
+            its ``listen()`` stream unless you already did; see the module
+            docstring for the opt-out.
         user_id: Synap user scope. **Required.**
         conversation_id: The conversation these runs belong to. **Required.**
             Without it the server cannot say which conversation an event is
@@ -160,13 +187,16 @@ class SynapCrewAIListener(BaseEventListener):
         self._loop = loop or _running_loop()
         self._no_loop_warned = False
         self._step = 0
+        self._last_inputs = ""
         # Only used when the bus could not pair the two legs of a tool call
         # itself. One tool in flight per name, which is what a sequential
         # agent loop produces.
         self._calls: Dict[str, str] = {}
         self._registered: List[Tuple[type, Any]] = []
+        self._hook_registered = False
 
         super().__init__()
+        self._register_history_hook()
 
     # ── which loop the reports go back to ───────────────────────────────
 
@@ -197,6 +227,15 @@ class SynapCrewAIListener(BaseEventListener):
         for event_type, handler in self._registered:
             crewai_event_bus.off(event_type, handler)
         self._registered.clear()
+        if self._hook_registered:
+            try:
+                from crewai.hooks.llm_hooks import unregister_before_llm_call_hook
+
+                unregister_before_llm_call_hook(self._before_llm_call)
+            except Exception:  # noqa: BLE001
+                logger.debug("synap_crewai: could not unregister the history hook",
+                             exc_info=True)
+            self._hook_registered = False
 
     # ── the ids every event carries ─────────────────────────────────────
 
@@ -215,8 +254,7 @@ class SynapCrewAIListener(BaseEventListener):
         """
         loop = self._loop
         if loop is None or loop.is_closed():
-            self._warn_no_loop()
-            coro.close()
+            self._dispatch_without_loop(coro)
             return
         try:
             future = asyncio.run_coroutine_threadsafe(coro, loop)
@@ -226,6 +264,26 @@ class SynapCrewAIListener(BaseEventListener):
             return
         future.add_done_callback(_swallow)
 
+    def _dispatch_without_loop(self, coro: Any) -> None:
+        """Run a report when no loop was captured: on the common background loop.
+
+        That is the loop the stream opens on when the listener has to open it,
+        and the loop the SDK's REST client is used from by every other
+        integration helper. The handler's own thread waits for it, which is
+        CrewAI's worker and not the crew. A stream you opened yourself on a loop
+        we were not told about cannot be written from here, so that is the one
+        case that still warns and drops.
+        """
+        if _foreign_stream(self._sdk):
+            self._warn_no_loop()
+            coro.close()
+            return
+        try:
+            run_blocking(coro)
+        except Exception:  # noqa: BLE001 — a handler must never raise
+            coro.close()
+            logger.debug("synap_crewai: a report failed", exc_info=True)
+
     def _warn_no_loop(self) -> None:
         # Loud, and once. A stream that is open and reporting nothing is the
         # failure that looks like success, so it does not get a debug line.
@@ -233,15 +291,6 @@ class SynapCrewAIListener(BaseEventListener):
             return
         self._no_loop_warned = True
         logger.warning(_NO_LOOP_WARNING)
-
-    def _live(self) -> bool:
-        """Whether there is anything to report to.
-
-        Checked in the handler rather than only inside the helpers so that a
-        caller with no stream pays nothing at all, and so that the missing-loop
-        warning fires only for someone who actually opted into streaming.
-        """
-        return stream_is_active(self._sdk)
 
     # ── the handlers ────────────────────────────────────────────────────
 
@@ -254,14 +303,11 @@ class SynapCrewAIListener(BaseEventListener):
 
         def on_kickoff_started(source: Any, event: Any) -> None:
             self._step = 0
-            if not self._report_kickoff_inputs or not self._live():
-                return
             text = _inputs_text(getattr(event, "inputs", None))
-            if not text:
+            self._last_inputs = text
+            if not self._report_kickoff_inputs or not text:
                 return
-            self._dispatch(
-                report_turn(self._sdk, role="user", content=text, **self._ids())
-            )
+            self._write_turn("user", text)
 
         def on_kickoff_completed(source: Any, event: Any) -> None:
             self._report_answer(getattr(event, "output", None))
@@ -272,8 +318,6 @@ class SynapCrewAIListener(BaseEventListener):
             self._report_answer(getattr(event, "output", None))
 
         def on_tool_started(source: Any, event: Any) -> None:
-            if not self._live():
-                return
             name = str(getattr(event, "tool_name", "") or "tool")
             call_id = str(getattr(event, "event_id", "") or "")
             if call_id:
@@ -298,8 +342,6 @@ class SynapCrewAIListener(BaseEventListener):
             self._report_tool_outcome(event, f"error: {error}")
 
         def on_reasoning_completed(source: Any, event: Any) -> None:
-            if not self._live():
-                return
             plan = getattr(event, "plan", None)
             if not isinstance(plan, str) or not plan.strip():
                 return
@@ -322,6 +364,71 @@ class SynapCrewAIListener(BaseEventListener):
         register(ToolUsageErrorEvent, on_tool_error)
         register(AgentReasoningCompletedEvent, on_reasoning_completed)
 
+    # ── Synap's compaction in place of CrewAI's history ─────────────────
+
+    def _register_history_hook(self) -> None:
+        """Put :meth:`_before_llm_call` on CrewAI's global LLM hook list.
+
+        An executor snapshots that list when it is built, so the hook has to
+        be registered before the crew kicks off, which building the listener
+        guarantees. A CrewAI without LLM hooks simply keeps its own history.
+        """
+        try:
+            from crewai.hooks.llm_hooks import register_before_llm_call_hook
+        except ImportError:
+            logger.debug("synap_crewai: this CrewAI has no before_llm_call hooks")
+            return
+        register_before_llm_call_hook(self._before_llm_call)
+        self._hook_registered = True
+
+    def _before_llm_call(self, context: Any) -> None:
+        """Replace the turns CrewAI holds with Synap's compaction, once per run.
+
+        Only the first model call of an executor: the history is fixed by then,
+        and later calls are the tool loop, which CrewAI's own context-window
+        handling still covers. Always returns ``None``: ``False`` would block
+        the call.
+        """
+        try:
+            if getattr(context, "iterations", 0) != 0:
+                return None
+            messages = context.messages
+            if not isinstance(messages, list) or not messages:
+                return None
+            if any(is_synap_history(_message_text(m)) for m in messages):
+                return None  # already applied, by this listener or another
+            history = run_async(
+                fetch_compacted_history(self._sdk, self._conversation_id)
+            )
+            if history is None:
+                return None
+            history = self._without_current_inputs(history)
+            messages[:] = splice_history(
+                messages,
+                history,
+                role_of=_message_role,
+                text_of=_message_text,
+                make_message=lambda role, text: {"role": role, "content": text},
+            )
+            _drop_static_short_term(messages)
+        except Exception:  # noqa: BLE001 — CrewAI's own history still stands
+            logger.debug("synap_crewai: history splice failed", exc_info=True)
+        return None
+
+    def _without_current_inputs(self, history: Any) -> Any:
+        """Synap already holds this kickoff's inputs as the newest user turn.
+
+        CrewAI is about to send the same request, rendered into the task
+        prompt, as the current turn; the recorded copy would be a second one.
+        """
+        now = " ".join(self._last_inputs.split())
+        turns = list(history.turns)
+        if now and turns and turns[-1][0] == "user" \
+                and " ".join(turns[-1][1].split()) == now:
+            turns.pop()
+            return dataclasses.replace(history, turns=tuple(turns))
+        return history
+
     # ── shared by the handlers above ────────────────────────────────────
 
     def _report_answer(self, output: Any) -> None:
@@ -332,17 +439,24 @@ class SynapCrewAIListener(BaseEventListener):
         again. An integration that reports tools and not this gets no
         anticipation at all.
         """
-        if not self._live():
-            return
         text = _output_text(output)
         if not text:
             return
+        self._write_turn("assistant", text)
+
+    def _write_turn(self, role: str, text: str) -> None:
+        """Write a turn: on the stream (opened if need be), over REST if it cannot.
+
+        Same path as every other report, so a turn is never written twice and
+        never depends on whether the caller thought to open a stream. Never
+        raises.
+        """
         self._dispatch(
-            report_turn(self._sdk, role="assistant", content=text, **self._ids())
+            record_turn(self._sdk, role=role, content=text, **self._ids())
         )
 
     def _report_tool_outcome(self, event: Any, result: Any) -> None:
-        if not self._report_tool_results or not self._live():
+        if not self._report_tool_results:
             return
         name = str(getattr(event, "tool_name", "") or "")
         # The bus stamps an ending event with the id of the starting event it
@@ -381,7 +495,10 @@ async def report_user_turn(
     user_id: str,
     customer_id: str = "",
 ) -> bool:
-    """Report what the user actually said, before you kick the crew off.
+    """Write what the user actually said, before you kick the crew off.
+
+    Goes on the ``listen()`` stream when one is open and over REST when not,
+    so the turn is kept either way. Returns whether it was written.
 
     CrewAI has no user turn. A crew is kicked off with ``inputs``, which are
     template variables rather than a message, and
@@ -390,7 +507,7 @@ async def report_user_turn(
     the real request, send it with this instead and build the listener with
     ``report_kickoff_inputs=False``.
     """
-    return await report_turn(
+    return await record_turn(
         sdk,
         role="user",
         content=content or "",
@@ -398,6 +515,51 @@ async def report_user_turn(
         user_id=user_id,
         customer_id=customer_id,
     )
+
+
+def _foreign_stream(sdk: Any) -> bool:
+    """A stream the caller opened, on a loop this package was not told about.
+
+    One the common helper opened records its loop; one opened by the caller
+    does not, and cannot be written from the background loop.
+    """
+    if not stream_is_active(sdk):
+        return False
+    try:
+        state = vars(sdk).get("_synap_auto_stream")
+    except TypeError:
+        return False
+    return not (isinstance(state, dict) and state.get("loop") is not None)
+
+
+def _message_role(message: Any) -> str:
+    role = message.get("role") if isinstance(message, dict) else getattr(message, "role", "")
+    return str(role or "")
+
+
+def _message_text(message: Any) -> str:
+    content = message.get("content") if isinstance(message, dict) else getattr(message, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):  # content blocks
+        return "\n".join(
+            str(b.get("text", "")) for b in content if isinstance(b, dict)
+        )
+    return ""
+
+
+def _drop_static_short_term(messages: List[Any]) -> None:
+    """Remove the backstory snapshot from the system prompt.
+
+    ``build_synap_st_backstory`` can only run when the agent is built; the
+    history just spliced in is the same conversation, current.
+    """
+    for message in messages:
+        if _message_role(message) != "system" or not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and "<synap_short_term_context>" in content:
+            message["content"] = _ST_BLOCK.sub("", content)
 
 
 def _running_loop() -> Optional[asyncio.AbstractEventLoop]:

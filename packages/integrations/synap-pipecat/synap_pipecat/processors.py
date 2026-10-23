@@ -12,7 +12,12 @@ Two :class:`FrameProcessor` subclasses:
 - :class:`SynapRecorder` — WRITE path. Inserted AFTER the assistant
   context aggregator. Buffers the most recent user transcription and the
   streamed assistant text; on :class:`LLMFullResponseEndFrame` it records
-  both turns via ``sdk.conversation.record_message``.
+  both turns: on the gRPC stream (opened on the first one if the caller did
+  not open it; ``SYNAP_AUTO_LISTEN=false`` turns that off), over
+  ``sdk.conversation.record_message`` when the stream cannot carry them,
+  never both. With a ``context``, it then swaps the context's earlier turns
+  for Synap's compaction once Synap has made one
+  (:mod:`synap_pipecat.compaction`).
 
 Error policy (see README):
 - Read failures degrade gracefully — log at ERROR and skip context
@@ -26,6 +31,7 @@ Error policy (see README):
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from typing import List, Optional
@@ -46,18 +52,27 @@ from pipecat.frames.frames import (
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
-from synap_integrations_common import (
-    SynapIntegrationError,
-    wrap_sdk_errors_async,
-)
+from synap_integrations_common import SynapIntegrationError, is_synap_history
 from synap_integrations_common.stream_events import (
+    record_turn,
     report_reasoning,
     report_tool_call,
     report_tool_result,
-    report_turn,
 )
 
+from synap_pipecat.compaction import HistorySplicer, _text_of
+
+try:  # pipecat-ai >= 1.7: the one end-of-turn frame the assistant aggregator lets through
+    from pipecat.frames.frames import LLMContextAssistantTurnFrame
+except ImportError:  # older pipecat: its aggregator passes LLMFullResponseEndFrame on
+    LLMContextAssistantTurnFrame = None  # type: ignore[assignment,misc]
+
 logger = logging.getLogger(__name__)
+
+# Tool calls already reported, so a call seen as a frame and again in the
+# context is reported once. An hours-long call makes tens of them.
+_SEEN_LIMIT = 512
+_IN_PROGRESS = "IN_PROGRESS"  # what the aggregator writes as a result until the real one lands
 
 
 _SYSTEM_MEMORY_PREAMBLE = (
@@ -186,7 +201,24 @@ class SynapRecorder(FrameProcessor):
 
     Placement: AFTER the assistant context aggregator in the pipeline.
     On :class:`LLMFullResponseEndFrame`, flushes the user and assistant
-    turns via ``sdk.conversation.record_message`` and resets its buffers.
+    turns (on the gRPC stream, REST only when the stream cannot carry them)
+    and resets its buffers. When a ``context`` is given and Synap has
+    compacted the conversation, the context's earlier turns are then
+    replaced by the compaction and the turns after it, so the next LLM
+    request carries that instead of every turn so far.
+
+    **Where it sits decides what it sees.** Pipecat's universal
+    ``LLMAssistantAggregator`` (pipecat-ai 1.x) consumes
+    ``LLMFullResponseStartFrame``/``EndFrame``, every ``TextFrame`` (so
+    ``TTSTextFrame`` too), ``LLMThoughtTextFrame`` and the function-call
+    frames, and pushes none of them on. After it, the recorder gets one
+    end-of-turn frame, ``LLMContextAssistantTurnFrame`` (the text of the
+    assistant turn as stored in the context), and records from that: both
+    turns, plus the tool calls and results it reads back out of the shared
+    ``context``. Reasoning is not recoverable there. To also get tool calls
+    at the moment they are dispatched, and reasoning, put the recorder
+    BEFORE the assistant aggregator (for example right after the LLM
+    service); the turn then ends on ``LLMFullResponseEndFrame``.
 
     Turn capture works across both pipeline generations:
 
@@ -213,7 +245,8 @@ class SynapRecorder(FrameProcessor):
             processor lifetime when absent.
         context: Optional shared :class:`LLMContext` (the one given to the
             user/assistant aggregators). Used to recover the user turn when
-            ``TranscriptionFrame`` never reaches this processor.
+            ``TranscriptionFrame`` never reaches this processor. It is also
+            the context Synap's compaction is spliced into.
     """
 
     def __init__(
@@ -235,7 +268,7 @@ class SynapRecorder(FrameProcessor):
         self.sdk = sdk
         self.user_id = user_id
         self.customer_id = customer_id
-        self.conversation_id = conversation_id or f"pipecat-{uuid.uuid4().hex[:12]}"
+        self.conversation_id = conversation_id or str(uuid.uuid4())
         self._context = context
 
         self._user_buffer: Optional[str] = None
@@ -245,6 +278,10 @@ class SynapRecorder(FrameProcessor):
         # a turn that ends twice (e.g. function-call follow-ups) doesn't
         # record the same user message twice.
         self._last_user_msg_index: int = -1
+        self._splicer = HistorySplicer()
+        self._last_recorded_user = ""
+        self._saw_response_end = False
+        self._reported_calls: dict = {}
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
@@ -267,23 +304,27 @@ class SynapRecorder(FrameProcessor):
             # what the agent is about to need. Pipecat carries `tool_call_id`
             # on both frames, so the call and its result tie themselves
             # together without us inventing an id.
-            await report_tool_call(
-                self.sdk,
-                tool_name=getattr(frame, "function_name", "") or "tool",
-                tool_args=getattr(frame, "arguments", None),
-                tool_call_id=str(getattr(frame, "tool_call_id", "") or ""),
-                conversation_id=self.conversation_id,
-                user_id=self.user_id, customer_id=self.customer_id,
-            )
+            call_id = str(getattr(frame, "tool_call_id", "") or "")
+            if self._claim_call(call_id):
+                await report_tool_call(
+                    self.sdk,
+                    tool_name=getattr(frame, "function_name", "") or "tool",
+                    tool_args=getattr(frame, "arguments", None),
+                    tool_call_id=call_id,
+                    conversation_id=self.conversation_id,
+                    user_id=self.user_id, customer_id=self.customer_id,
+                )
         elif isinstance(frame, FunctionCallResultFrame):
-            await report_tool_result(
-                self.sdk,
-                result=getattr(frame, "result", None),
-                tool_name=getattr(frame, "function_name", "") or "",
-                tool_call_id=str(getattr(frame, "tool_call_id", "") or ""),
-                conversation_id=self.conversation_id,
-                user_id=self.user_id, customer_id=self.customer_id,
-            )
+            call_id = str(getattr(frame, "tool_call_id", "") or "")
+            if self._claim_call("result:" + call_id if call_id else ""):
+                await report_tool_result(
+                    self.sdk,
+                    result=getattr(frame, "result", None),
+                    tool_name=getattr(frame, "function_name", "") or "",
+                    tool_call_id=call_id,
+                    conversation_id=self.conversation_id,
+                    user_id=self.user_id, customer_id=self.customer_id,
+                )
         elif isinstance(frame, LLMThoughtTextFrame) and getattr(frame, "text", ""):
             # Only reasoning models emit these, so most pipelines will never
             # see one. That is fine: reporting nothing is correct when the
@@ -294,7 +335,18 @@ class SynapRecorder(FrameProcessor):
                 user_id=self.user_id, customer_id=self.customer_id,
             )
         elif isinstance(frame, LLMFullResponseEndFrame):
+            self._saw_response_end = True
             await self._flush()
+        elif (
+            LLMContextAssistantTurnFrame is not None
+            and isinstance(frame, LLMContextAssistantTurnFrame)
+            and not self._saw_response_end
+        ):
+            # Behind the universal assistant aggregator this is the only
+            # end-of-turn signal. Where LLMFullResponseEndFrame does arrive the
+            # turn is already recorded, and this frame (broadcast upstream
+            # too) is ignored.
+            await self._flush(spoken=getattr(frame, "text", "") or "", from_context=True)
 
         await self.push_frame(frame, direction)
 
@@ -322,19 +374,89 @@ class SynapRecorder(FrameProcessor):
                 ).strip()
             else:
                 text = (content or "").strip() if isinstance(content, str) else ""
-            if text:
+            if text and not is_synap_history(text):
                 self._last_user_msg_index = idx
                 return text
             return None
         return None
 
-    async def _flush(self) -> None:
+    async def _compact_context(self) -> None:
+        """Swap the context's earlier turns for Synap's compaction, if it has one."""
+        if not await self._splicer.apply(self._context, self.sdk, self.conversation_id):
+            return
+        # The splice shortened the list, so an index into the old one points at
+        # the wrong message. Point it at the last user message that was
+        # recorded, not at the last one: a caller who spoke over the reply has
+        # a newer user message here that has not been recorded yet.
+        messages = self._context.get_messages()
+        users = [i for i, m in enumerate(messages)
+                 if isinstance(m, dict) and m.get("role") == "user"]
+        recorded = [i for i in users
+                    if " ".join(_text_of(messages[i]).split()) == self._last_recorded_user]
+        self._last_user_msg_index = (recorded or users or [-1])[-1]
+
+    def _claim_call(self, call_id: str) -> bool:
+        """Say whether this tool call is new. A call with no id is always new."""
+        if not call_id:
+            return True
+        if call_id in self._reported_calls:
+            return False
+        self._reported_calls[call_id] = None
+        while len(self._reported_calls) > _SEEN_LIMIT:
+            self._reported_calls.pop(next(iter(self._reported_calls)))
+        return True
+
+    async def _report_context_tools(self) -> None:
+        """Report the tool calls and results the context holds that no frame
+        reported: the only trace of them behind the assistant aggregator."""
+        if self._context is None:
+            return
+        try:
+            messages = list(self._context.get_messages())
+        except Exception:  # noqa: BLE001 — context shape is LLM-specific
+            return
+        names: dict = {}
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            if message.get("role") == "assistant":
+                for call in message.get("tool_calls") or []:
+                    fn = call.get("function") or {}
+                    call_id = str(call.get("id") or "")
+                    names[call_id] = fn.get("name") or "tool"
+                    if self._claim_call(call_id):
+                        try:
+                            args = json.loads(fn.get("arguments") or "{}")
+                        except (TypeError, ValueError):
+                            args = {"input": str(fn.get("arguments"))}
+                        await report_tool_call(
+                            self.sdk, tool_name=names[call_id],
+                            tool_args=args if isinstance(args, dict) else {"input": str(args)},
+                            tool_call_id=call_id,
+                            conversation_id=self.conversation_id,
+                            user_id=self.user_id, customer_id=self.customer_id,
+                        )
+            elif message.get("role") == "tool":
+                call_id = str(message.get("tool_call_id") or "")
+                result = message.get("content")
+                if not call_id or result == _IN_PROGRESS or not self._claim_call("result:" + call_id):
+                    continue
+                await report_tool_result(
+                    self.sdk, result=result, tool_name=names.get(call_id, ""),
+                    tool_call_id=call_id,
+                    conversation_id=self.conversation_id,
+                    user_id=self.user_id, customer_id=self.customer_id,
+                )
+
+    async def _flush(self, spoken: str = "", from_context: bool = False) -> None:
         user_text = self._user_buffer or self._user_text_from_context()
         assistant_text = "".join(self._assistant_parts).strip()
         if not assistant_text:
             assistant_text = " ".join(
                 part.strip() for part in self._assistant_tts_parts if part.strip()
             ).strip()
+        if not assistant_text:
+            assistant_text = spoken.strip()
         # Reset buffers before we await — the next turn may start flowing
         # while we're still writing to Synap.
         self._user_buffer = None
@@ -344,58 +466,32 @@ class SynapRecorder(FrameProcessor):
         if not user_text and not assistant_text:
             return
 
-        # Stream first, REST only for what the stream did not take.
-        #
-        # ⚠ Never both. The server persists `user_message` and
-        # `assistant_message` from the stream itself, so reporting a turn AND
-        # calling `record_message` stores it twice and extracts it twice.
-        # `report_turn` returns whether it actually went out, which is what
-        # makes this decidable rather than guessed. Each half is decided
-        # separately because a stream can come up between the two.
-        if user_text and await report_turn(
-            self.sdk, role="user", content=user_text,
-            conversation_id=self.conversation_id,
-            user_id=self.user_id, customer_id=self.customer_id,
-        ):
-            user_text = None
-        if assistant_text and await report_turn(
-            self.sdk, role="assistant", content=assistant_text,
-            conversation_id=self.conversation_id,
-            user_id=self.user_id, customer_id=self.customer_id,
-        ):
-            assistant_text = ""
-        if not user_text and not assistant_text:
-            return
-
-        try:
-            async with wrap_sdk_errors_async(
-                "pipecat.record_turn",
-                logger,
+        # Stream first (opened here if the caller did not), REST only for what
+        # the stream could not take, never both: the server persists the turn
+        # from the stream itself, so a `record_message` on top of a delivered
+        # event stores it twice and extracts it twice. `record_turn` decides.
+        if user_text:
+            self._last_recorded_user = " ".join(user_text.split())
+        failed = False
+        for role, text in (("user", user_text), ("assistant", assistant_text)):
+            if role == "assistant" and from_context:
+                await self._report_context_tools()  # before the reply they led to
+            if text and not await record_turn(
+                self.sdk, role=role, content=text,
                 conversation_id=self.conversation_id,
-                user_id=self.user_id,
+                user_id=self.user_id, customer_id=self.customer_id,
             ):
-                if user_text:
-                    await self.sdk.conversation.record_message(
-                        conversation_id=self.conversation_id,
-                        role="user",
-                        content=user_text,
-                        user_id=self.user_id,
-                        customer_id=self.customer_id,
-                    )
-                if assistant_text:
-                    await self.sdk.conversation.record_message(
-                        conversation_id=self.conversation_id,
-                        role="assistant",
-                        content=assistant_text,
-                        user_id=self.user_id,
-                        customer_id=self.customer_id,
-                    )
-        except SynapIntegrationError as exc:
-            # Write failures surface as ErrorFrame (Pipecat's contract —
+                failed = True
+        if failed:
+            # Write failures surface as ErrorFrame (Pipecat's contract:
             # exceptions inside process_frame would tear down the whole
-            # pipeline). The wrap_sdk_errors_async call has already
-            # logged the underlying cause.
+            # pipeline). `record_turn` has already logged the cause.
+            exc = SynapIntegrationError(
+                "pipecat.record_turn", "turn write failed",
+                {"conversation_id": self.conversation_id, "user_id": self.user_id},
+            )
             await self.push_frame(
                 ErrorFrame(error=str(exc), exception=exc),
                 FrameDirection.UPSTREAM,
             )
+        await self._compact_context()

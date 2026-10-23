@@ -18,8 +18,13 @@ two places, and a caller wires both:
 ``user_message`` and ``assistant_message`` from the stream itself
 (``grpc/servicer.py``, ``_persist_message``), so reporting a turn AND calling
 ``sdk.conversation.record_message`` writes it twice and extracts it twice.
-:func:`report_turn` returns whether it actually went out, which is what makes
-the choice decidable rather than guessed.
+:func:`record_turn` makes that choice, and the first turn opens the stream
+when none is running (``SYNAP_AUTO_LISTEN=false`` turns that off).
+
+**Synap's compaction replaces Semantic Kernel's.** The thread is also where the
+agent reads its history (``get_messages``), so once Synap has compacted the
+conversation the model is sent the compaction block and the turns after it in
+place of the earlier turns (see :mod:`synap_semantic_kernel.history`).
 
 Tool calls, tool results and reasoning are anticipation hints. The server does
 not persist them, so they have no REST fallback and no double-write to avoid.
@@ -34,7 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, AsyncIterable, Awaitable, Callable, Optional
 
 from semantic_kernel.agents import ChatHistoryAgentThread
 from semantic_kernel.contents import (
@@ -50,14 +55,16 @@ from semantic_kernel.contents.kernel_content import KernelContent
 from semantic_kernel.filters import FilterTypes
 
 from maximem_synap import MaximemSynapSDK
-from synap_integrations_common import wrap_sdk_errors_async
+from synap_integrations_common import is_synap_history
 from synap_integrations_common.stream_events import (
     end_session,
+    record_turn,
     report_reasoning,
     report_tool_call,
     report_tool_result,
-    report_turn,
 )
+
+from synap_semantic_kernel.history import SynapChatHistoryReducer, splice_messages
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +180,8 @@ def _carries_tool_traffic(message: ChatMessageContent) -> bool:
 
 
 class SynapAgentThread(ChatHistoryAgentThread):
-    """A ``ChatHistoryAgentThread`` that reports each turn to Synap.
+    """A ``ChatHistoryAgentThread`` that reports each turn to Synap and sends
+    the model Synap's compaction once there is one.
 
     Drop it in where you would pass a plain thread::
 
@@ -193,8 +201,12 @@ class SynapAgentThread(ChatHistoryAgentThread):
             a B2C instance (user_context_isolation=equals_customer): the server
             rejects a call carrying one with HTTP 400. Leave it unset there.
             Empty string means customer-less.
-        chat_history / thread_id: passed straight through to
-            :class:`ChatHistoryAgentThread`.
+        chat_history: the thread's history. Left unset it is a
+            :class:`SynapChatHistoryReducer`, which Synap's compaction replaces
+            turns in. Pass your own (a Semantic Kernel reducer, say) and it
+            stays as it is: the model is still sent Synap's compaction in place
+            of the earlier turns, but your history is not rewritten.
+        thread_id: passed straight through to :class:`ChatHistoryAgentThread`.
     """
 
     def __init__(
@@ -213,6 +225,8 @@ class SynapAgentThread(ChatHistoryAgentThread):
             raise ValueError("SynapAgentThread requires a non-empty conversation_id")
         if not user_id:
             raise ValueError("SynapAgentThread requires a non-empty user_id")
+        if chat_history is None:
+            chat_history = SynapChatHistoryReducer(sdk=sdk, conversation_id=conversation_id)
         super().__init__(chat_history=chat_history, thread_id=thread_id)
         self._sdk = sdk
         self._synap_conversation_id = conversation_id
@@ -239,6 +253,23 @@ class SynapAgentThread(ChatHistoryAgentThread):
                 "conversation_id=%s error=%s",
                 self._synap_conversation_id, exc, exc_info=True,
             )
+
+    async def get_messages(self) -> AsyncIterable[ChatMessageContent]:
+        """The history the agent sends the model: Synap's compaction in place of
+        the turns before the current one, once Synap has compacted the
+        conversation; the framework's own messages otherwise."""
+        ours = isinstance(self._chat_history, SynapChatHistoryReducer)
+        if ours:
+            await self._chat_history.reduce()  # never raises: see splice_messages
+        # Raises on a deleted thread, as the base class does.
+        messages = [message async for message in super().get_messages()]
+        if not ours:
+            spliced = await splice_messages(
+                self._sdk, self._synap_conversation_id, messages)
+            if spliced is not None:
+                messages = spliced
+        for message in messages:
+            yield message
 
     async def _delete(self) -> None:
         """Deleting the thread ends the Synap session for its conversation."""
@@ -268,40 +299,22 @@ class SynapAgentThread(ChatHistoryAgentThread):
             # so reporting it here would extract the same words twice.
             return
         text = _turn_text(message)
-        if not text:
+        if not text or is_synap_history(text):
             return
         await self._record_turn(
             "user" if role == AuthorRole.USER else "assistant", text
         )
 
     async def _record_turn(self, role: str, content: str) -> None:
-        # ⚠ Stream first, REST only for what the stream did not take, never
-        # both: the server persists the turn from the stream itself, so a
-        # `record_message` on top of a delivered event stores it twice and
-        # extracts it twice.
-        if await report_turn(
+        # Stream first (opened if need be), REST only if the stream cannot
+        # carry it, never both: the server persists the turn from the stream
+        # itself, so a `record_message` on top of a delivered event stores it
+        # twice and extracts it twice.
+        await record_turn(
             self._sdk, role=role, content=content,
             conversation_id=self._synap_conversation_id,
             user_id=self._synap_user_id, customer_id=self._synap_customer_id,
-        ):
-            return
-        # The one swallow point is `_on_new_message`; everything below it is
-        # free to raise, and `wrap_sdk_errors_async` adds the operation name
-        # and the ids to the log on the way past.
-        async with wrap_sdk_errors_async(
-            "semantic_kernel.record_turn",
-            logger,
-            conversation_id=self._synap_conversation_id,
-            user_id=self._synap_user_id,
-            role=role,
-        ):
-            await self._sdk.conversation.record_message(
-                conversation_id=self._synap_conversation_id,
-                role=role,
-                content=content,
-                user_id=self._synap_user_id,
-                customer_id=self._synap_customer_id,
-            )
+        )
 
 
 # ─── the tool call and its result ───────────────────────────────────────

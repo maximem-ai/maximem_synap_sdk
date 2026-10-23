@@ -11,6 +11,11 @@ callable's signature and passes optional kwargs (``agent``, ``team``,
 callable; users invoke ``agent.arun(...)`` (Agno raises if you call
 ``agent.run(...)`` with an async instructions callable).
 
+What it adds is the compaction block, not the recent turns: Agno sends those from
+its own history, so adding them here would send every turn twice. Until Synap has
+compacted the conversation there is nothing to add. With ``create_synap_hooks`` on
+the agent the block is already in the history Agno sends, and this adds nothing.
+
 Quality contract identical to the LangGraph adapter:
 
 - ``conversation_id`` required + explicit at construction.
@@ -30,6 +35,8 @@ from synap_integrations_common import (
     SynapIntegrationError,
     wrap_sdk_errors_async,
 )
+
+from synap_agno.history import SPLICED_MARKER
 
 logger = logging.getLogger(__name__)
 
@@ -84,10 +91,17 @@ async def _fetch_st_block(
         if on_error == "raise":
             raise
         return ""
-    if not getattr(response, "available", False):
+    # Only the compaction block (and the earlier turns history search found).
+    # `formatted_context` also carries the recent turns, which Agno already
+    # sends from its own history; the block is empty until a compaction exists.
+    context_block = getattr(response, "context_block", None)
+    if not isinstance(context_block, str) or not context_block.strip():
         return ""
-    formatted = getattr(response, "formatted_context", None)
-    return (formatted or "").strip()
+    parts = [context_block.strip()]
+    history_block = getattr(response, "history_block", None)
+    if isinstance(history_block, str) and history_block.strip():
+        parts.append(history_block.strip())
+    return "\n\n".join(parts)
 
 
 def _compose(
@@ -134,7 +148,8 @@ def synap_st_instructions(
         sdk: Initialised :class:`MaximemSynapSDK`.
         conversation_id: Synap conversation ID. **Required.**
         instructions: Your own static instructions; ST is prepended above.
-        style: One of ``"structured" | "narrative" | "bullet_points"``.
+        style: One of ``"structured" | "narrative" | "bullet_points"``. Passed
+            to Synap; the compaction block does not depend on it.
         preamble_open / preamble_close: ST block wrappers; pass ``None``
             for both to drop the tags.
         on_error: ``"fallback"`` (default) returns the bare
@@ -161,7 +176,11 @@ def synap_st_instructions(
         sdk, conversation_id, style, on_error, "synap_st_instructions"
     )
 
-    async def _instructions(**_ignored: Any) -> str:
+    async def _instructions(run_context: Any = None, **_ignored: Any) -> str:
+        # `create_synap_hooks` already put the same block in the history it
+        # hands the model; adding it here as well would say it twice.
+        if getattr(run_context, SPLICED_MARKER, False):
+            return _compose("", instructions, preamble_open, preamble_close)
         st_block = await _fetch_st_block(
             sdk,
             conversation_id,

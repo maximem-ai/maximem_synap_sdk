@@ -5,6 +5,13 @@ a static string, so short-term context is folded into `instructions` once, at
 construction, via `sdk.conversation.context.get_context_for_prompt`. Returns the
 composed instructions string.
 
+Only Synap's compaction block (and the earlier turns its history search found) goes
+in. The recent turns do not: the agent sends its own steps with every model call, so
+a copy in `instructions` would show the model the same turns twice. For the live
+version, with the turns after the compaction too, the step recorder attaches
+:func:`synap_smolagents.attach_synap_history` and `instructions` is not needed.
+Use this when you want a conversation's compaction without a recorder.
+
 Quality contract (mirrors the other Synap integrations):
 
 - ``conversation_id`` required + explicit.
@@ -23,6 +30,7 @@ import logging
 from typing import Literal, Optional
 
 from maximem_synap import MaximemSynapSDK
+from synap_integrations_common.history import HISTORY_CLOSE, HISTORY_OPEN
 from synap_integrations_common import (
     SynapIntegrationError,
     run_async,
@@ -81,9 +89,14 @@ async def _fetch_st_block(
         if on_error == "raise":
             raise
         return ""
-    if not getattr(response, "available", False):
-        return ""
-    return (getattr(response, "formatted_context", None) or "").strip()
+    block = getattr(response, "context_block", None)
+    if not isinstance(block, str) or not block.strip():
+        return ""  # no compaction yet: every turn is in the agent's own steps
+    parts = [block.strip()]
+    excerpts = getattr(response, "history_block", None)
+    if isinstance(excerpts, str) and excerpts.strip():
+        parts.append(excerpts.strip())
+    return f"{HISTORY_OPEN}\n" + "\n\n".join(parts) + f"\n{HISTORY_CLOSE}"
 
 
 def _compose(
