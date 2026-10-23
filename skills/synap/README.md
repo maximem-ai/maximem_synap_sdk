@@ -27,7 +27,7 @@ skills/synap/
 │   ├── integration-checklist.md # What "done" means: read path, write mechanics, sensitive data, operations
 │   ├── final-report-template.md # The report the agent fills in
 │   ├── no-code-path.md         # No code, or an existing instance and key
-│   ├── integration-depth.md    # The depth decision: capability menu, recommendation, what each event sends
+│   ├── integration-depth.md    # The integration path: implicit stream by default, verified benefits, what each event sends
 │   ├── onboarding-details.md   # Full text of every onboarding step (SKILL.md summarizes it)
 │   ├── mental-model.md         # Mental model, SDK lifecycle, 19 frameworks, defaults
 │   ├── docs-map.md             # Full docs map

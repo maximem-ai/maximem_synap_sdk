@@ -11,7 +11,7 @@ If `SYNAP_API_KEY` (the runtime key from the project's `.env`) is set in the she
 
 The CLI never prompts when there is no terminal. A command that would prompt exits 2 and names the flag that
 answers it. Exit codes: 0 ok, 1 generic, 2 usage, 3 auth, 4 not found, 5 permission or scope, 6 conflict,
-7 timeout, 8 server or network. A 409 `instance_build_failed` or `instance_not_ready` is exit 6 with the server's body under `details` and the next step in `hint`.
+7 timeout, 8 server or network, 9 revocation pending (`auth logout` could not revoke the key). A 409 `instance_build_failed` or `instance_not_ready` is exit 6 with the server's body under `details` and the next step in `hint`.
 
 ## Commands the onboarding uses, in order
 
@@ -27,7 +27,7 @@ answers it. Exit codes: 0 ok, 1 generic, 2 usage, 3 auth, 4 not found, 5 permiss
 | Wait | `instances wait <instance_id> [--timeout S] [--interval S]` | Run it in the background with output to a log file and poll the log or `onboard status`, so the human can keep talking to you. Usually 15 to 20 minutes. Prints "attempt 2 of 3, about 6 min left" or "taking longer than usual" (Synap restarts a dead build by itself, up to 3 attempts). Exit 0 ready, 7 timeout, 1 failed (reason and the rebuild command printed). Final JSON has `attempt`, `max_attempts`, `elapsed_seconds`, `estimated_remaining_seconds`, `restartable`. Until it reports ready, runtime writes and fetches (including `verify_synap.py`) are rejected with HTTP 409 `instance_not_ready`. |
 | Rebuild | `instances rebuild <instance_id>` | Only after a failed build. Re-runs from the stored use-case (nothing to re-approve), starts a new series of 3 attempts, then `instances wait` again. At most 3 per instance per 24 hours: a 429 says so with the server's message; a 409 means the build is not failed. |
 | Verify | `python scripts/verify_synap.py` | Not a CLI command. Real write then recall. Waits the retry time the server gives while the build runs (message "The memory architecture is still being built: waiting N s"); exit 2 = still building when time ran out, 3 = the build failed (run `instances rebuild`). |
-| Sign out | `auth logout` | The LAST step, only if verify passed. Revokes the setup key on the server and removes it from `~/.config/synap`, so nobody can use it later; the app keeps its own key in `.env`. Send all `onboard report` events before it: afterwards there is no profile to resume from. If it fails, say so plainly; the key expires by itself after 7 days. |
+| Sign out | `auth logout` | The LAST step, only if verify passed. Revokes the setup key on the server and removes it from `~/.config/synap`, so it can no longer be used (only once the command exits 0); the app keeps its own key in `.env`. Send all `onboard report` events before it: afterwards there is no profile to resume from. If the revoke fails it retries 3 times, then exits 9 (`revocation_pending`): the key stays active until it expires (7 days at most) and the local profile is kept marked pending. Rerun it; if still pending, tell the human and list it as an open item. `--json` shows `revoked` and `pending`. |
 
 `skill install [--agent claude-code|cursor|codex|auto]` installs this skill if it is not there yet.
 

@@ -1,74 +1,64 @@
-# Choose the integration depth with the human
+# Choose the integration path (the implicit path is the default)
 
-> **Read this next:** [gRPC vs REST](https://docs.maximem.ai/concepts/grpc-vs-rest.md); [Real-time anticipation](https://docs.maximem.ai/concepts/real-time-anticipation.md); [Event delivery](https://docs.maximem.ai/concepts/event-delivery.md); [Real-time anticipation in a server](https://docs.maximem.ai/patterns/real-time-anticipation-server.md); [Traces and tool calls](https://docs.maximem.ai/capture/traces-and-tool-calls.md); [instance.send_message](https://docs.maximem.ai/sdk-reference/instance/send-message.md); [conversation.record_message](https://docs.maximem.ai/sdk-reference/conversation/record-message.md); [Retrieval modes](https://docs.maximem.ai/concepts/retrieval-modes.md); [PII protection](https://docs.maximem.ai/guides/pii-protection.md). The live docs win over this file.
+> **Read this next:** [gRPC vs REST](https://docs.maximem.ai/concepts/grpc-vs-rest.md); [Real-time anticipation](https://docs.maximem.ai/concepts/real-time-anticipation.md); [Event delivery](https://docs.maximem.ai/concepts/event-delivery.md); [Real-time anticipation in a server](https://docs.maximem.ai/patterns/real-time-anticipation-server.md); [Traces and tool calls](https://docs.maximem.ai/capture/traces-and-tool-calls.md); [instance.listen](https://docs.maximem.ai/sdk-reference/instance/listen.md); [instance.send_message](https://docs.maximem.ai/sdk-reference/instance/send-message.md); [conversation.record_message](https://docs.maximem.ai/sdk-reference/conversation/record-message.md); [Retrieval modes](https://docs.maximem.ai/concepts/retrieval-modes.md); [PII protection](https://docs.maximem.ai/guides/pii-protection.md). The live docs win over this file.
 
-The human decides how deep the integration goes. You never decide alone and you never silently pick the basic one. This file is the detail behind the "integration depth" step in `SKILL.md`: what to present, how to form a recommendation, what each choice really gives, and what to implement.
+This is the detail behind the "integration path" step in `SKILL.md`. Rule one: **always use the SDK, never raw HTTP calls.** Both paths below are SDK paths. They differ in who does the work:
 
-## 0. Value comes first, depth is the last choice
+- **Implicit path (the live stream):** the app opens the SDK's stream (`listen`) and reports what its agent does (`send_message`, `record_thinking`, `record_tool_call`, `record_tool_result`, `end_session`). Synap does the work as the events flow.
+- **Explicit path:** the app calls the SDK's store and fetch methods itself on each call (`conversation.record_message`, `memories.create`, `fetch`). The app does the work; each call returns an answer, and it runs in any runtime.
 
-The depth choice is about transport only. It comes after the value chain in `integration-checklist.md`: a stable identity, then a read wired into the model prompt, then write mechanics. Full with a per-session id still gives no cross-visit memory, and a stream that never feeds a prompt delivers nothing.
+Neither "does not work". For an app that CAN run a long-lived process, the implicit path is the default because it is where Synap's best results come from. Do not present it as optional or as one of equal choices.
 
-## 1. The capability menu (plain words, benefits only)
+## 1. What the implicit path gives (every line backed by the docs or the code)
 
-Present this short list, in the human's language, with no class or method names. Every line is backed by the docs named in brackets.
-
-- **Memory that is ready before the user asks.** While the agent runs, Synap predicts what the next turn will need and prepares it, so the next read is often answered from the app's own memory in about a millisecond instead of a network call. If nothing prepared matches, the read just takes the normal path, so nothing breaks. Needs the live stream. [real-time-anticipation, grpc-vs-rest]
-- **Conversations become memory without write calls.** Turns the agent reports are kept and turned into long-term memory automatically (a turn is recallable once its conversation compacts, up to about five minutes later; use an explicit write for anything that must be recallable at once). Works on the live stream, and also by sending one HTTP request per turn. [real-time-anticipation, record-message]
-- **Better prediction from the agent's reasoning, tool calls and tool results.** Synap then sees why the agent did what it did, not only the words, and can prepare for the likely next question. Needs the live stream: there is no HTTP route for these. Reasoning and tool data are used to anticipate; they are not stored as memory. [traces-and-tool-calls]
-- **Faster or deeper recall.** Each read can use a fast mode (lower latency, direct matches) or an accurate mode (follows relationships and re-ranks, higher latency). Start fast; use accurate for the valuable questions. [retrieval-modes]
-- **When a write becomes readable.** Explicit memory writes are processed straight away in the background (extraction is asynchronous, so allow a short delay); conversation turns follow compaction. (The ingestion `mode` option does nothing today per the docs, so do not offer it as a choice.) [real-time-anticipation, retrieval-modes]
-- **Session handling.** Synap tracks a session per conversation; telling it when a conversation ends lets it finalize the last turn sooner. [end-session]
-- **User profile and start-of-conversation read.** Attributes the human defines (for example preferred language) plus summaries of recent conversations, read in one fast call at the start of a conversation. Needs a stable id. [user-profile, context-fetch]
-- **Outcome at completion.** One `ingest_transcript` at the natural end of a conversation carries the app's outcome and real start and end times. [ingest-transcript]
-- **Privacy controls.** Personal data can be protected by the instance's PII policy, and anything sent as a tool result is subject to it. [pii-protection, record-tool-result]
-
-## 2. Form a recommendation BEFORE you ask
-
-From the repo, work out and write down (for yourself, and to show as reasons):
-
-| Signal | Why it matters |
+| Benefit | Evidence |
 |---|---|
-| What kind of app: chat backend, voice agent, background worker, desktop or CLI agent, serverless function | The stream needs a process that stays up for the length of a conversation |
-| Does it run a loop with tools or reasoning | Only then do the tool and reasoning events carry anything |
-| How long the process lives, and who calls it | A long-lived server or worker can own one stream; a process that exits after one response cannot |
-| The deployment target (a Vercel or Lambda function, Cloud Run scaling to zero, an edge runtime, a long-running container, a desktop app) | Edge runtimes and browsers cannot open the stream at all |
-| What the human asked for | An explicit wish for "anticipation", "voice latency" or "just store facts" changes the recommendation |
+| **Context prepared before the user asks.** The reply you report ends a turn; Synap predicts the next need and pushes a bundle into the app's own memory, so the next read is often answered locally in about a millisecond. A borderline match waits up to 250 ms for Synap; no match is an ordinary request. A read that sets `query_date` or `max_results_per_query` always goes to Synap. | real-time-anticipation ("What comes back"), grpc-vs-rest ("How a context fetch uses the cache") |
+| **Conversation turns are recorded and become long-term memory with no write calls.** Compaction promotes them (3,000 tokens, 10 messages, or 5 minutes idle). | real-time-anticipation ("What the stream does to memory") |
+| **Reasoning, tool calls and tool results sharpen what Synap prepares.** They travel only on the stream; there is no HTTP route for them. They are short-lived hints (the 80 most recent events, gone 30 minutes after the last), never stored as memory. Matters for agents that use tools or plan across steps; an agent that answers in one model call is served well by its turns alone. | traces-and-tool-calls |
+| **Delivery that survives a dropped connection.** Events are buffered (100 events or 5 minutes), replayed with their original ids and journalled to disk. | event-delivery |
+| **Sessions are managed for you.** The SDK opens a session on the first event for a conversation, which warms the first turn; `end_session` finalises the last turn sooner than waiting for quiet. | send-message, end-session |
+| **A learning loop.** After each fetch the SDK reports what was asked and whether the cache answered, which is how Synap scores its predictions. | real-time-anticipation ("What the SDK sends on its own") |
 
-The modality and turn speed you learn here are the same facts the use-case's Interaction Pattern section needs. Ask them once, reuse the answer in both places, and never ask the human twice.
+### Claims the docs do NOT support (do not make them)
 
-Recommend **Full** for a long-running agent that holds a connection across many turns (chat server, voice agent, worker, desktop agent); recommend **Basic** or the HTTP route for a function that exits after one response, a short-lived worker, a script or a backfill. These follow the docs' "Which to choose" table in gRPC vs REST.
+- **"Without the stream there is no automatic memory."** False. Turns sent with `conversation.record_message` are stored, compacted and turned into long-term memory the same way as streamed turns (grpc-vs-rest). On both paths the server records the turn through the same tracker, and compaction triggers fire from it (server code).
+- **"Compaction depends on the stream."** No. Token, message-count and idle triggers apply to any recorded conversation. The only stream-specific thing in the public docs is the session end finalising the last turn sooner.
+- **"Short-term context management needs the stream."** No. `get_context_for_prompt`, `compact` and the compaction status calls are REST, and the SDK's local turn history is fed by `record_message`, `record_messages_batch` and the stream alike (SDK source).
+- **"The explicit path is broken or second-class."** No. It is complete on its own; it gives no prepared context and no traces.
+- **"Run a small worker next to the function to get the benefits."** Not documented. Prepared bundles go only to the streams that sent events for that conversation and live in the SDK's process, so a separate worker does not feed a separate function.
+- **The ingestion `mode` (`fast` or `long-range`)** is a no-op today per the docs; never offer it.
 
-**Be truthful about the gain for THIS app.** The stream's reasoning and tool events only matter for agents that use tools or plan across steps; the docs say an agent that answers in one model call with no tools is served well by its turns alone. For a short chat with one model call and no tools the extra gain is small (a read that was a request becomes a local hit when a prepared bundle matches), and it needs a long-running host. Say that in the recommendation instead of recommending Full by reflex. Always explain the choice to the human.
+## 2. Which hosts can run it
 
-**Pre-flight for Full:** check installed packages for conflicts with the SDK before offering or wiring the stream (for example the protobuf version range against other Google or gRPC libraries); `verify_synap.py` must open the stream, and a stream warning is a blocking dependency issue when the human chose Full. The prepared context lives in the process: with several replicas, a conversation's next turn may land on another instance. `POST /v1/events/batch` exists only in unreleased docs and in no released SDK; do not offer it.
+From grpc-vs-rest ("Which to choose"): a long-running agent (chat server, voice agent, worker living across many turns, container, desktop or CLI agent that stays open) can hold the stream. A serverless function or request handler that exits after one response, a short-lived worker or job, a script or backfill, an edge runtime or a browser cannot: the stream would be opened and torn down on every request with no time for a bundle to arrive, and `listen()` throws on Edge and in browsers.
 
-## 3. Ask (one question, recommendation first, two or three options)
+**On such a host:** say it in one plain sentence ("the live stream needs a long-lived process, and this host does not run one, so it is not available here"), cite grpc-vs-rest, build the explicit path with the production rules (`integration-checklist.md`), and add one neutral sentence: if the app ever runs a long-lived process, the implicit path becomes available. Do NOT pitch re-architecting the deployment, do not present the stream as the default for this host, and do not invent a worker or proxy design the docs do not describe.
 
-Wording and examples: `onboarding-ask-rules.md`. Offer exactly these:
+**Before offering or wiring the stream:** check installed packages for conflicts with the SDK (for example the protobuf version range against other Google or gRPC libraries); `verify_synap.py` must open the stream, and a stream warning is a blocking dependency issue on the implicit path. Prepared context lives in the process: with several replicas a conversation's next turn may land on another instance. `POST /v1/events/batch` exists only in unreleased docs and in no released SDK; do not offer it.
 
-1. **Basic.** Synap stores and recalls memories when your code asks. Works anywhere, including serverless. What you do not get: memory prepared before the user asks, and Synap seeing the agent's reasoning and tool use.
-2. **Full.** The live stream: Synap also prepares what your agent will need next and records conversations automatically. It needs a process that stays running. Say "I recommend X because Y" and name the repo evidence.
-3. **Only for a serverless, edge or short-lived target: the per-turn HTTP route.** Each turn is recorded with one HTTP request (`conversation.record_message`) and your code reads memory with a normal fetch. What it gives: turns are stored and become long-term memory, and it works in any runtime. What it does NOT give: prepared context (every read is a request) and the reasoning/tool traces (no HTTP route exists for them).
+## 3. The recommendation and the confirmation (a default, not a menu)
 
-The human decides. If they pick Basic or the HTTP route, say in one sentence what they will not get, then record the choice (below).
+Form the recommendation from the repo first (app kind, tool or reasoning loop, process lifetime, deployment target, what the human asked for), and be truthful about the gain for THIS app: a short chat with one model call and no tools gains less than a tool-using agent. Reuse the modality and turn speed already gathered for the use-case Interaction Pattern; never ask twice. Then, for an app that can run it, say what it gives (section 1, in plain words, no class names) and ask as a confirmation with default yes:
 
-### What is NOT confirmed for serverless apps
+> "I will wire the live stream so you get context prepared before your agent asks, conversations recorded as memory without write calls, and your agent's reasoning and tool use feeding better predictions. It needs your process to stay running, which it does here. Tell me if you do not want it."
 
-The docs do not describe any way for a function to get the stream's benefits. In particular: they say a conversation's prepared bundles are delivered only to the streams that sent events for that conversation, and the SDK keeps the prepared context in its own process memory. So "run a small always-on worker next to the function" is NOT a documented route: a worker that holds the stream would not hand prepared context to a separate function. The one documented way to get Full is to run the agent loop itself (the part that sends events and reads) in a long-running process. Offer that as a larger change (a small always-on service), say it is a change to how they deploy, and do not promise more.
+- **Implement it fully** unless the human EXPLICITLY says no. "I do not know", silence and "whatever you think" mean implement.
+- **If the human says no:** record the choice and the one-sentence consequence (no prepared context, no reasoning or tool signals, your code makes each write and read call itself), build the explicit path, and put it in the final report.
 
-## 4. If the human picks Full: implement it fully, and say so
+## 4. Implementing the implicit path fully, and saying so
 
 Send ALL of these for every turn, with the same `conversation_id`, `user_id` (and `customer_id` on B2B only):
 
 | Event | Call | Plain words | Lost without it |
 |---|---|---|---|
 | `user_message` | `send_message(role="user", event_type="user_message")` | the user spoke | the turn is not recorded |
-| `agent_thinking` | `record_thinking(...)` | why the agent chose what it did | Synap sees only the edges of a turn, not the intent |
+| `agent_thinking` | `record_thinking(...)` | why the agent chose what it did | Synap sees only the edges of a turn |
 | `tool_call` | `record_tool_call(...)` | which tool, with which arguments | Synap cannot see what the agent is about to need |
 | `tool_result` | `record_tool_result(...)` | what the tool returned | the strongest hint of the next question is missing |
 | `assistant_message` | `send_message(role="assistant", event_type="assistant_message")` | the reply | anticipation never runs for the next turn |
 
-Also: `listen()` once at startup (one stream per process, never one per user), a session closed with `end_session(conversation_id)` when a conversation ends while the process lives on, `stop_listening()` on shutdown, and the docs checkpoint loop for every call. Send reasoning only when the model really returns it; never invent it. Send only what is needed from a tool result, not the whole record. Exact calls and rules: `streaming.md`.
+Also: `listen()` once at startup (one stream per process, never one per user), `end_session(conversation_id)` when a conversation ends while the process lives on, `stop_listening()` on shutdown, and the docs checkpoint loop for every call. Send reasoning only when the model really returns it; never invent it. Send only what is needed from a tool result. Exact calls and rules: `streaming.md`.
 
 ### What each event sends (from the SDK source)
 
@@ -90,4 +80,4 @@ Persistence: only `user_message` and `assistant_message` become conversation his
 
 ## 5. Report the choice
 
-If a step exists use it; none is dedicated, so report with the existing integration step and keep the detail short and free of personal data: `onboard report integrating in_progress --detail "depth=full (stream), reason: long-running chat server"` (or `depth=basic`, `depth=http-turns`). Always repeat the choice and the reasons in the final announcement, including what a Basic choice leaves out.
+`onboard report integrating in_progress --detail "path=implicit"` (or `path=explicit-no` when the human said no, `path=explicit-host` when the host cannot run the stream); keep it short and free of personal data. Repeat it in the final report: "stream ON by default", or "human said no because ...", or "host cannot run it".

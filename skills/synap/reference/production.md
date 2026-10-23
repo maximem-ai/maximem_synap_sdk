@@ -36,11 +36,11 @@ Work through this before the user's first production deployment, and again befor
 
 ## Stream path
 
-This section applies if the human chose the Full depth (the live stream; see
-`integration-depth.md`). A per-request serverless function, an edge runtime or a batch
-job cannot hold a stream, so the human is offered the other options there. Where the
-human chose Full, an unwired stream is the most common reason a Synap integration
-ships and delivers nothing.
+This section applies wherever the live stream is wired, which is the default for any
+app that can run a long-lived process (see `integration-depth.md`). A per-request
+serverless function, an edge runtime or a batch job cannot hold a stream; there the
+explicit SDK path is used. Where the stream is the default and left unwired, that is the
+most common reason a Synap integration ships and delivers little.
 
 - [ ] `await sdk.instance.listen()` runs once at process start, and `stop_listening()` on graceful shutdown.
 - [ ] One stream per process, never one per user session. Stream quotas are per instance and per client.

@@ -37,7 +37,9 @@ Optional environment variables:
                                   because a customer_id is rejected there (HTTP 400).
   SYNAP_VERIFY_READY_TIMEOUT=300  seconds to keep retrying when Synap answers HTTP 409
                                   instance_not_ready (memory architecture still building)
-  SYNAP_VERIFY_SKIP_STREAM=1      skip the stream check (no gRPC egress)
+  SYNAP_VERIFY_REQUIRE_STREAM=1   a stream that will not open is an [ERROR] (use this when the
+                                  live stream was wired: it is the default path)
+  SYNAP_VERIFY_SKIP_STREAM=1      skip the stream check (the host cannot run a stream)
   SYNAP_VERIFY_SKIP_ROUNDTRIP=1   skip write+recall. The run is then NOT a
                                   full verification and exits 0 only for
                                   steps 1 and 4. Say so if you use it.
@@ -309,6 +311,14 @@ async def _stream(sdk: MaximemSynapSDK) -> None:
     try:
         await sdk.instance.listen()
     except Exception as e:  # noqa: BLE001 - a closed network is not a code bug
+        if os.environ.get("SYNAP_VERIFY_REQUIRE_STREAM"):
+            # The live stream is the default path where the host can run it. When
+            # it was wired, a stream that will not open is a failure, not a warning.
+            print(f"[ERROR] Could not open the live stream: {type(e).__name__}: {e}")
+            print("        The stream is required here (SYNAP_VERIFY_REQUIRE_STREAM=1). Check the")
+            print("        dependency conflicts (for example protobuf) and gRPC egress on 443;")
+            print("        see reference/streaming.md.")
+            raise SystemExit(1)
         print(f"[WARN] Could not open the live stream: {type(e).__name__}: {e}")
         print("       Anticipation needs it. If this host has gRPC egress on 443,")
         print("       fix this before shipping; see reference/streaming.md.")

@@ -59,29 +59,31 @@ such a domain:
 6. The instance's sensitive-data policy is approved by the human in the dashboard and applies going forward only. If the use-case has a never-store list and the policy is not approved, it is a named open item in the final report.
 7. Ask whether the app's consent screen tells the person that a third party stores their text, and flag it to the human if not. When user ids are per-person, ask how a deletion request will be served; when they are per-session, say it cannot be.
 
-## The integration-depth question
+## The integration-path confirmation
 
-Asked after the five questions above and before you draft the use-case. Background and the capability menu: `integration-depth.md`. Rules:
+Asked after the five questions above and before you draft the use-case. Background, verified benefits and sources: `integration-depth.md`. This is a **confirmation with default yes**, not a menu:
 
-- **One question, recommendation first, plain words, no class or method names.** Form the recommendation from the repo before you ask, and show the evidence (what kind of app, whether it runs a tool or reasoning loop, how long the process lives, where it deploys).
-- **Two or three options.** Basic; Full (the live stream); and, only for a serverless, edge or short-lived process, the per-turn HTTP route. Say what each gives and what it does NOT give.
-- **The human decides.** Never pick for them and never silently choose Basic.
-- **Ask modality and turn speed once.** They fill the use-case Interaction Pattern section too; reuse the answer there.
+- **Always use the SDK, never raw HTTP calls.** Both paths are SDK paths.
+- **Lead with the live stream (the implicit path) as the default** for an app that can run a long-lived process (server, worker, container, voice agent, desktop or CLI agent). Never call it optional and never list it as one of three equal options.
+- **Explain first, in plain words with no class or method names, what it gives** (only what the docs back): context prepared before the agent asks, so a read is often answered locally in about a millisecond when Synap prepared it; conversations recorded as memory without write calls; the agent's reasoning and tool use sharpening what is prepared; delivery that survives dropped connections.
+- **Be truthful about the gain for this app** (a short chat with no tools gains less than a tool-using agent), and form the recommendation from the repo before asking. Reuse the modality and turn speed already gathered for the use-case Interaction Pattern; never ask twice.
+- **Then confirm:** "I will wire the live stream so you get X, Y, Z. Tell me if you do not want it."
+- **Implement it fully unless the human EXPLICITLY says no.** "I do not know", silence and "whatever you think" all mean implement it.
+- **If they say no:** record the choice and the one-sentence consequence (no prepared context, no reasoning or tool signals, their code makes each call), build the explicit path, and put it in the final report.
 
 Wording:
 
-> "How deep should the Synap integration go? I recommend **Full**, because this is a long-running chat server that keeps tools and a conversation loop open (`server.py` starts one process that handles many turns). Full: Synap also prepares what your agent will need next and records every conversation automatically, and it sees the agent's reasoning and tool use to predict better. **Basic**: Synap stores and recalls memories only when your code asks. Which do you want?"
+> "I will wire Synap's live stream so you get context prepared before your agent asks, conversations recorded as memory without write calls, and your agent's reasoning and tool use feeding better predictions. I am recommending it because this is a long-running chat server that handles many turns and calls tools. Tell me if you do not want it."
 
 Examples (adapt the evidence, keep the shape):
 
-- **Chat backend (long-running server):** recommend Full. "Your server stays up across many turns and calls tools, so Synap can prepare the next answer between turns."
-- **Voice agent:** recommend Full. "Turns land seconds apart and latency matters; prepared memory is the point of the stream, and the call ending is a clean place to close the session."
-- **Serverless function (for example a Vercel or Lambda function):** recommend the per-turn HTTP route, and say plainly what it does not give. "Each request ends before a stream could deliver anything. Basic or the HTTP route records and recalls memories, but nothing is prepared in advance and Synap does not see tool use. Getting Full would mean running the agent loop in a long-running service, which changes how you deploy. Which do you prefer?" Do not offer a worker next to the function as a way to get the stream's benefits: the docs do not support it.
-- **Desktop or CLI agent:** recommend Full if the process stays open for the session; Basic if each run is a one-shot command.
+- **Chat backend (long-running server):** confirm the stream. "Your server stays up across many turns and calls tools, so Synap can prepare the next answer between turns."
+- **Voice agent:** confirm the stream. "Turns land seconds apart and latency matters; prepared memory is the point, and the call ending is a clean place to close the session."
+- **Desktop or CLI agent:** confirm the stream if the process stays open for the session; if each run is a one-shot command it cannot hold a stream, so use the serverless wording.
+- **Serverless function, Edge or per-request worker (Vercel, Lambda, short-lived):** do not present the stream as the default and do not pitch re-architecting. Say in one plain sentence: "Synap's live stream needs a process that stays running, and this host does not run one, so it is not available here; I will use the SDK's explicit path (record each turn and fetch memory), with the production rules for a short-lived function. If you later run a long-lived process, the live stream becomes available." Cite `https://docs.maximem.ai/concepts/grpc-vs-rest.md` as the reason.
+- **"I do not know":** implement it. Give one sentence on what it does and say you will wire it.
 
-If the answer is "I do not know": explain the trade in two sentences and recommend. "Full lets Synap prepare answers ahead and record conversations by itself, but it needs a process that stays running. Basic works anywhere but only stores and recalls when your code asks. Since your app is <X>, I recommend <Y>; shall I go with that?" Then wait for a yes.
-
-Report the choice with `onboard report integrating in_progress --detail "depth=full|basic|http-turns"` and in the final announcement (including what a Basic choice leaves out).
+Report the choice with `onboard report integrating in_progress --detail "path=implicit|explicit-no|explicit-host"` and in the final report ("stream ON by default", "human said no because ...", or "host cannot run it").
 
 Anything else you cannot resolve from code (agent purpose, who the end users are, which framework when the repo
 has two) is also a question. Do not ask what the code answers (language, framework, package manager).
@@ -121,7 +123,7 @@ meanwhile", "key saved to `.env` (masked: synap_...abcd)", and at the end the re
 **verbatim** `verify_synap.py` output (the write and the recalled text), and every file you changed. You may add
 one line: "Optional: view it in your dashboard at https://synap.maximem.ai". Never make it a step.
 
-The last thing you do, only if `verify_synap.py` passed, is `auth logout` (never if verify failed: you would need the key to rebuild or resume). Then end the announcement with these words: "I signed the setup key out. It only existed to set things up, it was stored in ~/.config/synap on this machine, and removing it means nobody can use it later. Your app keeps working with its own key in .env. If you need the CLI again, run `maximem-synap auth login` or ask for a new prompt."
+The last thing you do, only if `verify_synap.py` passed, is `auth logout` (never if verify failed: you would need the key to rebuild or resume). Then, ONLY if `auth logout` exited 0 and reported the key revoked, end the announcement with these words: "I signed the setup key out. It only existed to set things up and was stored in ~/.config/synap on this machine; it is revoked, so it can no longer be used. Your app keeps working with its own key in .env. If you need the CLI again, run `maximem-synap auth login` or ask for a new prompt."
 
 ## Failure handling
 
@@ -144,7 +146,7 @@ anything from it. The one exception is the first sign-in.
 | HTTP 409 `instance_build_failed` from any call, or from `instances ...` (exit 6, details carry `attempts` and `hint`) | Same as a failed build: the build gave up, waiting will not help. Run the hint, `instances rebuild <instance_id>`, then `instances wait`. Do not retry the failed call in a loop. |
 | HTTP 409 `instance_not_ready` from any runtime call (SDK: `InstanceNotReadyError`; an older SDK raises a plain `ConflictError` saying the memory architecture is still being built) | The memory architecture is still building. Not a bug. `retry_after_seconds` is the wait Synap asks for (30 to 300 s): WAIT exactly that long, tell the human how long ("still being built, waiting 2 minutes"), then check once with `instances wait <id>`. Never retry in a loop: the SDK refuses locally during the wait (`from_cooldown` true, no network call), so a loop changes nothing. Tell the human their own app will see the same error until the build finishes. |
 | `verify_synap.py` exits non-zero | Report it as a failure and quote the whole output. Read the last `[ERROR]` line: key not resolving an instance (re-run `api-keys create -i <id> --write-env`), build not finished (`instances wait`), recall not yet visible (re-run once after a few minutes). Never say "set up" or "done". |
-| `auth logout` fails (403, network, or a warning that the key could not be revoked on the server) | Say it plainly with the error text. Do not say the key is signed out unless the CLI said so. Tell the human the setup key stops working by itself after 7 days. Do not retry in a loop and do not run other CLI commands. The setup is finished either way. |
+| `auth logout` fails (403, network) or exits 9 (`revocation_pending`) | Say it plainly with the error text. Never say the key is signed out unless `auth logout` exited 0 and reported it revoked. On exit 9 retry `auth logout` once or twice; if it is still pending, tell the human the key stays ACTIVE until its expiry (7 days at most; scoped to read and create instances and keys) and that they can revoke it on the dashboard API keys page, and list it in the final report as an OPEN ITEM, not as done. Do not loop and do not run other CLI commands. |
 | Network or sandbox blocks the CLI, install, or gRPC | List exactly which commands the human must run themselves, and what you will do once they have. |
 
 ## Resume checklist (re-running the prompt is safe, in a new session too)

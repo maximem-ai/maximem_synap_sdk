@@ -158,7 +158,7 @@ When generating code, default to:
 - Retrieval `mode="fast"`, `max_results=10`.
 - Always pass `user_id`. Add `customer_id` only on a B2B instance, where it is required. Confirm the mode with `GET /api/v1/auth/whoami` (`user_context_isolation`); on B2C a `customer_id` is rejected with HTTP 400.
 - `conversation_id` must be a valid UUID — if the user passes a session string, wrap it: `str(uuid5(NAMESPACE_URL, session_str))`.
-- The live stream is the human's choice (`integration-depth.md`): recommend Full for a long-lived process, then if they choose it wire it fully: `listen()` at startup, the five events per turn, `stop_listening()` at shutdown. Never skip it on your own, including for serverless, edge or batch targets: offer the options and let the human decide.
+- The live stream (the implicit path) is the default for any app that can run a long-lived process (`integration-depth.md`): confirm it with the human (default yes) and wire it fully unless they explicitly say no: `listen()` at startup, the five events per turn, `stop_listening()` at shutdown. Never skip it on your own. On serverless, edge or batch hosts it is not available (it needs a long-lived process): say so in one sentence and use the explicit SDK path.
 
 
 
