@@ -38,10 +38,12 @@ export default createSynapStoreTool({ sdk });
 `synap_search` lets the model pull long-term context on demand; `synap_store` persists an explicit
 fact or preference for future sessions.
 
-### 2. Short-term context — `agent/instructions/`
+### 2. Synap's compaction: `agent/instructions/` and `agent.ts`
 
-A per-turn resolver that injects Synap's compacted short-term summary into the system prompt. It
-**augments** `instructions.md`; it never replaces it.
+A per-turn resolver that adds Synap's compaction (the summary of the turns the conversation has
+outgrown, plus earlier turns found for the user's message) to the system prompt. It **augments**
+`instructions.md`; it never replaces it, and it adds nothing until Synap has compacted the
+conversation. It does not repeat the recent turns, which eve's own history already holds.
 
 ```ts
 // agent/instructions/synap.ts
@@ -49,6 +51,33 @@ import { createSynapInstructions } from "@maximem/synap-eve";
 import { sdk } from "../lib/synap.js";
 export default createSynapInstructions({ sdk });
 ```
+
+eve compacts on its own when the conversation passes `compaction.thresholdPercent` of the context
+window (default 0.9), by asking a model to summarize the older turns. `createSynapCompactionModel`
+is that model: when eve compacts, the checkpoint it stores is Synap's compaction instead of an
+LLM-written summary. Anything else the model is asked to do goes to the model you pass in, and so
+does the compaction when Synap has none yet.
+
+```ts
+// agent/agent.ts
+import { defineAgent } from "eve";
+import { createSynapCompactionModel } from "@maximem/synap-eve";
+import { sdk } from "./lib/synap.js";
+
+const model = openai("gpt-5");
+export default defineAgent({
+  model,
+  compaction: {
+    thresholdPercent: 0.6, // hand over sooner than the 0.9 default
+    model: createSynapCompactionModel({ sdk, model, conversationId: "support-alice" }),
+  },
+});
+```
+
+What this cannot do, from eve 0.25's source: eve decides when to compact, so until it does the
+model sees eve's own turn-by-turn history; hooks only observe events after they are recorded, so
+the stream hooks below cannot supply or veto a summary; and a model call carries no session id, so
+the Synap conversation is named in `agent.ts` (use the same `conversationId` you give the hooks).
 
 ### 3. The live stream — `agent/hooks/`
 
@@ -64,11 +93,10 @@ import { sdk } from "../lib/synap.js";
 export default createSynapStreamHooks({ sdk });
 ```
 
-Your app opens the stream once, wherever it configures the SDK:
-
-```ts
-await sdk.instance.listen();
-```
+The first event opens the stream, so there is no `sdk.instance.listen()` to call. Set
+`SYNAP_AUTO_LISTEN=false` (or call `setAutoListen(sdk, false)`) to keep it closed; a stream you
+opened yourself is used either way, and it does not keep a plain `node` script alive once your work
+is done.
 
 What each eve stream event becomes:
 
@@ -81,9 +109,11 @@ What each eve stream event becomes:
 | `action.result` | `tool_result`, under the same `callId` |
 | `session.completed` | closes the Synap session |
 
-**Nothing changes if you never call `listen()`.** Every handler is a no-op without an open stream.
-There is no REST fallback here and that is deliberate: this package has never written conversation
-turns, and adding a write would change what happens for someone who has not opted into streaming.
+**When the stream cannot open, the turns are still written.** `message.received` and
+`message.completed` fall back to REST (`sdk.conversation.record_message`, under the eve session id
+or your `conversationId`), so Synap keeps the conversation for compaction and history search. A turn
+is never written both ways. Reasoning, tool calls, tool results and the session end are stream-only
+and a no-op without an open stream.
 
 Three options, all on by default:
 
@@ -101,7 +131,7 @@ export default createSynapStreamHooks({
 
 ## Identity
 
-All three surfaces auto-scope from the eve session — `user_id` from
+The hooks, instructions and tools auto-scope from the eve session: `user_id` from
 `ctx.session.auth.current.principalId` and `conversation_id` from `ctx.session.id`. On an
 unauthenticated channel (`auth.current` is `null`), pass an explicit `userId`:
 

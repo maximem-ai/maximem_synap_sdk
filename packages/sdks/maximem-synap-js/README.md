@@ -34,11 +34,15 @@ await client.memories.create({
   document_type: 'ai-chat-conversation',
 });
 
-// Retrieve
+// Retrieve, most relevant first across every memory type
 const context = await client.user.context.fetch({
   user_id: 'user-123',
   search_query: ['seat preference'],
+  response_shape: 'ranked',
 });
+for (const item of context.items ?? []) {
+  console.log(item['rank'], item['category'], item.content);
+}
 
 await client.shutdown();
 ```

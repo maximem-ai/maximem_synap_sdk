@@ -18,6 +18,16 @@ Three integration paths:
    reported on Synap's live gRPC stream. See
    :mod:`synap_nemo_agent_toolkit.stream`.
 
+4. **Synap's compaction for the agent** — declare ``_type: synap_history`` under
+   ``middleware:`` and list it on the agent function; once Synap has compacted
+   the conversation the agent is handed the compaction block and the turns after
+   it in place of the earlier ones. See :mod:`synap_nemo_agent_toolkit.history`.
+
+All of them share one Synap SDK per set of credentials
+(:mod:`synap_nemo_agent_toolkit._sdk`), so the gRPC stream the exporter opens
+(on the first turn; ``SYNAP_AUTO_LISTEN=false`` turns that off) serves the
+others' reads.
+
 Error policy (matches every other Synap integration):
 
 - Reads (``search``) degrade gracefully — a Synap blip returns ``[]``
@@ -29,6 +39,10 @@ Error policy (matches every other Synap integration):
 """
 
 from synap_nemo_agent_toolkit.editor import SynapMemoryEditor
+from synap_nemo_agent_toolkit.history import (
+    SynapHistoryMiddleware,
+    SynapHistoryMiddlewareConfig,
+)
 from synap_nemo_agent_toolkit.short_term import (
     SynapShortTermConfig,
     SynapShortTermFunction,
@@ -40,6 +54,8 @@ from synap_nemo_agent_toolkit.stream import (
 
 __all__ = [
     "SynapMemoryEditor",
+    "SynapHistoryMiddleware",
+    "SynapHistoryMiddlewareConfig",
     "SynapShortTermFunction",
     "SynapShortTermConfig",
     "SynapStreamExporter",

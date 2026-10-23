@@ -114,6 +114,19 @@ describe('createSynapShortTermHook — construction', () => {
 
 // ─── createSynapShortTermHook — happy path ────────────────────────────────────
 
+/** A response from a conversation Synap has compacted. */
+const COMPACTED: SynapShortTermResponseLike = {
+  available: true,
+  // Carries the recent turns too: the hook must NOT inject this.
+  formatted_context: 'Summary: user likes TypeScript.\nuser: hello\nassistant: hi',
+  context_block: '## Conversation so far (compacted at 5)\nuser likes TypeScript',
+  history_block: 'earlier: asked about generics',
+  recent_messages: [{ role: 'user', content: 'hello' }, { role: 'assistant', content: 'hi' }],
+  compaction_id: 'cmp-1',
+};
+
+type Out = { hookSpecificOutput?: { additionalContext?: string; hookEventName?: string } };
+
 describe('createSynapShortTermHook — happy path', () => {
   it('calls get_context_for_prompt with correct conversationId and default style', async () => {
     const sdk = makeSdk();
@@ -145,78 +158,81 @@ describe('createSynapShortTermHook — happy path', () => {
     expect(callArgs.style).toBe('bullet_points');
   });
 
-  it('wraps content in default XML tags', async () => {
-    const sdk = makeSdk({ available: true, formatted_context: 'ST content here' });
-    const hooks = createSynapShortTermHook({ sdk, conversationId: 'conv-abc' });
-    const cb = extractCallback(hooks);
-    const result = (await cb(dummyInput, undefined, { signal })) as {
-      hookSpecificOutput?: { additionalContext?: string };
-    };
-
-    const ctx = result.hookSpecificOutput?.additionalContext ?? '';
-    expect(ctx).toContain('<synap_short_term_context>');
-    expect(ctx).toContain('</synap_short_term_context>');
-    expect(ctx).toContain('ST content here');
+  it('injects the compaction and the earlier-turn excerpts', async () => {
+    const sdk = makeSdk(COMPACTED);
+    const cb = extractCallback(createSynapShortTermHook({ sdk, conversationId: 'conv-abc' }));
+    const ctx = ((await cb(dummyInput, undefined, { signal })) as Out)
+      .hookSpecificOutput?.additionalContext ?? '';
+    expect(ctx).toBe(
+      '<synap_conversation_history>\n## Conversation so far (compacted at 5)\nuser likes TypeScript'
+      + '\n\nearlier: asked about generics\n</synap_conversation_history>',
+    );
   });
 
-  it('uses custom preamble tags', async () => {
-    const sdk = makeSdk({ available: true, formatted_context: 'data' });
+  it('never injects the recent turns: Claude Code\'s transcript already has them', async () => {
+    const sdk = makeSdk(COMPACTED);
+    const cb = extractCallback(createSynapShortTermHook({ sdk, conversationId: 'conv-abc' }));
+    const ctx = ((await cb(dummyInput, undefined, { signal })) as Out)
+      .hookSpecificOutput?.additionalContext ?? '';
+    expect(ctx).not.toContain('user: hello');
+    expect(ctx).not.toContain('assistant: hi');
+    expect(ctx).not.toContain('Summary: user likes TypeScript.');
+  });
+
+  it('injects nothing before the first compaction, however much formatted_context there is', async () => {
+    // formatted_context is just recent turns until a compaction exists.
+    const sdk = makeSdk({ available: true, formatted_context: 'user: hello\nassistant: hi' });
+    const cb = extractCallback(createSynapShortTermHook({ sdk, conversationId: 'conv-abc' }));
+    expect(await cb(dummyInput, undefined, { signal })).toEqual({});
+  });
+
+  it('injects a given compaction once, not on every prompt', async () => {
+    const sdk = makeSdk(COMPACTED);
+    const cb = extractCallback(createSynapShortTermHook({ sdk, conversationId: 'conv-abc' }));
+    expect(((await cb(dummyInput, undefined, { signal })) as Out).hookSpecificOutput).toBeDefined();
+    expect(await cb(dummyInput, undefined, { signal })).toEqual({});
+  });
+
+  it('injects again when the compaction changes', async () => {
+    const sdk = makeSdk(COMPACTED);
+    const cb = extractCallback(createSynapShortTermHook({ sdk, conversationId: 'conv-abc' }));
+    await cb(dummyInput, undefined, { signal });
+    (sdk.conversation.context!.get_context_for_prompt as ReturnType<typeof vi.fn>)
+      .mockResolvedValue({ ...COMPACTED, context_block: '## Conversation so far (compacted at 9)\nnew' });
+    const out = (await cb(dummyInput, undefined, { signal })) as Out;
+    expect(out.hookSpecificOutput?.additionalContext).toContain('compacted at 9');
+  });
+
+  it('wraps in custom tags when both are given', async () => {
+    const sdk = makeSdk(COMPACTED);
     const hooks = createSynapShortTermHook({
       sdk,
       conversationId: 'conv-abc',
       preambleOpen: '[OPEN]',
       preambleClose: '[CLOSE]',
     });
-    const cb = extractCallback(hooks);
-    const result = (await cb(dummyInput, undefined, { signal })) as {
-      hookSpecificOutput?: { additionalContext?: string };
-    };
-
-    const ctx = result.hookSpecificOutput?.additionalContext ?? '';
-    expect(ctx).toContain('[OPEN]');
-    expect(ctx).toContain('[CLOSE]');
-  });
-
-  it('emits raw content when both preamble tags are null', async () => {
-    const sdk = makeSdk({ available: true, formatted_context: 'raw block' });
-    const hooks = createSynapShortTermHook({
-      sdk,
-      conversationId: 'conv-abc',
-      preambleOpen: null,
-      preambleClose: null,
-    });
-    const cb = extractCallback(hooks);
-    const result = (await cb(dummyInput, undefined, { signal })) as {
-      hookSpecificOutput?: { additionalContext?: string };
-    };
-
-    expect(result.hookSpecificOutput?.additionalContext).toBe('raw block');
+    const ctx = ((await extractCallback(hooks)(dummyInput, undefined, { signal })) as Out)
+      .hookSpecificOutput?.additionalContext ?? '';
+    expect(ctx.startsWith('[OPEN]\n<synap_conversation_history>')).toBe(true);
+    expect(ctx.endsWith('</synap_conversation_history>\n[CLOSE]')).toBe(true);
   });
 
   it('supports structured style', async () => {
-    const sdk = makeSdk({ available: true, formatted_context: 'structured data' });
+    const sdk = makeSdk(COMPACTED);
     const hooks = createSynapShortTermHook({
       sdk,
       conversationId: 'conv-1',
       style: 'structured',
     });
-    const cb = extractCallback(hooks);
-    const result = (await cb(dummyInput, undefined, { signal })) as {
-      hookSpecificOutput?: { additionalContext?: string };
-    };
-
-    expect(result.hookSpecificOutput?.additionalContext).toContain('structured data');
+    const out = (await extractCallback(hooks)(dummyInput, undefined, { signal })) as Out;
+    expect(out.hookSpecificOutput?.additionalContext).toContain('user likes TypeScript');
   });
 
   it('hookSpecificOutput.hookEventName is UserPromptSubmit', async () => {
-    const sdk = makeSdk({ available: true, formatted_context: 'ctx' });
+    const sdk = makeSdk(COMPACTED);
     const hooks = createSynapShortTermHook({ sdk, conversationId: 'conv-1' });
-    const cb = extractCallback(hooks);
-    const result = (await cb(dummyInput, undefined, { signal })) as {
-      hookSpecificOutput?: { hookEventName?: string };
-    };
-
-    expect(result.hookSpecificOutput?.hookEventName).toBe('UserPromptSubmit');
+    const out = (await extractCallback(hooks)(dummyInput, undefined, { signal })) as Out;
+    expect(out.hookSpecificOutput?.hookEventName).toBe('UserPromptSubmit');
   });
 });
 
@@ -226,28 +242,15 @@ describe('createSynapShortTermHook — no-op paths', () => {
   it('returns {} when available is false', async () => {
     const sdk = makeSdk({ available: false, formatted_context: null });
     const hooks = createSynapShortTermHook({ sdk, conversationId: 'conv-1' });
-    const cb = extractCallback(hooks);
-    const result = await cb(dummyInput, undefined, { signal });
-
-    expect(result).toEqual({});
+    expect(await extractCallback(hooks)(dummyInput, undefined, { signal })).toEqual({});
   });
 
-  it('returns {} when formatted_context is empty string even if available=true', async () => {
-    const sdk = makeSdk({ available: true, formatted_context: '' });
-    const hooks = createSynapShortTermHook({ sdk, conversationId: 'conv-1' });
-    const cb = extractCallback(hooks);
-    const result = await cb(dummyInput, undefined, { signal });
-
-    expect(result).toEqual({});
-  });
-
-  it('returns {} when formatted_context is whitespace only', async () => {
-    const sdk = makeSdk({ available: true, formatted_context: '   ' });
-    const hooks = createSynapShortTermHook({ sdk, conversationId: 'conv-1' });
-    const cb = extractCallback(hooks);
-    const result = await cb(dummyInput, undefined, { signal });
-
-    expect(result).toEqual({});
+  it('returns {} when the compaction block is empty or whitespace', async () => {
+    for (const block of ['', '   ', null]) {
+      const sdk = makeSdk({ available: true, formatted_context: 'x', context_block: block });
+      const hooks = createSynapShortTermHook({ sdk, conversationId: 'conv-1' });
+      expect(await extractCallback(hooks)(dummyInput, undefined, { signal })).toEqual({});
+    }
   });
 });
 
