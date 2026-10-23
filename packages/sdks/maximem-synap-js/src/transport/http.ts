@@ -12,12 +12,15 @@ import {
   ContextNotFoundError,
   ConflictError,
   TranscriptConflictError,
+  InstanceNotReadyError,
+  InstanceBuildFailedError,
   InsufficientCreditsError,
   InvalidInputError,
   NetworkTimeoutError,
   RateLimitError,
   ServiceUnavailableError,
   SynapError,
+  SynapPermanentError,
 } from '../errors.js';
 import { newCorrelationId } from '../util/correlation.js';
 import { ENDPOINTS, resolvePath, type EndpointName } from './endpoints.js';
@@ -35,6 +38,44 @@ import {
 import { checkCustomerId } from '../scoping.js';
 
 export const DEFAULT_BASE_URL = 'https://synap-cloud-prod.maximem.ai';
+
+/**
+ * Client-side cooldown for `instance_not_ready`.
+ *
+ * The server refuses memory calls while an instance's memory architecture is
+ * being built, and says how long to wait. After one refusal the SDK answers the
+ * same refusal locally, with no network call, until that wait has passed.
+ *
+ * Only the routes the server gates (`require_instance_ready` in
+ * `synap/cloud/application/admin_api/routes/sdk_*.py` and `migrations.py`) are
+ * covered. Everything else (whoami, health, auth, status, credits, telemetry,
+ * forget, compaction, profile reads) is not gated by the server and is never
+ * short-circuited here. Matching is on the path (or a sub-path) AND the POST
+ * method. Same list as `GATED_POST_PATHS` in `http_client.py`.
+ */
+export const GATED_POST_PATHS: readonly string[] = [
+  '/v1/context/conversation/fetch', // sdk_context.py
+  '/v1/context/user/fetch', // sdk_context.py
+  '/v1/context/customer/fetch', // sdk_context.py
+  '/v1/context/client/fetch', // sdk_context.py
+  '/v1/conversations/messages', // sdk_conversations.py (+ /messages/batch)
+  '/v1/conversations/ingest', // sdk_conversations.py
+  '/v1/events/batch', // sdk_events.py
+  '/api/v1/memories/create', // sdk_memories.py
+  '/api/v1/memories/batch', // sdk_memories.py
+  '/api/v1/memories/upload', // sdk_memories.py
+  '/v1/migrations', // migrations.py (create, /{id}/approve, /{id}/run)
+];
+
+/** The most the SDK will ever wait on a server hint (seconds). */
+export const COOLDOWN_MAX_SECONDS = 300;
+
+/** True when the server refuses this call while the instance is building. */
+export function isGatedPath(method: string, path: string): boolean {
+  if (method.toUpperCase() !== 'POST') return false;
+  const bare = (path.split('?', 1)[0] ?? '').replace(/\/+$/, '');
+  return GATED_POST_PATHS.some((p) => bare === p || bare.startsWith(p + '/'));
+}
 
 export interface TimeoutConfig {
   /** Seconds. Mirrors TimeoutConfig in the Python SDK. */
@@ -69,6 +110,8 @@ export interface HttpTransportOptions {
   userAgent?: string;
   /** Injected in tests. Defaults to global fetch. */
   fetchImpl?: typeof fetch;
+  /** Monotonic clock in milliseconds. Injected in tests; defaults to `performance.now`. */
+  clock?: () => number;
 }
 
 export interface RequestOptions {
@@ -107,8 +150,15 @@ export class HttpTransport {
   private readonly keepAliveOptions: KeepAliveOptions;
   private readonly heartbeat: Heartbeat;
   private closed = false;
+  private readonly clock: () => number;
+  // instance id -> when the refusal's wait ends (monotonic ms), and what was said.
+  // One JS thread runs every request, so a plain Map needs no lock.
+  private readonly notReadyCooldown = new Map<
+    string, { until: number; message: string; state: string | null }
+  >();
 
   constructor(options: HttpTransportOptions) {
+    this.clock = options.clock ?? (() => performance.now());
     this.#credentials = options.credentials;
     // Trailing slash would produce `//v1/...`, which some proxies 404.
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
@@ -164,8 +214,26 @@ export class HttpTransport {
    */
   userContextIsolation: string | undefined = undefined;
 
-  /** Refuse a customer_id on a B2C instance, at the call site. */
-  checkCustomerId(customerId: unknown, where: string): void {
+  /**
+   * Set by the client to its identity resolution (`initialize()`'s whoami).
+   * Python refuses every call before `initialize()`; here the first request
+   * runs it instead, so a caller who skips it gets the same identity-dependent
+   * behaviour (client-scope cache hits, the B2C check) rather than an error.
+   */
+  identityResolver: (() => Promise<void>) | undefined = undefined;
+
+  /** Resolve identity once, before the first request. Never throws. */
+  async ready(): Promise<void> {
+    if (this.identityResolver !== undefined) await this.identityResolver();
+  }
+
+  /**
+   * Refuse a customer_id on a B2C instance, at the call site. Resolves identity
+   * first: the isolation comes from whoami, so on the first call of a client
+   * that skipped initialize() the check would otherwise see nothing and pass.
+   */
+  async checkCustomerId(customerId: unknown, where: string): Promise<void> {
+    await this.ready();
     checkCustomerId(
       this.userContextIsolation, customerId, where, this.#credentials.instanceId,
     );
@@ -194,10 +262,46 @@ export class HttpTransport {
     this.heartbeat.stop();
   }
 
+  /** Throw InstanceNotReadyError locally if this instance is cooling down. */
+  private cooldownCheck(instanceId: string, correlationId: string): void {
+    const entry = this.notReadyCooldown.get(instanceId);
+    if (entry === undefined) return;
+    const remainingMs = entry.until - this.clock();
+    if (remainingMs <= 0) {
+      this.notReadyCooldown.delete(instanceId);
+      return;
+    }
+    throw new InstanceNotReadyError(entry.message, {
+      correlationId,
+      retryAfterSeconds: Math.max(1, Math.ceil(remainingMs / 1000)),
+      instanceId,
+      state: entry.state,
+      fromCooldown: true,
+    });
+  }
+
+  /** Remember a server refusal. Never longer than the server's hint. */
+  private cooldownStart(instanceId: string, error: InstanceNotReadyError): void {
+    const hint = error.retryAfterSeconds;
+    if (hint === null || !(hint > 0)) return; // no hint: nothing to base a wait on
+    const waitMs = Math.min(hint, COOLDOWN_MAX_SECONDS) * 1000;
+    this.notReadyCooldown.set(instanceId, {
+      until: this.clock() + waitMs,
+      message: error.message,
+      state: error.state,
+    });
+  }
+
   async request<T = unknown>(name: EndpointName, options: RequestOptions = {}): Promise<T> {
     const spec = ENDPOINTS[name];
     const correlationId = options.correlationId ?? newCorrelationId();
     const idempotent = options.idempotent ?? spec.idempotent;
+    // whoami IS the identity resolution, so it must not wait on itself.
+    if (name !== 'whoami') await this.ready();
+
+    const gated = isGatedPath(spec.method, resolvePath(name, options.pathParams));
+    const cooldownKey = this.#credentials.instanceId;
+    if (gated) this.cooldownCheck(cooldownKey, correlationId);
 
     let attempt = 0;
     let last: AttemptOutcome | null = null;
@@ -205,8 +309,15 @@ export class HttpTransport {
     while (attempt < this.retryPolicy.maxAttempts) {
       attempt += 1;
       try {
-        return await this.attempt<T>(name, options, correlationId);
+        const result = await this.attempt<T>(name, options, correlationId);
+        // The server accepted a memory call: the instance is ready.
+        if (gated) this.notReadyCooldown.delete(cooldownKey);
+        return result;
       } catch (error) {
+        // Remember the refusal so the next calls need no round trip.
+        if (gated && error instanceof InstanceNotReadyError && !error.fromCooldown) {
+          this.cooldownStart(cooldownKey, error);
+        }
         last = { error, outcomeUnknown: isOutcomeUnknown(error) };
         const decision = shouldRetry({
           error,
@@ -329,26 +440,35 @@ export function isOutcomeUnknown(error: unknown): boolean {
   if (error instanceof InsufficientCreditsError) return false;
   if (error instanceof ContextNotFoundError) return false;
 
+  // Connection-level failures mean the request never reached the application.
+  // Checked before the class: since 0.5.13 they are NetworkTimeoutErrors too,
+  // and they must stay safe to retry.
+  if (isConnectionRefusal(error)) return false;
+
   // Timeouts are the ambiguous case: the request may have been handled and
   // only the response lost.
   if (error instanceof NetworkTimeoutError) return true;
 
-  // Connection-level failures mean the request never reached the application.
-  if (isConnectionRefusal(error)) return false;
-
   return true;
 }
 
+const CONNECTION_REFUSAL_CODES = new Set([
+  'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'EHOSTUNREACH',
+]);
+
+/**
+ * A refusal code anywhere on the cause chain. fetch nests the socket error
+ * under its own, and a SynapError carries a `code` of its own
+ * ('network_timeout'), so the walk cannot stop at the first `code` it sees.
+ */
 function isConnectionRefusal(error: unknown): boolean {
-  const code = (error as { cause?: { code?: string }; code?: string })?.cause?.code
-    ?? (error as { code?: string })?.code;
-  return (
-    code === 'ECONNREFUSED' ||
-    code === 'ENOTFOUND' ||
-    code === 'EAI_AGAIN' ||
-    code === 'ECONNRESET' ||
-    code === 'EHOSTUNREACH'
-  );
+  let cur: unknown = error;
+  for (let depth = 0; depth < 4 && cur !== null && typeof cur === 'object'; depth += 1) {
+    const code = (cur as { code?: unknown }).code;
+    if (typeof code === 'string' && CONNECTION_REFUSAL_CODES.has(code)) return true;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 function toTransportError(error: unknown, correlationId: string): SynapError {
@@ -356,6 +476,16 @@ function toTransportError(error: unknown, correlationId: string): SynapError {
   const name = (error as { name?: string })?.name;
   if (name === 'AbortError' || name === 'TimeoutError') {
     return new NetworkTimeoutError('Request timed out', { correlationId, cause: error });
+  }
+  // A refused, unresolvable or dropped connection is a NetworkTimeoutError,
+  // as Python raises it (httpx ConnectError and RemoteProtocolError), so one
+  // `catch` handles "could not reach Synap" in both SDKs. Until 0.5.13 these
+  // were ServiceUnavailableErrors, the class for a 5xx the server sent.
+  if (isConnectionRefusal(error)) {
+    return new NetworkTimeoutError(
+      `Connection failed: ${(error as Error)?.message ?? String(error)}`,
+      { correlationId, cause: error },
+    );
   }
   return new ServiceUnavailableError(
     `Network request failed: ${(error as Error)?.message ?? String(error)}`,
@@ -451,6 +581,54 @@ async function toHttpError(response: Response, correlationId: string): Promise<S
       // in progress") stays the generic ConflictError. Without this, a
       // customer's `catch (e) { if (e instanceof TranscriptConflictError) }`
       // never fires in JS while the identical Python code works.
+      if (
+        parsed['error'] === 'instance_build_failed' ||
+        detailObject?.['code'] === 'instance_build_failed' ||
+        detailObject?.['error'] === 'instance_build_failed'
+      ) {
+        // Not time based: no cooldown, no retry. Mirrors `_instance_build_failed`.
+        const pick = (key: string): unknown => parsed[key] ?? detailObject?.[key];
+        const msg = pick('message');
+        const attempts = Number(pick('attempts'));
+        return new InstanceBuildFailedError(
+          typeof msg === 'string' && msg !== ''
+            ? msg
+            : "This instance's memory architecture build failed.",
+          {
+            ...opts,
+            instanceId: stringOrNull(pick('instance_id')),
+            attempts: pick('attempts') !== undefined && pick('attempts') !== null
+              && Number.isFinite(attempts) ? Math.trunc(attempts) : null,
+            hint: stringOrNull(pick('hint')),
+          },
+        );
+      }
+      if (
+        parsed['error'] === 'instance_not_ready' ||
+        detailObject?.['code'] === 'instance_not_ready' ||
+        detailObject?.['error'] === 'instance_not_ready'
+      ) {
+        // Fields come from the flat copy, then the `detail` copy, then the
+        // Retry-After header. Mirrors `_instance_not_ready` in http_client.py.
+        const pick = (key: string): unknown => parsed[key] ?? detailObject?.[key];
+        const rawWait = pick('retry_after_seconds') ?? response.headers.get('retry-after');
+        const wait =
+          rawWait !== null && rawWait !== undefined && String(rawWait).trim() !== ''
+            ? Number(rawWait)
+            : NaN;
+        const msg = pick('message');
+        return new InstanceNotReadyError(
+          typeof msg === 'string' && msg !== ''
+            ? msg
+            : "This instance's memory architecture is still being built.",
+          {
+            ...opts,
+            retryAfterSeconds: Number.isFinite(wait) ? Math.trunc(wait) : null,
+            instanceId: stringOrNull(pick('instance_id')),
+            state: stringOrNull(pick('state')) ?? 'building',
+          },
+        );
+      }
       if (detailObject !== null && detailObject['code'] === 'transcript_conflict') {
         return new TranscriptConflictError(message, opts);
       }
@@ -477,6 +655,9 @@ async function toHttpError(response: Response, correlationId: string): Promise<S
       return new AgentUnavailableError(message, opts);
     default:
       if (response.status >= 500) return new ServiceUnavailableError(message, opts);
+      // Any other 4xx is the request's fault and fails the same way again:
+      // permanent, as Python raises it. It was a bare SynapError.
+      if (response.status >= 400) return new SynapPermanentError(message, opts);
       return new SynapError(message, opts);
   }
 }

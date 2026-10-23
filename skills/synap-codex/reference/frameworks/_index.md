@@ -1,5 +1,7 @@
 # Framework integrations — index
 
+> **Read this next:** [Integrations overview](https://docs.maximem.ai/integrations/overview.md); [AI coding agents](https://docs.maximem.ai/integrations/ai-coding-agents.md); [Cookbook (pick by agent type)](https://docs.maximem.ai/cookbook/overview.md); [Patterns](https://docs.maximem.ai/patterns/overview.md). **Checkpoint:** open the method's page before writing each call, re-read it after and compare every parameter, scope rule and error; if the docs and this file disagree, the docs win and tell the human.
+
 One file per supported framework. Read only the one matching the user's stack. Every file follows the same shape: install, what's included, copy-pasteable quick start, scoping notes, and a link to the canonical doc.
 
 ## Routing — pick by what the user mentioned
@@ -58,4 +60,4 @@ In every case the app still calls `sdk.instance.listen()` at startup and
 If the user has a custom or unsupported framework, fall back to `reference/ingestion.md` and `reference/context-fetch.md` — every integration is a thin wrapper over those two primitives.
 
 ---
-*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+*Versions: run `pip show maximem-synap` (Python) or `npm ls @maximem/synap-js-sdk` (JS) for what is installed; no version is pinned here. Source of truth: https://docs.maximem.ai (append `.md` to any page).*

@@ -83,7 +83,7 @@ npm install @maximem/synap-js-sdk
 
 Paste this into Claude Code, Codex or Cursor:
 
-> Add Synap memory to this project. Run `pip install maximem-synap` (or `npm i @maximem/synap-js-sdk`), then install the Synap skill from https://github.com/maximem-ai/maximem_synap_sdk/tree/main/skills/synap and follow it to wire memory into the agent framework this repo uses. Ask me for my Synap API key when you need it.
+> Add Synap memory to this project. Run `pip install maximem-synap` (or `npm i @maximem/synap-js-sdk`), then install the Synap skill (`npx skills add maximem-ai/maximem_synap_sdk --skill synap -y`, or https://github.com/maximem-ai/maximem_synap_sdk/tree/main/skills/synap) and follow it to wire memory into the agent framework this repo uses. If I have a one-time code, use it. If I already have an instance and a key in `.env`, use those. Never ask me to paste a key into the chat.
 
 <details>
 <summary><strong>Claude Code</strong></summary>

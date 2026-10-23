@@ -1,5 +1,7 @@
 # The live stream — the third operation
 
+> **Read this next:** [gRPC vs REST](https://docs.maximem.ai/concepts/grpc-vs-rest.md); [Traces and tool calls](https://docs.maximem.ai/capture/traces-and-tool-calls.md); [Real-time anticipation](https://docs.maximem.ai/concepts/real-time-anticipation.md); [Event delivery](https://docs.maximem.ai/concepts/event-delivery.md); [Server pattern](https://docs.maximem.ai/patterns/real-time-anticipation-server.md); [listen](https://docs.maximem.ai/sdk-reference/instance/listen.md); [send-message](https://docs.maximem.ai/sdk-reference/instance/send-message.md); [record-thinking](https://docs.maximem.ai/sdk-reference/instance/record-thinking.md); [record-tool-call](https://docs.maximem.ai/sdk-reference/instance/record-tool-call.md); [record-tool-result](https://docs.maximem.ai/sdk-reference/instance/record-tool-result.md); [end-session](https://docs.maximem.ai/sdk-reference/instance/end-session.md); [stop-listening](https://docs.maximem.ai/sdk-reference/instance/stop-listening.md). **Checkpoint:** open the method's page before writing each call, re-read it after and compare every parameter, scope rule and error; if the docs and this file disagree, the docs win and tell the human.
+
 **Read this before you finish any agent integration.** Ingestion and retrieval
 are the two operations every guide in this skill starts with. There is a third,
 and skipping it is the single most common way a Synap integration ends up
@@ -16,7 +18,7 @@ pushes the context before the user asks, so `fetch()` resolves from a local
 cache in about a millisecond instead of a network round trip. Reported turns
 also become long-term memory on their own, with no `memories.create()` call.
 
-## Why an agent must not skip it
+## Why the implicit path is the default
 
 The stream is a pipe your code writes into. It is not a tap on the agent. Synap
 sees exactly what you report and nothing else, so an unreported event does not
@@ -29,25 +31,68 @@ Three specific consequences, in the order they bite:
    but never the reply gets zero prefetching, and looks healthy from outside.
 2. **No stream means every retrieval is cold.** `fetch()` still works. It just
    pays the full network and ranking cost on every turn, forever.
-3. **No stream means no automatic memory.** The user has to call
-   `memories.create()` by hand for every conversation, which is the work this
-   is meant to remove.
+3. **No stream means your code records each turn itself.** Turns still become
+   memory if you send them with `conversation.record_message` (one request per
+   turn) or `memories.create()`; the stream is what removes that work.
 
-If the user's app is a long-lived process, wiring the stream is part of the
-integration, not an enhancement to suggest later. Do not leave it for them.
+Where the app can run it, the stream is the default (`integration-depth.md`) and wiring
+the whole of it is part of the integration, not an enhancement to suggest later, unless the
+human explicitly says no.
 
-## When not to wire it
+## Which hosts can run it
 
-Be honest about this rather than forcing it:
+The live stream (the implicit path) is the default for any app that can keep a process
+running for the length of a conversation: a server, worker, container, voice agent, or a
+desktop or CLI agent that stays open. The path choice and the wording are in
+`integration-depth.md`. The technical facts, all from the docs:
 
-- **Per-request serverless** (Lambda, Vercel functions, Cloud Run scale-to-zero).
-  A stream needs a process that outlives the request. Use `memories.create()`
-  and `fetch()` and say why.
-- **Edge runtimes.** Importing the JS SDK is safe there, but the live stream is not: grpc-js is built on `node:http2`. Use the HTTP path on Edge and stream from a Node runtime.
-- **Batch or offline jobs.** Nothing is anticipating anything. Ingest directly.
+- **The stream needs a long-lived process** that owns it (`listen()` at startup,
+  `stop_listening()` at shutdown). A serverless function or request handler that exits
+  after one response (Lambda, Vercel functions, Cloud Run scaled to zero), a short-lived
+  worker or job, a script or a backfill is opened and torn down on every request with no
+  time for a prepared bundle to arrive (grpc-vs-rest, "Which to choose").
+- **On such a host the implicit path is not available.** Say that in one plain sentence,
+  build the explicit SDK path (`conversation.record_message` per turn, which stores and
+  compacts turns into memory the same way, plus a normal `fetch`) with the production
+  rules, and add one neutral sentence that if the app ever runs a long-lived process the
+  implicit path becomes available. Do not pitch re-architecting and do not invent a
+  worker or proxy design the docs do not describe: prepared bundles go only to the streams
+  that sent events for that conversation and live in the SDK's own process.
+- **Edge runtimes and browsers cannot open the stream.** Importing the JS SDK is safe
+  there, but `listen()` throws: grpc-js needs `node:http2`. Stream from a Node runtime.
+- **Batch or offline jobs.** Nothing is waiting for a next turn. Ingest directly
+  (`ingest_transcript`, `memories.create`).
 
-Everything else — servers, workers, voice sessions, desktop agents, long-running
-chat backends — should stream.
+If the human explicitly says no on a host that could run it, record the choice and the
+one-sentence consequence, build the explicit path, and say so in the final report.
+
+## The implementation guides (live docs, plain markdown)
+
+Python and JavaScript/TypeScript share the same pages (each shows both languages in tabs).
+Open the page before writing the call and re-read it after.
+
+| Guide | URL |
+|---|---|
+| What the stream does and does not do | https://docs.maximem.ai/concepts/real-time-anticipation.md |
+| gRPC vs REST: which methods use which, costs, hosts | https://docs.maximem.ai/concepts/grpc-vs-rest.md |
+| Event delivery: ids, acknowledgements, buffering, replay | https://docs.maximem.ai/concepts/event-delivery.md |
+| One shared stream for a multi-tenant server, health check | https://docs.maximem.ai/patterns/real-time-anticipation-server.md |
+| Traces: reasoning, tool calls, tool results | https://docs.maximem.ai/capture/traces-and-tool-calls.md |
+| `instance.listen` | https://docs.maximem.ai/sdk-reference/instance/listen.md |
+| `instance.send_message` (user and assistant turns) | https://docs.maximem.ai/sdk-reference/instance/send-message.md |
+| `instance.record_thinking` | https://docs.maximem.ai/sdk-reference/instance/record-thinking.md |
+| `instance.record_tool_call` | https://docs.maximem.ai/sdk-reference/instance/record-tool-call.md |
+| `instance.record_tool_result` | https://docs.maximem.ai/sdk-reference/instance/record-tool-result.md |
+| `instance.end_session` | https://docs.maximem.ai/sdk-reference/instance/end-session.md |
+| `instance.stop_listening` | https://docs.maximem.ai/sdk-reference/instance/stop-listening.md |
+| Agent integration walkthrough (startup, loop, shutdown) | https://docs.maximem.ai/setup/first-integration.md |
+| Production checklist and graceful degradation | https://docs.maximem.ai/guides/production-checklist.md and https://docs.maximem.ai/patterns/graceful-degradation.md |
+| Errors | https://docs.maximem.ai/sdk-reference/errors.md |
+| TypeScript framework pages that drive the stream for you | https://docs.maximem.ai/integrations/vercel-ai-sdk.md, https://docs.maximem.ai/integrations/mastra.md, https://docs.maximem.ai/integrations/eve.md |
+
+There are no separate JavaScript-only stream pages. The Python-only detail (for example
+`ListeningNotActiveError`) and the JS spellings (`options` objects, snake_case on
+`sdk.instance`) are both on the pages above.
 
 ## The five events
 
@@ -55,8 +100,8 @@ chat backends — should stream.
 |---|---|---|
 | The user spoke | `send_message(event_type="user_message")` | Nothing from this conversation is recorded at all. |
 | The agent reasoned | `record_thinking(...)` | Prediction sees the edges of the turn and not the intent inside it. |
-| It called a tool | `record_tool_call(...)` | A lookup and a booking are indistinguishable, so nothing useful can be prefetched. |
-| The tool answered | `record_tool_result(...)` | A failed call and a successful one look identical. |
+| It called a tool | `record_tool_call(...)` | Synap cannot see which tool and arguments the agent is about to rely on. |
+| The tool answered | `record_tool_result(...)` | The result is the strongest clue to the next question, and it is missing. |
 | The agent replied | `send_message(event_type="assistant_message")` | **Anticipation never runs.** |
 
 If you can only wire one event beyond the user's turn, wire

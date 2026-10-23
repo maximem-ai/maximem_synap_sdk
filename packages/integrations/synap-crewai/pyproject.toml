@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maximem-synap-crewai"
-version = "0.2.1"
+version = "0.2.3"
 description = "Synap memory integration for CrewAI"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,8 +16,8 @@ keywords = ["synap", "memory", "crewai", "ai", "agents"]
 
 dependencies = [
     "maximem-synap>=0.5.3",
-    "maximem-synap-integrations-common>=0.2.1",
-    "crewai>=1.0",
+    "maximem-synap-integrations-common>=0.2.3",
+    "crewai>=1.10",
 ]
 
 [project.optional-dependencies]

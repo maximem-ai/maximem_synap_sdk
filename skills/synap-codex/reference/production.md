@@ -1,5 +1,7 @@
 # Production checklist
 
+> **Read this next:** [Production checklist](https://docs.maximem.ai/guides/production-checklist.md); [Graceful degradation](https://docs.maximem.ai/patterns/graceful-degradation.md); [Error handling](https://docs.maximem.ai/sdk/error-handling.md); [Errors](https://docs.maximem.ai/sdk-reference/errors.md); [Performance limits](https://docs.maximem.ai/resources/performance-limits.md); [PII protection](https://docs.maximem.ai/guides/pii-protection.md); [Erasure](https://docs.maximem.ai/guides/erasure.md); [Instance visibility](https://docs.maximem.ai/guides/instance-visibility.md). **Checkpoint:** open the method's page before writing each call, re-read it after and compare every parameter, scope rule and error; if the docs and this file disagree, the docs win and tell the human.
+
 Work through this before the user's first production deployment, and again before any release that touches the memory layer.
 
 ## Credentials
@@ -34,9 +36,11 @@ Work through this before the user's first production deployment, and again befor
 
 ## Stream path
 
-Skip this whole section only if the app is per-request serverless, an edge
-runtime or a batch job. Anywhere else, an unwired stream is the most common
-reason a Synap integration ships and delivers nothing.
+This section applies wherever the live stream is wired, which is the default for any
+app that can run a long-lived process (see `integration-depth.md`). A per-request
+serverless function, an edge runtime or a batch job cannot hold a stream; there the
+explicit SDK path is used. Where the stream is the default and left unwired, that is the
+most common reason a Synap integration ships and delivers little.
 
 - [ ] `await sdk.instance.listen()` runs once at process start, and `stop_listening()` on graceful shutdown.
 - [ ] One stream per process, never one per user session. Stream quotas are per instance and per client.
@@ -75,7 +79,7 @@ Full detail: `reference/streaming.md`.
 
 ## Webhooks (optional, recommended)
 
-- [ ] If you need to know when ingestion completes, configure webhooks instead of polling. See `https://docs.maximem.ai/dashboard/webhooks`.
+- [ ] If you need to know when ingestion completes, configure webhooks instead of polling.
 - [ ] Webhook handler is idempotent — same event may arrive twice.
 - [ ] Webhook signature is verified before processing.
 
@@ -94,17 +98,17 @@ Full detail: `reference/streaming.md`.
 ## MACA configuration
 
 - [ ] Use-case markdown was uploaded when the instance was created, OR a custom MACA was reviewed and applied.
-- [ ] If the agent's domain shifts (new product, new user segment), the use-case markdown is updated and MACA is regenerated. See `https://docs.maximem.ai/concepts/customized-memory-architectures`.
+- [ ] If the agent's domain shifts (new product, new user segment), the use-case markdown is updated and MACA is regenerated. See `https://docs.maximem.ai/concepts/memory-architecture`.
 
 ## Upgrade path
 
 - [ ] SDK version is pinned in `requirements.txt` / `package.json`. Don't auto-update on production.
 - [ ] Read the changelog before bumping: `https://docs.maximem.ai/resources/changelog`.
-- [ ] Migration guide consulted on major version changes: `https://docs.maximem.ai/migration/overview`.
+- [ ] Migration guide consulted on major version changes: `https://docs.maximem.ai/migrations/overview`.
 
 ## Live doc
 
 The canonical version of this checklist with rationale per item: `https://docs.maximem.ai/guides/production-checklist`
 
 ---
-*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+*Versions: run `pip show maximem-synap` (Python) or `npm ls @maximem/synap-js-sdk` (JS) for what is installed; no version is pinned here. Source of truth: https://docs.maximem.ai (append `.md` to any page).*

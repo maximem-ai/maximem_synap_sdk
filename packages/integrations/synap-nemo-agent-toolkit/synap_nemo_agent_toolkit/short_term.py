@@ -24,6 +24,15 @@ Quality contract identical to the LangGraph adapter:
   authors can opt into hard-fail by setting ``on_error: raise``.
 - Empty ST is a no-op — returns an empty string.
 
+**It does not repeat turns the agent already has.** NAT agents are handed the
+conversation as a ``ChatRequest``, so Synap's recent-turns block in a prompt
+template would send them twice. Once Synap has compacted the conversation this
+returns the compaction block alone (the summary and any earlier turns history
+search found), not the recent turns. Before that there is nothing to compact
+and the recent turns are all there is, so they are returned as before. To
+replace the agent's own earlier turns with Synap's compaction instead, use
+``_type: synap_history`` on the agent (see :mod:`synap_nemo_agent_toolkit.history`).
+
 For programmatic use (no YAML), instantiate
 :class:`SynapShortTermFunction` directly with a pre-constructed SDK and
 call ``await func(conversation_id=...)``.
@@ -32,7 +41,6 @@ call ``await func(conversation_id=...)``.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Literal, Optional
 
 from pydantic import Field
@@ -40,12 +48,13 @@ from pydantic import Field
 from nat.builder.builder import Builder
 from nat.builder.function_info import FunctionInfo
 from nat.cli.register_workflow import register_function
-from nat.data_models.common import OptionalSecretStr, get_secret_value
+from nat.data_models.common import OptionalSecretStr
 from nat.data_models.function import FunctionBaseConfig
 
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
     SynapIntegrationError,
+    fetch_compacted_history,
     wrap_sdk_errors_async,
 )
 
@@ -117,6 +126,10 @@ class SynapShortTermFunction:
                 "SynapShortTermFunction: conversation_id is required "
                 "(pass it per-call or set default_conversation_id at construction)"
             )
+
+        compacted = await fetch_compacted_history(self.sdk, conv_id)
+        if compacted is not None:
+            return compacted.preamble
 
         try:
             async with wrap_sdk_errors_async(
@@ -210,23 +223,7 @@ class SynapShortTermConfig(FunctionBaseConfig, name="synap_short_term"):
 
 @register_function(config_type=SynapShortTermConfig)
 async def synap_short_term_function(config: SynapShortTermConfig, builder: Builder):
-    """Construct + initialize a Synap SDK, yield a Synap-ST async function."""
-    api_key: Optional[str] = get_secret_value(config.api_key) or os.environ.get(
-        "SYNAP_API_KEY"
-    )
-    if api_key is None:
-        raise RuntimeError(
-            "Synap API key is not set. Provide it via SynapShortTermConfig.api_key "
-            "or the SYNAP_API_KEY environment variable."
-        )
-
-    sdk = MaximemSynapSDK(
-        instance_id=config.instance_id or os.environ.get("SYNAP_INSTANCE_ID", ""),
-        api_key=api_key,
-        _force_new=True,
-    )
-    await sdk.initialize()
-
+    """Yield a Synap-ST async function on the process's shared Synap SDK."""
     if config.style not in _SUPPORTED_STYLES:
         raise ValueError(
             f"synap_short_term: unsupported style={config.style!r}; "
@@ -238,48 +235,37 @@ async def synap_short_term_function(config: SynapShortTermConfig, builder: Build
             f"got {config.on_error!r}"
         )
 
-    fn = SynapShortTermFunction(
-        sdk=sdk,
-        style=config.style,
-        preamble_open=config.preamble_open or None,
-        preamble_close=config.preamble_close or None,
-        on_error=config.on_error,  # type: ignore[arg-type]
-        default_conversation_id=config.conversation_id,
-    )
+    # Late import: the package __init__ pulls in NAT, which the programmatic
+    # class above must not need.
+    from synap_nemo_agent_toolkit._sdk import shared_sdk
 
-    async def _invoke(conversation_id: str = "") -> str:
-        """Return Synap short-term context for ``conversation_id``.
+    async with shared_sdk(config) as sdk:
+        fn = SynapShortTermFunction(
+            sdk=sdk,
+            style=config.style,
+            preamble_open=config.preamble_open or None,
+            preamble_close=config.preamble_close or None,
+            on_error=config.on_error,  # type: ignore[arg-type]
+            default_conversation_id=config.conversation_id,
+        )
 
-        When ``conversation_id`` is empty, the function falls back to
-        the ``conversation_id`` set on the YAML config (if any).
-        """
-        return await fn(conversation_id=conversation_id)
+        async def _invoke(conversation_id: str = "") -> str:
+            """Return Synap short-term context for ``conversation_id``.
 
-    info = FunctionInfo.from_fn(
-        _invoke,
-        description=(
-            "Fetch Synap short-term conversation context (compacted summary + "
-            "recent turns) for a conversation_id. Returns the formatted string "
-            "ready to splice into a prompt template, or empty string on miss."
-        ),
-    )
+            When ``conversation_id`` is empty, the function falls back to
+            the ``conversation_id`` set on the YAML config (if any).
+            """
+            return await fn(conversation_id=conversation_id)
 
-    try:
-        yield info
-    finally:
-        # The SDK's teardown is shutdown(); there is no close(). Probing for
-        # the wrong name resolved to None on every run, so this block was a
-        # silent no-op and each workflow leaked the SDK's HTTP transport,
-        # gRPC stream and telemetry collector. close() is still accepted
-        # second so a duck-typed test double keeps working.
-        teardown = getattr(sdk, "shutdown", None) or getattr(sdk, "close", None)
-        if teardown is not None:
-            try:
-                await teardown()
-            except Exception:  # noqa: BLE001 — teardown must not mask workflow errors
-                logger.exception(
-                    "synap_short_term_function: SDK teardown raised (suppressing)"
-                )
+        yield FunctionInfo.from_fn(
+            _invoke,
+            description=(
+                "Fetch Synap's context for a conversation_id: its compaction once "
+                "there is one, else the compacted summary and recent turns. Returns "
+                "the formatted string ready to splice into a prompt template, or "
+                "empty string on miss."
+            ),
+        )
 
 
 __all__ = [

@@ -183,3 +183,18 @@ describe('the two SDKs agree on the degrade', () => {
       .toEqual({ rows: 3, count: '5' });
   });
 });
+
+describe('a tool result is archived locally, stream or not (decision B, 20 Oct)', () => {
+  it('record_tool_result hands the result to the archive before sending', async () => {
+    const archived: unknown[] = [];
+    const ns = createInstanceNamespace(
+      () => ({ apiKey: 'k', clientId: 'c', instanceId: 'i' }),
+      new AnticipationCache(),
+      undefined,
+      undefined,
+      (r) => archived.push(r),
+    );
+    await ns.record_tool_result({ result: { ok: true }, tool_name: 'ping', conversation_id: 'c9' }).catch(() => {});
+    expect(archived).toEqual([{ conversationId: 'c9', result: { ok: true }, toolName: 'ping' }]);
+  });
+});

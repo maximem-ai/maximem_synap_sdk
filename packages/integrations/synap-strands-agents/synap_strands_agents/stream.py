@@ -11,20 +11,28 @@ The **read** side needs no help — when the stream is live the SDK's own
 ``context_assembled`` events. This hook only feeds the **activity** the SDK
 can't infer: conversation turns and tool-call intent.
 
-Lifecycle is the app's job, not the hook's:
+Nothing to set up: the first turn opens the stream (``sdk.instance.listen()``),
+and the turns, tool calls and tool results that follow go out on it::
 
-    await sdk.instance.listen()                     # app opens the stream
     hook = SynapStreamHook(sdk, conversation_id="c1", user_id="alice")
     agent = Agent(hooks=[hook])
-    # ... run the agent on the SAME asyncio event loop ...
-    await sdk.instance.stop_listening()             # app closes it on shutdown
+    # ... run the agent on one asyncio event loop ...
+
+``SYNAP_AUTO_LISTEN=false`` (or ``set_auto_listen(sdk, False)``) keeps the hook
+on REST and never opens a stream; a stream the app opened itself is used as is.
 
 Design rules (these differ from the other surfaces):
-- **Gate every send on ``sdk.instance.is_listening``**; no-op silently when the
-  app never called ``listen()`` — never raise ``ListeningNotActiveError``.
+- **Turns are always written.** A user or assistant turn goes on the stream,
+  and falls back to REST (``conversation.record_message``) only when the stream
+  cannot carry it; never both (``record_turn``). Without it Synap keeps no
+  conversation to compact or search.
+- **Tool events are stream-only**: a silent no-op when the stream cannot carry
+  them, never a ``ListeningNotActiveError``.
 - **Log, never raise.** These run inside Strands' event loop; a raising hook can
   abort the agent turn. This mirrors the SDK's own fire-and-forget stream sends.
-- This feeds *signal*, it does not durably ingest. Long-term memory still comes
+- **Synap's compaction replaces Strands' for the model.** The first invocation
+  installs the model-call middleware of :mod:`synap_strands_agents.history`.
+- Apart from the turns, this feeds *signal*, it does not ingest. Long-term memory still comes
   only from :class:`~synap_strands_agents.store.SynapMemoryStore` /
   :func:`~synap_strands_agents.tools.create_synap_tools`.
 """
@@ -36,6 +44,7 @@ from typing import Any, Optional
 
 from strands.hooks import (
     AfterToolCallEvent,
+    BeforeInvocationEvent,
     BeforeToolCallEvent,
     HookProvider,
     HookRegistry,
@@ -45,11 +54,13 @@ from strands.hooks import (
 from maximem_synap import MaximemSynapSDK
 
 from synap_integrations_common.stream_events import (
+    record_turn,
     report_tool_call,
     report_tool_result,
 )
 
-from synap_strands_agents._util import message_text
+from synap_strands_agents._util import message_text, note_written
+from synap_strands_agents.history import install_synap_history
 
 logger = logging.getLogger(__name__)
 
@@ -75,14 +86,16 @@ class SynapStreamHook(HookProvider):
 
     Args:
         sdk: Initialised :class:`MaximemSynapSDK`. The app owns its
-            ``listen()`` / ``stop_listening()`` lifecycle; this hook only feeds
-            an already-open stream and no-ops when none is active.
+            ``listen()`` / ``stop_listening()`` lifecycle, or leaves it to the
+            hook: the first turn opens the stream. If it cannot open, only the
+            user and assistant turns are written, over REST.
         conversation_id: Synap conversation id for the emitted events. **Required.**
         user_id: External user id for the conversation. **Required.**
         customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
             B2C instance (user_context_isolation=equals_customer): the server
             rejects a call carrying one with HTTP 400. Leave it unset there.
-        session_id: Optional session identifier attached to emitted events.
+        session_id: Optional session identifier, sent as turn metadata. (The
+            stream attaches its own session to each event.)
     """
 
     def __init__(
@@ -107,6 +120,7 @@ class SynapStreamHook(HookProvider):
         self._session_id = session_id
 
     def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
+        registry.add_callback(BeforeInvocationEvent, self._on_invocation)
         registry.add_callback(MessageAddedEvent, self._on_message)
         registry.add_callback(BeforeToolCallEvent, self._on_tool_call)
         # ⚠ The result was never reported. Strands fires this and nothing
@@ -115,25 +129,29 @@ class SynapStreamHook(HookProvider):
         # learned, which is the half that says what to prefetch next.
         registry.add_callback(AfterToolCallEvent, self._on_tool_result)
 
+    async def _on_invocation(self, event: BeforeInvocationEvent) -> None:
+        install_synap_history(event.agent, self._sdk, self._conversation_id)
+
     async def _on_message(self, event: MessageAddedEvent) -> None:
         try:
-            if not self._sdk.instance.is_listening:
-                return
             message = event.message
             text = message_text(message)
             if not text:
                 return  # tool-result / tool-use-only turns carry no text
-            role = message.get("role", "user") if isinstance(message, dict) else "user"
-            event_type = "assistant_message" if role == "assistant" else "user_message"
-            await self._sdk.instance.send_message(
-                content=text,
+            role = "assistant" if isinstance(message, dict) and message.get("role") == "assistant" else "user"
+            # Stream first (opened if need be), REST only if the stream cannot
+            # carry it, never both: the server persists a streamed turn itself.
+            # record_turn never raises.
+            if await record_turn(
+                self._sdk,
                 role=role,
-                event_type=event_type,
+                content=text,
                 conversation_id=self._conversation_id,
                 user_id=self._user_id,
-                customer_id=self._customer_id or None,
-                session_id=self._session_id or None,
-            )
+                customer_id=self._customer_id or "",
+                metadata={"session_id": self._session_id} if self._session_id else None,
+            ):
+                note_written(self._user_id, role, text)
         except Exception as exc:  # noqa: BLE001 — stream feed must never abort the turn
             logger.warning(
                 "SynapStreamHook: message feed failed: %s", exc, exc_info=True
@@ -141,8 +159,6 @@ class SynapStreamHook(HookProvider):
 
     async def _on_tool_call(self, event: BeforeToolCallEvent) -> None:
         try:
-            if not self._sdk.instance.is_listening:
-                return
             tool_use = event.tool_use or {}
             tool_name = tool_use.get("name", "") if isinstance(tool_use, dict) else ""
             if not tool_name:
@@ -180,8 +196,6 @@ class SynapStreamHook(HookProvider):
         present, because a partial result beside an exception is not an answer.
         """
         try:
-            if not self._sdk.instance.is_listening:
-                return
             tool_use = event.tool_use or {}
             tool_name = tool_use.get("name", "") if isinstance(tool_use, dict) else ""
             exception = getattr(event, "exception", None)

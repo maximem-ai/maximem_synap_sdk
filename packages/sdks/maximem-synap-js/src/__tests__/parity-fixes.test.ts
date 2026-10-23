@@ -17,7 +17,7 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
 function client(fetchImpl: typeof fetch, options = {}) {
-  return new SynapClient({ _force_new: true, apiKey: 'k', instanceId: INSTANCE_ID, fetchImpl, ...options });
+  return new SynapClient({ _force_new: true, apiKey: 'k', clientId: 'cli_test', instanceId: INSTANCE_ID, fetchImpl, ...options });
 }
 
 describe('identifier validation, matching Python', () => {
@@ -255,6 +255,34 @@ describe('memories.create_from_file', () => {
     const headers = calls[0]?.init.headers as Record<string, string>;
     expect(headers['Content-Type']).toBeUndefined();
     expect(headers['Authorization']).toBe('Bearer k');
+  });
+
+  it('omits customer_id entirely when none is given, never the string "undefined"', async () => {
+    const { calls, fetchImpl } = capture();
+    const c = client(fetchImpl);
+    await c.memories.create_from_file({ user_id: 'u', text: 't' });
+    await c.memories.create_from_file({ user_id: 'u', customer_id: '', text: 't' });
+    for (const call of calls) {
+      const body = call.init.body as FormData;
+      expect(body.has('customer_id')).toBe(false);
+    }
+  });
+
+  it('sends scope as the JSON string the upload route parses, and omits it otherwise', async () => {
+    const { calls, fetchImpl } = capture();
+    const c = client(fetchImpl);
+    const scope = { customer: 'acme', team: 'payments', user: 'dana' };
+    await c.memories.create_from_file({ user_id: 'dana', customer_id: 'acme', text: 't', scope });
+    const sent = (calls[0]?.init.body as FormData).get('scope');
+    expect(typeof sent).toBe('string');
+    expect(JSON.parse(sent as string)).toEqual(scope);
+
+    await c.memories.create_from_file({ user_id: 'u', customer_id: 'c', text: 't' });
+    await c.memories.create_from_file({ user_id: 'u', customer_id: 'c', text: 't', scope: {} });
+    await c.memories.create_from_file({ user_id: 'u', customer_id: 'c', text: 't', scope: null });
+    for (const call of calls.slice(1)) {
+      expect((call.init.body as FormData).has('scope')).toBe(false);
+    }
   });
 
   it('names an unnamed buffer "upload", like Python', async () => {

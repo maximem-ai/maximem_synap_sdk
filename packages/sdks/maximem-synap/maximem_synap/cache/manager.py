@@ -317,46 +317,53 @@ class CacheManager:
 
     def clear_user(self, user_id: str) -> None:
         """Clear all cached data for a user (GDPR deletion)."""
-        # Delete the user's cache file entirely
-        user_db = self.base_path / "users" / f"{user_id}.db"
-        if user_db.exists():
-            user_db.unlink()
-            logger.info(f"Deleted cache for user {user_id}")
-
-        # Remove from backends cache
-        backend_key = f"user:{user_id}"
-        if backend_key in self._backends:
-            self._backends[backend_key].close()
-            del self._backends[backend_key]
+        self._drop_db(f"user:{user_id}", self.base_path / "users" / f"{user_id}.db")
 
     def clear_customer(self, customer_id: str) -> None:
         """Clear all cached data for a customer."""
-        customer_db = self.base_path / "customers" / f"{customer_id}.db"
-        if customer_db.exists():
-            customer_db.unlink()
-            logger.info(f"Deleted cache for customer {customer_id}")
+        self._drop_db(f"customer:{customer_id}",
+                      self.base_path / "customers" / f"{customer_id}.db")
 
-        backend_key = f"customer:{customer_id}"
-        if backend_key in self._backends:
-            self._backends[backend_key].close()
-            del self._backends[backend_key]
+    def _drop_db(self, backend_key: str, path: Path) -> None:
+        """Close first, then delete the file and its SQLite sidecars. Deleting
+        an open file left its -wal holding the cached text."""
+        backend = self._backends.pop(backend_key, None)
+        if backend is not None:
+            backend.close()
+        removed = False
+        for f in (path, *(path.with_name(path.name + x) for x in ("-wal", "-shm", "-journal"))):
+            if f.exists():
+                f.unlink()
+                removed = True
+        if removed:
+            logger.info(f"Deleted cache {backend_key}")
 
-    def clear_all(self) -> None:
-        """Clear all cached data for this client."""
+    def clear_all(self, keep: tuple = ()) -> None:
+        """Clear all cached data for this client.
+
+        ``keep`` names files another owner still has open (the turn store's
+        turns.db), which that owner empties itself: unlinking an open SQLite
+        file left its -wal and -shm, text included, and the agent writing on
+        into a file nobody could see.
+        """
         # Close all backends
         for backend in self._backends.values():
             backend.close()
         self._backends.clear()
 
-        # Delete all cache files
+        # Delete all cache files, with their SQLite sidecars
         import shutil
+        sidecars = ("-wal", "-shm", "-journal")
         if self.base_path.exists():
             for item in self.base_path.iterdir():
-                if item.suffix == ".db" or item.is_dir():
-                    if item.is_dir():
-                        shutil.rmtree(item)
-                    else:
-                        item.unlink()
+                base = next((item.name[: -len(x)] for x in sidecars if item.name.endswith(x)),
+                            item.name)
+                if base in keep:
+                    continue
+                if item.is_dir():
+                    shutil.rmtree(item)
+                elif base.endswith(".db"):
+                    item.unlink(missing_ok=True)
 
         logger.info(f"Cleared all cache for client {self.client_id}")
 
