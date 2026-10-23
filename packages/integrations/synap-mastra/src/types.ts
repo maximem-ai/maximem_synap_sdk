@@ -34,7 +34,7 @@ export interface SynapFetchArgs {
   conversation_id?: string | null;
   user_id: string;
   customer_id?: string | null;
-  search_query?: string[] | null;
+  search_query?: string[];
   max_results?: number;
   mode?: string;
   include_conversation_context?: boolean;
@@ -47,12 +47,19 @@ export interface SynapRecentMessage {
   message_id: string;
 }
 
+// Every field is optional: the real SDK types `get_context_for_prompt` as a
+// plain `Record<string, unknown>`, and a required field would make the real
+// client unassignable to `SynapSdkLike`. Readers treat an absent field as empty.
 export interface SynapPromptContext {
-  formatted_context: string;
-  available: boolean;
-  recent_messages: SynapRecentMessage[];
-  recent_message_count: number;
-  total_message_count: number;
+  formatted_context?: string;
+  available?: boolean;
+  recent_messages?: SynapRecentMessage[];
+  recent_message_count?: number;
+  total_message_count?: number;
+  /** The framed compaction block; absent before the first compaction and on older SDKs. */
+  context_block?: string | null;
+  /** Earlier turns the SDK found for the latest message, rendered. */
+  history_block?: string | null;
 }
 
 export interface SynapSdkLike {

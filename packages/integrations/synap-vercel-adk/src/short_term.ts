@@ -25,6 +25,7 @@
 import type { LanguageModelV1Message, LanguageModelV1Prompt } from '@ai-sdk/provider';
 import type { Credentials } from './types.js';
 import { newCorrelationId } from './util/correlation.js';
+import { compactedHistoryFromResponse, spliceHistory } from './history.js';
 
 const DEFAULT_BASE_URL =
   // mirror the Python SDK env-var precedence: explicit option > env var > prod default
@@ -155,10 +156,20 @@ export function buildShortTermSystemBlock(
 export interface InjectShortTermOptions extends BuildShortTermSystemBlockOptions {}
 
 /**
- * Splice a Synap short-term context block above the prompt's system
- * message (or insert a new SystemMessage at the head when none exists).
+ * Put Synap's short-term context into the prompt without repeating turns the
+ * prompt already carries.
  *
- * Mirrors the existing `injectContextIntoPrompt` shape but for ST only.
+ * The AI SDK caller sends the whole message list, and `formattedContext`
+ * contains the recent turns, so adding it above that list sends them twice.
+ * Instead:
+ *
+ *  - Synap has compacted the conversation (`raw.context_block`): the prompt's
+ *    earlier turns are replaced by the compaction and Synap's turns after it
+ *    (`spliceHistory`), the same as the middleware does.
+ *  - No compaction yet: the prompt's own turns are the complete record, so if
+ *    it has earlier turns it is returned unchanged. A prompt that is only the
+ *    current message gets the formatted block, which is then not a duplicate.
+ *
  * No-op when `response` has no content.
  */
 export function injectShortTermIntoPrompt(
@@ -166,6 +177,16 @@ export function injectShortTermIntoPrompt(
   response: SynapShortTermResponse,
   opts: InjectShortTermOptions = {},
 ): LanguageModelV1Prompt {
+  const history = compactedHistoryFromResponse(response.raw);
+  if (history) return spliceHistory(prompt, history);
+
+  let lastUser = -1;
+  for (let i = prompt.length - 1; i >= 0; i--) if (prompt[i]!.role === 'user') { lastUser = i; break; }
+  const hasEarlierTurns = prompt.slice(0, Math.max(lastUser, 0)).some(
+    (m) => m.role === 'user' || m.role === 'assistant',
+  );
+  if (hasEarlierTurns) return prompt;
+
   const block = buildShortTermSystemBlock(response, opts);
   if (!block) return prompt;
 

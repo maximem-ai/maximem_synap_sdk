@@ -20,22 +20,38 @@ What does exist is the **turn**. `log_exchange` is handed the user's message
 and the assistant's reply as arguments — that is the whole turn, stated
 explicitly, and the assistant half is the moment anticipation acts on.
 
-## Why HTTP and not gRPC
+## Why HTTP and not the SDK's gRPC stream
 
-`report_turn` in `synap_integrations_common` needs `sdk.instance.is_listening`
-— a live bidirectional gRPC stream held open by a long-lived
-`MaximemSynapSDK`. This server has no SDK, is stateless, and serves many
-tenants: every request can carry a different key for a different instance.
-Holding a stream per key would mean an unbounded pool of gRPC connections
-that nothing ever tells us to close, and opening one per tool call would put
-a TLS handshake and an auth round trip on a read that has a ten second
-budget.
+The other integrations write turns through the SDK: the first turn opens a
+gRPC stream (`sdk.instance.listen()`) and the turns go out on it. That does not
+fit this server, which was weighed and left as it is. It has no SDK, is
+stateless, and serves many tenants: every request can carry a different key for
+a different instance. A stream per key is an unbounded pool of connections that
+nothing ever tells us to close, and opening one per tool call would put a TLS
+handshake and an auth round trip on a write with an eight second budget. Moving
+this onto `MaximemSynapSDK` would mean one long-lived SDK, and its stream, per
+tenant key, plus the lifecycle that goes with it: a rewrite of the transport
+layer for a caller that has no use for what the stream brings back.
 
 `POST /v1/events/batch` is the same events, over HTTP, dispatched into the
-same listening path. It was built for exactly this shape of caller — one that
+same listening path. It was built for exactly this shape of caller, one that
 cannot keep a socket open. What it cannot do is carry an anticipated bundle
 back, which does not matter here: this server's reads go through
 `/v1/context/*` like any other REST caller.
+
+## Why the exchange is not recorded as conversation turns by default
+
+Nor does this server replace Synap's compaction with anything, because it has
+no history to replace: the caller's agent keeps its own, and no tool here
+returns a conversation. Recording the turns would give the server a
+conversation nobody reads, and it would change what the memory costs and when
+it appears. Synap extracts from a conversation when it is compacted, which the
+tracker starts once ten messages have been recorded. So recording the exchange
+*instead of* the long-range document below would hold the memory back until the
+tenth message, and the caller's next `recall_context` would find nothing, with
+no `ingestion_id` for `check_memory_status` to look at. Recording it *as well*
+extracts each exchange twice. Either is a decision for a deployment, which is
+what `MCP_STREAM_EVENTS` is, and not a default for every no-code caller.
 
 ## What it does not replace
 
@@ -65,6 +81,7 @@ reason it gave rather than dropped, because a silent refusal is how a caller
 ends up believing a turn was reported for a week.
 """
 
+import hashlib
 import logging
 from typing import Optional
 
@@ -101,6 +118,14 @@ def _event(
     return event
 
 
+def _exchange_key(conversation_id: Optional[str], user_message: str, assistant_message: str) -> str:
+    digest = hashlib.sha256()
+    for part in (conversation_id or "", user_message, assistant_message):
+        digest.update(part.encode("utf-8"))
+        digest.update(b"\x00")  # so "ab"+"c" and "a"+"bc" are different exchanges
+    return digest.hexdigest()[:32]
+
+
 def _reportable(conversation_id: Optional[str], user_id: Optional[str]) -> bool:
     """Whether the turn can be reported at all.
 
@@ -134,8 +159,14 @@ async def report_exchange(
 
     # Deduped on event_id by the server. Keyed off the ingestion the write
     # just returned so a retry of the same accepted exchange cannot double the
-    # turn, and two genuinely repeated messages are still two events.
-    base = ingestion_id or f"{conversation_id}:{hash(user_message)}"
+    # turn, and two genuinely repeated messages are still two events. Without
+    # one the key is a digest of the exchange itself, which a replay shares and
+    # which means the same thing in every process: Python's hash() is salted per
+    # process, so a restart or a second worker minted a new key for the same
+    # exchange and the server saw the replay as a new turn. The price is that a
+    # byte-identical exchange in one conversation counts as the replay it
+    # probably is.
+    base = ingestion_id or _exchange_key(conversation_id, user_message, assistant_message)
 
     events = []
     if user_message:

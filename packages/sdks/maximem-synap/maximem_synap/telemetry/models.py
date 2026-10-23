@@ -2,11 +2,11 @@
 
 from datetime import datetime
 from typing import Any, Dict, Optional
-from enum import Enum
+from enum import StrEnum
 from pydantic import BaseModel, Field
 
 
-class TelemetryEventType(str, Enum):
+class TelemetryEventType(StrEnum):
     """Types of telemetry events."""
     SDK_INIT = "sdk_init"
     SDK_SHUTDOWN = "sdk_shutdown"

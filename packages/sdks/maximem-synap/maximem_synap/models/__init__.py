@@ -28,6 +28,7 @@ from .context import (
     Fact,
     Preference,
     ProfileAttributeModel,
+    RankedItem,
     ResponseMetadata,
     UnifiedContextResponse,
     UserProfileModel,
@@ -64,6 +65,8 @@ from .errors import (
     SynapPermanentError,
     SynapTransientError,
     TranscriptConflictError,
+    InstanceBuildFailedError,
+    InstanceNotReadyError,
     TransientError,
 )
 
@@ -96,6 +99,7 @@ __all__ = [
     "UnifiedContextResponse",
     "UserProfileModel",
     "ProfileAttributeModel",
+    "RankedItem",
     "ConversationSummaryModel",
     # Conversation ingest
     "TranscriptTurn",
@@ -119,6 +123,8 @@ __all__ = [
     "ContextNotFoundError",
     "ConflictError",
     "TranscriptConflictError",
+    "InstanceBuildFailedError",
+    "InstanceNotReadyError",
     "SessionExpiredError",
     "ListeningAlreadyActiveError",
     "AgentUnavailableError",

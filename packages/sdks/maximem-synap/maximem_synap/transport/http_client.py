@@ -2,8 +2,11 @@
 
 import asyncio
 import json
+import math
 import random
 import logging
+import threading
+import time
 from typing import Any, Dict, Optional, Callable
 from datetime import datetime, timezone
 
@@ -14,6 +17,7 @@ from .base import BaseTransport
 from ..models.errors import (
     SynapError,
     SynapTransientError,
+    SynapPermanentError,
     NetworkTimeoutError,
     RateLimitError,
     ServiceUnavailableError,
@@ -23,6 +27,8 @@ from ..models.errors import (
     InsufficientCreditsError,
     ConflictError,
     TranscriptConflictError,
+    InstanceNotReadyError,
+    InstanceBuildFailedError,
 )
 from ..auth.models import AuthContext
 from ..utils.correlation import generate_correlation_id
@@ -70,6 +76,129 @@ def _credit_message(payload: Dict[str, Any], error_message: Any, fallback: str) 
     if isinstance(error_message, str) and error_message:
         return error_message
     return fallback
+
+
+
+def _instance_not_ready(error_body: Any, headers: Any) -> Optional[Dict[str, Any]]:
+    """Fields for InstanceNotReadyError if this 409 body is one, else None.
+
+    The server sends ``{"error": "instance_not_ready", ..., "detail": {"code":
+    "instance_not_ready", ...}}``. Either copy identifies it; the flat copy and
+    the ``detail`` copy are both read so a proxy that rewrites one still works.
+    """
+    if not isinstance(error_body, dict):
+        return None
+    detail = error_body.get("detail")
+    detail = detail if isinstance(detail, dict) else {}
+    code = error_body.get("error")
+    if code != "instance_not_ready":
+        code = detail.get("code") or detail.get("error")
+    if code != "instance_not_ready":
+        return None
+
+    def pick(key: str) -> Any:
+        value = error_body.get(key)
+        return value if value is not None else detail.get(key)
+
+    raw = pick("retry_after_seconds")
+    if raw is None and headers is not None:
+        raw = headers.get("Retry-After")
+    try:
+        retry_after = int(float(raw)) if raw is not None and str(raw).strip() else None
+    except (TypeError, ValueError):
+        retry_after = None
+    message = pick("message")
+    return {
+        "message": message if isinstance(message, str) and message else
+        "This instance's memory architecture is still being built.",
+        "retry_after_seconds": retry_after,
+        "instance_id": pick("instance_id"),
+        "state": pick("state") or "building",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Client-side cooldown for ``instance_not_ready``
+#
+# The server refuses memory calls while an instance's memory architecture is
+# being built, and says how long to wait. Without a cooldown a caller that keeps
+# calling hammers the server (and costs a round trip each time) for a refusal it
+# was already given. So after one refusal the SDK answers the same refusal
+# locally until the server's wait has passed.
+#
+# Only the routes the server gates (``require_instance_ready`` in
+# ``synap/cloud/application/admin_api/routes/sdk_*.py`` and ``migrations.py``)
+# are covered. Everything else (whoami, health, auth, status, credits,
+# telemetry, forget, compaction, profile reads, per-conversation turn reads)
+# is not gated by the server and is never short-circuited here. Matching is on
+# the exact path (or a sub-path) and the POST method, so a GET on the same
+# prefix is not caught. Same list in the JS SDK (``GATED_PATHS`` in http.ts).
+# ---------------------------------------------------------------------------
+GATED_POST_PATHS = (
+    "/v1/context/conversation/fetch",   # sdk_context.py
+    "/v1/context/user/fetch",           # sdk_context.py
+    "/v1/context/customer/fetch",       # sdk_context.py
+    "/v1/context/client/fetch",         # sdk_context.py
+    "/v1/conversations/messages",       # sdk_conversations.py (+ /messages/batch)
+    "/v1/conversations/ingest",         # sdk_conversations.py
+    "/v1/events/batch",                 # sdk_events.py
+    "/api/v1/memories/create",          # sdk_memories.py
+    "/api/v1/memories/batch",           # sdk_memories.py
+    "/api/v1/memories/upload",          # sdk_memories.py
+    "/v1/migrations",                   # migrations.py (create, /{id}/approve, /{id}/run)
+)
+
+#: The most the SDK will ever wait on a server hint. The server caps its own
+#: hint at 300 s; this keeps a bad value from silencing an instance for long.
+COOLDOWN_MAX_SECONDS = 300
+
+
+def is_gated_path(method: str, path: str) -> bool:
+    """True when the server refuses this call while the instance is building."""
+    if method.upper() != "POST":
+        return False
+    bare = path.split("?", 1)[0].rstrip("/")
+    return any(bare == p or bare.startswith(p + "/") for p in GATED_POST_PATHS)
+
+
+def _error_code(error_body: Any) -> Optional[str]:
+    """The machine code of an error body: flat ``error`` first, then ``detail``."""
+    if not isinstance(error_body, dict):
+        return None
+    detail = error_body.get("detail")
+    detail = detail if isinstance(detail, dict) else {}
+    code = error_body.get("error")
+    if isinstance(code, str) and code:
+        return code
+    code = detail.get("code") or detail.get("error")
+    return code if isinstance(code, str) else None
+
+
+def _instance_build_failed(error_body: Any) -> Optional[Dict[str, Any]]:
+    """Fields for InstanceBuildFailedError if this 409 body is one, else None."""
+    if _error_code(error_body) != "instance_build_failed":
+        return None
+    detail = error_body.get("detail")
+    detail = detail if isinstance(detail, dict) else {}
+
+    def pick(key: str) -> Any:
+        value = error_body.get(key)
+        return value if value is not None else detail.get(key)
+
+    attempts = pick("attempts")
+    try:
+        attempts = int(attempts) if attempts is not None else None
+    except (TypeError, ValueError):
+        attempts = None
+    message = pick("message")
+    hint = pick("hint")
+    return {
+        "message": message if isinstance(message, str) and message else
+        "This instance's memory architecture build failed.",
+        "instance_id": pick("instance_id"),
+        "attempts": attempts,
+        "hint": hint if isinstance(hint, str) and hint else None,
+    }
 
 
 class HTTPTransport:
@@ -129,10 +258,69 @@ class HTTPTransport:
             if heartbeat_interval is not None
             else self.HEARTBEAT_INTERVAL_SECONDS
         )
-        self._heartbeat_task: Optional["asyncio.Task"] = None
+        # One heartbeat task per event loop, keyed by id(loop).
+        self._heartbeat_tasks: Dict[int, "asyncio.Task"] = {}
 
-        # Create httpx client with timeout + keepalive config
-        self._client = httpx.AsyncClient(
+        # An httpx.AsyncClient keeps pooled connections that belong to the event
+        # loop that opened them, so it cannot be shared across loops: reusing it
+        # on another loop fails with "bound to a different event loop", and on a
+        # loop that has since closed with "Event loop is closed". We therefore
+        # keep one client per running loop, built on first use there. Entries are
+        # (loop, client) keyed by id(loop); the stored loop guards against a
+        # recycled id.
+        self._clients: Dict[int, Any] = {}
+        self._clients_lock = threading.Lock()
+        # Test hook: a client assigned to ``_client`` is used for every loop.
+        self._client_override: Optional[httpx.AsyncClient] = None
+
+        # instance_id -> (not_ready_until on the monotonic clock, message, state).
+        # Guarded by a lock because requests may run on several threads' loops.
+        self._not_ready_cooldown: Dict[str, Any] = {}
+        self._cooldown_lock = threading.Lock()
+
+    # -- cooldown -----------------------------------------------------------
+
+    def _cooldown_check(self, instance_id: str, correlation_id: str) -> None:
+        """Raise InstanceNotReadyError locally if this instance is cooling down."""
+        with self._cooldown_lock:
+            entry = self._not_ready_cooldown.get(instance_id)
+            if entry is None:
+                return
+            until, message, state = entry
+            remaining = until - time.monotonic()
+            if remaining <= 0:
+                del self._not_ready_cooldown[instance_id]
+                return
+        logger.debug(
+            "Instance %s is still building; refusing locally for %.1fs more "
+            "(no network call)", instance_id, remaining,
+        )
+        raise InstanceNotReadyError(
+            message,
+            retry_after_seconds=max(1, math.ceil(remaining)),
+            correlation_id=correlation_id,
+            instance_id=instance_id,
+            state=state,
+            from_cooldown=True,
+        )
+
+    def _cooldown_start(self, instance_id: str, error: InstanceNotReadyError) -> None:
+        """Remember a server refusal. Never longer than the server's hint."""
+        hint = error.retry_after_seconds
+        if hint is None or hint <= 0:
+            return  # no hint: nothing to base a wait on
+        wait = min(float(hint), float(COOLDOWN_MAX_SECONDS))
+        with self._cooldown_lock:
+            self._not_ready_cooldown[instance_id] = (
+                time.monotonic() + wait, str(error), error.state,
+            )
+
+    def _cooldown_clear(self, instance_id: str) -> None:
+        with self._cooldown_lock:
+            self._not_ready_cooldown.pop(instance_id, None)
+
+    def _build_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
             base_url=self.base_url,
             timeout=httpx.Timeout(
                 connect=self.timeouts.connect,
@@ -143,6 +331,39 @@ class HTTPTransport:
             limits=self._limits,
         )
 
+    def _client_for_loop(self) -> httpx.AsyncClient:
+        """Return the client for the running loop, building it on first use."""
+        if self._client_override is not None:
+            return self._client_override
+        loop = asyncio.get_running_loop()
+        with self._clients_lock:
+            entry = self._clients.get(id(loop))
+            if entry is not None and entry[0] is loop:
+                return entry[1]
+            # Connections owned by a closed loop are already dead; drop them.
+            for key in [k for k, (lp, _) in self._clients.items() if lp.is_closed()]:
+                del self._clients[key]
+            client = self._build_client()
+            self._clients[id(loop)] = (loop, client)
+            return client
+
+    @property
+    def _client(self) -> httpx.AsyncClient:
+        return self._client_for_loop()
+
+    @_client.setter
+    def _client(self, value: httpx.AsyncClient) -> None:
+        self._client_override = value
+
+    @property
+    def _heartbeat_task(self) -> Optional["asyncio.Task"]:
+        """The heartbeat task of the running loop, or None."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        return self._heartbeat_tasks.get(id(loop))
+
     def _ensure_heartbeat(self) -> None:
         """Start the keepalive heartbeat once a running loop exists.
 
@@ -152,13 +373,21 @@ class HTTPTransport:
         """
         if not self._heartbeat_interval:
             return
-        if self._heartbeat_task is not None and not self._heartbeat_task.done():
-            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        self._heartbeat_task = loop.create_task(self._heartbeat_loop())
+        # Loops can run on several threads at once, so guard the bookkeeping.
+        with self._clients_lock:
+            # A task whose loop has closed never finishes, so prune those first.
+            for key in [
+                k for k, t in self._heartbeat_tasks.items()
+                if t.done() or t.get_loop().is_closed()
+            ]:
+                del self._heartbeat_tasks[key]
+            if id(loop) in self._heartbeat_tasks:
+                return
+            self._heartbeat_tasks[id(loop)] = loop.create_task(self._heartbeat_loop())
 
     async def _heartbeat_loop(self) -> None:
         while True:
@@ -172,10 +401,30 @@ class HTTPTransport:
 
     async def close(self) -> None:
         """Close the HTTP client and stop the heartbeat."""
-        if self._heartbeat_task is not None:
-            self._heartbeat_task.cancel()
-            self._heartbeat_task = None
-        await self._client.aclose()
+        current = asyncio.get_running_loop()
+        with self._clients_lock:
+            tasks = list(self._heartbeat_tasks.values())
+            self._heartbeat_tasks.clear()
+            entries = list(self._clients.values())
+            self._clients.clear()
+        for task in tasks:
+            task_loop = task.get_loop()
+            if task_loop is current:
+                task.cancel()
+            elif not task_loop.is_closed():
+                task_loop.call_soon_threadsafe(task.cancel)
+        if self._client_override is not None:
+            await self._client_override.aclose()
+        for loop, client in entries:
+            if loop is current:
+                await client.aclose()
+            elif not loop.is_closed():
+                # Another live loop owns this client; close it there. Best effort,
+                # we do not wait on a loop we do not control.
+                try:
+                    asyncio.run_coroutine_threadsafe(client.aclose(), loop)
+                except RuntimeError:
+                    pass
 
     async def request(
         self,
@@ -204,6 +453,11 @@ class HTTPTransport:
         """
         correlation_id = correlation_id or generate_correlation_id(self.instance_id)
         start_time = datetime.now(timezone.utc)
+
+        gated = is_gated_path(method, path)
+        cooldown_key = auth_context.instance_id or self.instance_id
+        if gated:
+            self._cooldown_check(cooldown_key, correlation_id)
 
         headers = {
             "Authorization": f"Bearer {auth_context.api_key}",
@@ -257,7 +511,10 @@ class HTTPTransport:
                 )
 
                 # Handle response
-                return self._handle_response(response, correlation_id)
+                result = self._handle_response(response, correlation_id)
+                if gated:
+                    self._cooldown_clear(cooldown_key)
+                return result
 
             except httpx.TimeoutException as e:
                 # The request may have been fully received and processed; we just
@@ -305,6 +562,21 @@ class HTTPTransport:
                 outcome_unknown = False
                 last_error = self._map_status_error(e, correlation_id)
 
+            except InstanceNotReadyError as e:
+                # Remember the refusal so the next calls do not need a round trip.
+                if gated:
+                    self._cooldown_start(cooldown_key, e)
+                raise  # permanent: never retried
+
+            except SynapTransientError as e:
+                # A 429 or 5xx the server answered with. `_handle_response`
+                # raises it, so before this arm it went straight to the
+                # `except SynapError: raise` below and was never retried,
+                # while the JS SDK retried the same statuses. The server
+                # answered, so the outcome is known.
+                outcome_unknown = False
+                last_error = e
+
             except SynapError:
                 raise  # Don't wrap our own errors
 
@@ -327,7 +599,7 @@ class HTTPTransport:
                 break
 
             # Calculate backoff delay
-            delay = self._calculate_backoff(attempts)
+            delay = self._calculate_backoff(attempts, last_error)
             logger.warning(
                 f"Request failed (attempt {attempts}/{max_attempts}), "
                 f"retrying in {delay:.2f}s: {last_error}"
@@ -377,7 +649,10 @@ class HTTPTransport:
         except Exception:
             error_message = response.text
 
-        if response.status_code == 401:
+        # 403 too, as the JS SDK maps it. With no branch of its own it fell
+        # through to the SynapTransientError at the bottom, which tells a
+        # caller to retry an access refusal that will never succeed.
+        if response.status_code in (401, 403):
             raise AuthenticationError(error_message, correlation_id=correlation_id)
 
         if response.status_code == 402:
@@ -413,6 +688,16 @@ class HTTPTransport:
             # 409 (e.g. compact()'s "already in progress") maps to the generic
             # permanent ConflictError.
             detail = error_body.get("detail") if isinstance(error_body, dict) else None
+            build_failed = _instance_build_failed(error_body)
+            if build_failed is not None:
+                raise InstanceBuildFailedError(
+                    correlation_id=correlation_id, **build_failed
+                )
+            not_ready = _instance_not_ready(error_body, response.headers)
+            if not_ready is not None:
+                raise InstanceNotReadyError(
+                    correlation_id=correlation_id, **not_ready
+                )
             if isinstance(detail, dict):
                 conflict_message = detail.get("message") or str(detail)
                 if detail.get("code") == "transcript_conflict":
@@ -451,6 +736,15 @@ class HTTPTransport:
         if response.status_code >= 500:
             raise ServiceUnavailableError(
                 error_message,
+                correlation_id=correlation_id,
+            )
+
+        # Any other 4xx is the request's fault and will fail the same way
+        # again, so it is permanent, as the JS SDK now raises it. It was a
+        # SynapTransientError, which tells a caller to retry it.
+        if 400 <= response.status_code < 500:
+            raise SynapPermanentError(
+                f"HTTP {response.status_code}: {error_message}",
                 correlation_id=correlation_id,
             )
 
@@ -502,6 +796,10 @@ class HTTPTransport:
 
         if not isinstance(error, SynapTransientError):
             return False
+        # The trial cap and an inactive subscription arrive as 429 but clear
+        # with a plan change or a new cycle, never within a retry.
+        if isinstance(error, RateLimitError) and getattr(error, "reason", None):
+            return False
 
         # A retry is only safe when either the method is idempotent, or we know
         # the server never processed the first attempt. Retrying a POST whose
@@ -526,10 +824,17 @@ class HTTPTransport:
         error_name = type(error).__name__
         return error_name in self.retry_policy.retryable_errors
 
-    def _calculate_backoff(self, attempt: int) -> float:
-        """Calculate exponential backoff with optional jitter."""
+    def _calculate_backoff(self, attempt: int, error: Optional[Exception] = None) -> float:
+        """Calculate exponential backoff with optional jitter.
+
+        A 429 that carries Retry-After waits that long, capped at
+        ``backoff_max``, as the JS SDK does.
+        """
         if not self.retry_policy:
             return 0
+        retry_after = getattr(error, "retry_after_seconds", None)
+        if isinstance(error, RateLimitError) and retry_after is not None:
+            return min(float(retry_after), self.retry_policy.backoff_max)
 
         delay = self.retry_policy.backoff_base * (2 ** (attempt - 1))
         delay = min(delay, self.retry_policy.backoff_max)
@@ -714,6 +1019,10 @@ class HTTPTransport:
                 # Never reached the application; safe to retry.
                 outcome_unknown = False
                 last_error = NetworkTimeoutError(f"Connection failed: {e}", correlation_id=correlation_id)
+            except SynapTransientError as e:
+                # A 429 or 5xx the server answered with; see `request`.
+                outcome_unknown = False
+                last_error = e
             except SynapError:
                 raise
             except Exception as e:
@@ -730,7 +1039,7 @@ class HTTPTransport:
             ):
                 break
 
-            delay = self._calculate_backoff(attempts)
+            delay = self._calculate_backoff(attempts, last_error)
             await asyncio.sleep(delay)
 
         raise last_error

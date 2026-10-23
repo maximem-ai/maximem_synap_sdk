@@ -20,7 +20,7 @@ memory:
 pip install synap-nemo-agent-toolkit
 ```
 
-Depends on `maximem-synap>=0.2.0`, `synap-integrations-common>=0.1.0`,
+Depends on `maximem-synap>=0.2.0`, `maximem-synap-integrations-common>=0.2.2`,
 and `nvidia-nat-core>=1.0`.
 
 ## Use (programmatic)
@@ -72,7 +72,9 @@ entry-point registered in this package's `pyproject.toml`.
 
 `_type: synap_stream` is a NAT telemetry exporter. Switch it on and every
 event of every run is reported on Synap's live gRPC stream, so the
-anticipation agent can see what the agent is doing while it does it:
+anticipation agent can see what the agent is doing while it does it. Nothing
+else to set up: the stream is opened for you when the workflow starts
+(`SYNAP_AUTO_LISTEN=false` keeps everything on REST and never opens one).
 
 ```yaml
 general:
@@ -96,22 +98,65 @@ still one user message and one assistant message. The last LLM output of a
 run is the answer and goes out as the assistant turn, so it is never also
 reported as a thought.
 
-Nothing is written over REST. The server persists the turn from the stream
-itself, so reporting it and also calling `record_message` would store and
-extract it twice. To write turns into long-term memory, use
-`SynapMemoryEditor` above.
+The user and assistant turns go on the stream; if it cannot carry them they are
+written over REST with `conversation.record_message` (needs a conversation id,
+NAT's own or the configured `conversation_id`). Never both, since the server
+persists a streamed turn itself. Tool calls, tool results and reasoning are
+stream-only. To write long-term memories, use `SynapMemoryEditor` above.
+
+> **Turns need a hook.** NAT has no always-on callback for a conversation; the
+> telemetry exporter is the way to read one. Without `synap_stream`, turns
+> reach Synap only through `synap_memory` under NAT's `auto_memory_agent`, which
+> hands every user and assistant message to the editor: the editor records
+> those as turns (and skips the ones the exporter already wrote) rather than
+> ingesting a transcript document on top of them. A plain `add_items` with a
+> `memory` string is a fact and is still written with `memories.create`.
 
 To report from your own code instead of from YAML, construct the exporter
-with an SDK you have already called `listen()` on:
+with the SDK you use elsewhere. No `listen()` needed; the first report opens it:
 
 ```python
 from synap_nemo_agent_toolkit import SynapStreamExporter
 
-await sdk.instance.listen()
 exporter = SynapStreamExporter(sdk=sdk, user_id="alice", customer_id="acme")
 async with exporter.start():
     ...  # run the workflow
 ```
+
+## Synap's compaction for the agent
+
+NAT's agents are handed the conversation as a `ChatRequest` and keep the last
+`max_history` messages of it. `_type: synap_history` is a function middleware:
+once Synap has compacted the conversation, the agent is handed the compaction
+block and the turns after it **in place of the messages before the current one**.
+The agent's own trimming stays in place (it now sees a short list, and it is what
+the agent has when Synap has nothing).
+
+```yaml
+middleware:
+  synap_history:
+    _type: synap_history
+
+functions:
+  my_agent:
+    _type: tool_calling_agent
+    llm_name: nim_llm
+    tool_names: [calculator]
+    middleware: [synap_history]
+```
+
+The conversation id is NAT's own for the run, else the configured
+`conversation_id`; with neither the input is left alone. `synap_short_term` (a
+function returning Synap's context for a prompt template) now returns the
+compaction block alone once there is one, never the recent turns the agent
+already has.
+
+## One SDK for all of them
+
+`synap_memory`, `synap_short_term`, `synap_stream` and `synap_history` share one
+Synap SDK per set of credentials (API key and instance id), so the stream the
+exporter opens, and what comes back on it, serves the others' reads. The last
+component to shut down stops the stream and closes the SDK.
 
 ## Error policy
 
