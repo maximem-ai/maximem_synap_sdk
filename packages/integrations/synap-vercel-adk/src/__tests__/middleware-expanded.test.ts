@@ -16,7 +16,7 @@
  *   - wrapStream: forwards all stream parts including non-text-delta
  *   - wrapStream: writes memory after stream closes
  *   - wrapStream: stream error propagates via controller.error
- *   - prompt stack: works correctly across sequential calls
+ *   - the original prompt reaches wrapGenerate through the params object
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -89,7 +89,7 @@ function makeDoGenerate(text = 'test response') {
   });
 }
 
-function makeStreamDoStream(parts: Array<{ type: string; textDelta?: string }>) {
+function makeStreamDoStream(parts: Array<{ type: string; textDelta?: string; [k: string]: unknown }>) {
   return vi.fn().mockResolvedValue({
     stream: new ReadableStream({
       start(controller) {
@@ -235,30 +235,26 @@ describe('createSynapMiddleware.transformParams', () => {
     expect(sysContent.indexOf('<synap_context>')).toBeLessThan(sysContent.indexOf('You are an expert.'));
   });
 
-  it('pushes original prompt to stack (accessible to wrapGenerate)', async () => {
-    // We verify this indirectly: wrapGenerate should receive the original prompt
-    // by observing that memory write uses the original (pre-injection) transcript
+  it('records the original user message, not the injected system block', async () => {
+    // transformParams rewrites the prompt; wrapGenerate must still record the
+    // user's own words, from the prompt the caller sent.
     const cache = new AnticipationCache();
     cache.store(makeBundle());
     const mockF = mockOkFetch();
     global.fetch = mockF as unknown as typeof fetch;
 
     const mw = buildMiddleware({ cache, baseUrl: 'https://synap.test' });
-    await mw.transformParams!({ params: { prompt: userPrompt } as any, type: 'generate' } as any);
-    await mw.wrapGenerate!({ doGenerate: makeDoGenerate('ok'), params: { prompt: userPrompt } as any } as any);
-
-    // After wrapGenerate, the memory write fetch should have been called
-    // with the original user message (not the injected system message)
-    // We allow time for the fire-and-forget
+    const { prompt } = await mw.transformParams!({ params: { prompt: userPrompt } as any, type: 'generate' } as any);
+    expect(prompt[0].role).toBe('system'); // injected
+    await mw.wrapGenerate!({ doGenerate: makeDoGenerate('ok'), params: { prompt } as any } as any);
     await new Promise(r => setTimeout(r, 10));
-    expect(mockF).toHaveBeenCalledWith(
-      // ⚠ This asserted `/v1/memories/ingest`, which is not a route: memories
-      // are served under `/api/v1/memories`, and `fetch` does not throw on a
-      // 404. So the test passed, the write 404'd, and nothing was stored. A
-      // test that pins the wrong URL is how a silent failure stays silent.
-      expect.stringContaining('/api/v1/memories/create'),
-      expect.anything(),
-    );
+
+    const writes = mockF.mock.calls.filter(([url]) => String(url).includes('/v1/conversations/messages'));
+    const bodies = writes.map(([, init]) => JSON.parse((init as RequestInit).body as string));
+    expect(bodies.map((b) => [b.role, b.content])).toEqual([
+      ['user', 'hello distributed sharding'],
+      ['assistant', 'ok'],
+    ]);
   });
 });
 
@@ -299,7 +295,7 @@ describe('createSynapMiddleware.wrapGenerate', () => {
     warnSpy.mockRestore();
   });
 
-  it('skips memory write when result.text is falsy', async () => {
+  it('records no reply when result.text is falsy', async () => {
     const mockF = mockOkFetch();
     global.fetch = mockF as unknown as typeof fetch;
 
@@ -313,8 +309,11 @@ describe('createSynapMiddleware.wrapGenerate', () => {
     // Only the context fetch would have been called (if cache miss), but NOT the memory write
     // Wait briefly for any fire-and-forget
     await new Promise(r => setTimeout(r, 10));
-    const ingestCalls = mockF.mock.calls.filter(([url]) => String(url).includes('memories/create'));
-    expect(ingestCalls).toHaveLength(0);
+    const replies = mockF.mock.calls
+      .filter(([url]) => String(url).includes('/v1/conversations/messages'))
+      .map(([, init]) => JSON.parse((init as RequestInit).body as string))
+      .filter((b) => b.role === 'assistant');
+    expect(replies).toHaveLength(0);
   });
 
   it('calls gRPC sendConversationEvent when grpcClient is connected', async () => {
@@ -412,7 +411,7 @@ describe('createSynapMiddleware.wrapStream', () => {
     expect(collected[2]).toEqual({ type: 'finish', finishReason: 'stop', usage: {} });
   });
 
-  it('accumulates text-delta parts and writes memory when stream closes', async () => {
+  it('accumulates text-delta parts and records the reply when stream closes', async () => {
     const mockF = mockOkFetch();
     global.fetch = mockF as unknown as typeof fetch;
     const mw = buildMiddleware({ baseUrl: 'https://synap.test' });
@@ -431,13 +430,16 @@ describe('createSynapMiddleware.wrapStream', () => {
     // Allow fire-and-forget
     await new Promise(r => setTimeout(r, 20));
 
-    const ingestCalls = mockF.mock.calls.filter(([url]) => String(url).includes('memories/create'));
-    expect(ingestCalls.length).toBeGreaterThanOrEqual(1);
-    const body = JSON.parse((ingestCalls[0][1] as RequestInit).body as string);
-    // The turn travels as one rendered document, which is what
-    // /api/v1/memories/create takes. It used to be a `messages` array, aimed
-    // at a route that does not exist.
-    expect(body.document).toContain('assistant: Hello, world!');
+    const bodies = mockF.mock.calls
+      .filter(([url]) => String(url).includes('/v1/conversations/messages'))
+      .map(([, init]) => JSON.parse((init as RequestInit).body as string));
+    // The turn travels as two messages (the new user turn and the reply), not
+    // as the whole transcript re-ingested through the memories route.
+    expect(bodies.map((b) => [b.role, b.content])).toEqual([
+      ['user', 'hello distributed sharding'],
+      ['assistant', 'Hello, world!'],
+    ]);
+    expect(mockF.mock.calls.some(([url]) => String(url).includes('memories/create'))).toBe(false);
   });
 
   it('does not write memory when accumulated text is empty', async () => {
@@ -456,8 +458,11 @@ describe('createSynapMiddleware.wrapStream', () => {
     await collectStream(stream);
     await new Promise(r => setTimeout(r, 20));
 
-    const ingestCalls = mockF.mock.calls.filter(([url]) => String(url).includes('memories/create'));
-    expect(ingestCalls).toHaveLength(0);
+    const replies = mockF.mock.calls
+      .filter(([url]) => String(url).includes('/v1/conversations/messages'))
+      .map(([, init]) => JSON.parse((init as RequestInit).body as string))
+      .filter((b) => b.role === 'assistant');
+    expect(replies).toHaveLength(0);
   });
 
   it('passes through non-text-delta stream parts (e.g. tool-call)', async () => {

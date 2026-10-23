@@ -27,18 +27,27 @@ anticipation agent can tell they belong together.
 ``reflect_on_tool_use`` is ``False`` (the default whenever ``output_content_type``
 is unset) a turn that ends in a tool call answers with a
 ``ToolCallSummaryMessage``, and AutoGen never writes that message into the
-model context. The tool calls and results are reported, but the
-``assistant_message`` that tells anticipation the turn has ended is not,
-because nothing hands it to us. :meth:`SynapStreamingChatContext.report_reply`
-is the one line that closes it, and it is a no-op when the reply was already
-reported, so adding it is always safe.
+model context, so the context never sees the reply. It reports the turn the
+only way it can: the tool results are kept, and if nothing else says the turn
+ended (the next user message, ``save_state``, ``clear``) they are written as the
+assistant turn, formatted the way AutoGen's default summary is. That is what
+anticipation and compaction need, but it is not the text your
+``tool_call_summary_format`` produced. :meth:`SynapStreamingChatContext.report_reply`
+sends the exact reply and cancels the stand-in, and it is a no-op when the
+reply was already reported, so calling it after every ``run`` is always safe.
 
-Two rules hold throughout, and they come from ``stream_events``.
+Three rules hold throughout, and they come from ``stream_events`` and ``history``.
 
-*Silent without a stream.* Everything here needs an active
-``sdk.instance.listen()``. Most callers do not have one, and for them every
-report is a no-op. Adding this context must not change behaviour for someone
-who has not opted into streaming.
+*The stream is the default path.* The first message the context sees opens
+``sdk.instance.listen()`` (``SYNAP_AUTO_LISTEN=false`` or
+``set_auto_listen(sdk, False)`` turns that off), and every turn, tool call, tool
+result and thought goes on it. If the stream cannot carry a turn it goes over
+REST (``sdk.conversation.record_message``) so Synap keeps the conversation either
+way; tool calls, tool results and thoughts need the stream.
+
+*Synap's compaction replaces the framework's earlier turns.* ``get_messages``
+returns the conversation as Synap holds it once Synap has compacted it (see
+``history``), and the inner context's messages unchanged before that.
 
 *Never raises.* ``add_message`` runs inside the agent's own loop, where an
 exception from telemetry would end the run. No context is worth that.
@@ -48,7 +57,9 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, List, Mapping, Optional
+import time
+from collections import OrderedDict, deque
+from typing import Any, Deque, Dict, List, Mapping, Optional, Tuple
 
 from autogen_core.model_context import (
     ChatCompletionContext,
@@ -64,13 +75,57 @@ from autogen_core.models import (
 
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
+    is_synap_history,
+    record_turn,
     report_reasoning,
     report_tool_call,
     report_tool_result,
-    report_turn,
 )
 
+from synap_autogen.history import compacted_messages
+from synap_autogen.short_term import SynapShortTermChatContext
+
 logger = logging.getLogger(__name__)
+
+# In a team every agent receives every other agent's reply, and the user's task,
+# as a UserMessage. Contexts that share a conversation_id would each write those
+# again, so each text is remembered per conversation with who wrote it and who
+# has already skipped it. Process-local, bounded, and only for a few seconds: a
+# broadcast reaches every context at once, while a later context on the same
+# conversation (one per web request, say) is a new message, not a copy.
+_WINDOW_S = 10.0
+_MAX_SEEN = 256
+_MAX_CONVERSATIONS = 1024
+_seen: "OrderedDict[str, Deque[list]]" = OrderedDict()
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _already_written(conversation_id: str, owner: int, source: str, text: str) -> bool:
+    """Whether another context wrote this message and ``owner`` has not skipped it yet."""
+    key = (source, _norm(text))
+    for entry in reversed(_seen.get(conversation_id, ())):
+        if entry[0] == key:
+            if time.monotonic() - entry[3] > _WINDOW_S:
+                return False
+            if entry[1] != owner and owner not in entry[2]:
+                entry[2].add(owner)
+                return True
+            return False
+    return False
+
+
+def _remember(conversation_id: str, owner: int, source: str, text: str) -> None:
+    entries = _seen.get(conversation_id)
+    if entries is None:
+        entries = _seen[conversation_id] = deque(maxlen=_MAX_SEEN)
+        while len(_seen) > _MAX_CONVERSATIONS:
+            _seen.popitem(last=False)
+    else:
+        _seen.move_to_end(conversation_id)
+    entries.append([(source, _norm(text)), owner, set(), time.monotonic()])
 
 
 class SynapStreamingChatContext(ChatCompletionContext):
@@ -78,24 +133,27 @@ class SynapStreamingChatContext(ChatCompletionContext):
 
     Wraps an inner context (defaults to
     :class:`~autogen_core.model_context.UnboundedChatCompletionContext`) and
-    reports every message the agent adds. Reads are pass-through: this class
-    changes nothing about what the model sees.
+    reports every message the agent adds. Once Synap has compacted the
+    conversation, ``get_messages`` returns Synap's compaction and the turns after
+    it in place of the inner context's earlier turns, so the model is not sent
+    the same conversation twice and the framework's own limit (a
+    ``BufferedChatCompletionContext`` inner, say) is only the fallback::
 
-    Compose it with :class:`~synap_autogen.short_term.SynapShortTermChatContext`
-    when you want short-term context injected as well::
-
-        from synap_autogen import SynapShortTermChatContext, SynapStreamingChatContext
+        from synap_autogen import SynapStreamingChatContext
 
         model_context = SynapStreamingChatContext(
             sdk, conversation_id="conv_abc", user_id="user-1",
-            inner=SynapShortTermChatContext(sdk, conversation_id="conv_abc"),
         )
         agent = AssistantAgent(name="support", model_client=client,
                                model_context=model_context)
 
+    :class:`~synap_autogen.short_term.SynapShortTermChatContext` does the same
+    splice without reporting; wrapping one here is allowed and splices once.
+
     Args:
-        sdk: A configured :class:`MaximemSynapSDK`. Without an active
-            ``listen()`` stream every report is a no-op.
+        sdk: A configured :class:`MaximemSynapSDK`. The first message opens the
+            ``listen()`` stream if none is open; turns go over REST when the
+            stream cannot carry them, and tool and thought reports are dropped.
         conversation_id: The conversation these turns belong to. **Required.**
             Without it the server cannot say which conversation an event is
             part of, and no session is opened.
@@ -113,10 +171,12 @@ class SynapStreamingChatContext(ChatCompletionContext):
             and a turn with no reasoning is an ordinary turn.
 
     Note:
-        Attach this to **one** agent. In a team every agent receives every
-        other agent's reply as a ``UserMessage``, so two agents sharing one
-        ``conversation_id`` would report the same text twice, once as an
-        assistant turn and once as a user turn.
+        In a team every agent receives every other agent's reply, and the
+        task, as a ``UserMessage``. Contexts in one process that share a
+        ``conversation_id`` write each of those once: an agent's own reply is
+        written as an assistant turn by its context, and the others skip it.
+        Contexts in different processes cannot see each other, so give one
+        agent the context there.
     """
 
     def __init__(
@@ -149,6 +209,9 @@ class SynapStreamingChatContext(ChatCompletionContext):
         self._report_thoughts = report_thoughts
         self._step = 0
         self._last_assistant_text = ""
+        self._agent_source = "assistant"
+        # Tool results of a turn whose reply AutoGen never hands to the context.
+        self._pending_summary: List[str] = []
 
     # ── the ids every event carries ─────────────────────────────────────
     def _ids(self) -> dict:
@@ -161,12 +224,19 @@ class SynapStreamingChatContext(ChatCompletionContext):
     # ── ChatCompletionContext: reads and state are pass-through ─────────
 
     async def get_messages(self) -> List[LLMMessage]:
-        return await self._inner.get_messages()
+        messages = await self._inner.get_messages()
+        if isinstance(self._inner, SynapShortTermChatContext):
+            return messages  # it splices already
+        return await compacted_messages(
+            self._sdk, self._conversation_id, messages, self._agent_source
+        )
 
     async def clear(self) -> None:
+        await self._flush_summary()
         await self._inner.clear()
 
     async def save_state(self) -> Mapping[str, Any]:
+        await self._flush_summary()
         return {"inner": await self._inner.save_state()}
 
     async def load_state(self, state: Mapping[str, Any]) -> None:
@@ -183,6 +253,8 @@ class SynapStreamingChatContext(ChatCompletionContext):
         The inner context is updated first, so a slow or failing report can
         never leave the model looking at an incomplete conversation.
         """
+        if isinstance(message, UserMessage):
+            await self._flush_summary()  # a new turn: the last one is over
         await self._inner.add_message(message)
         await self._report(message)
 
@@ -205,8 +277,12 @@ class SynapStreamingChatContext(ChatCompletionContext):
 
         if isinstance(message, UserMessage):
             text = _user_text(message.content)
-            if text:
-                await report_turn(
+            if text and not is_synap_history(text):
+                source = str(message.source or "")
+                if _already_written(self._conversation_id, id(self), source, text):
+                    return
+                _remember(self._conversation_id, id(self), source, text)
+                await record_turn(
                     self._sdk, role="user", content=text, **self._ids()
                 )
             return
@@ -217,8 +293,9 @@ class SynapStreamingChatContext(ChatCompletionContext):
 
         if isinstance(message, FunctionExecutionResultMessage):
             if not self._report_tool_results:
-                return
+                return  # nor stand in for the reply with them
             for result in message.content or []:
+                self._pending_summary.append(str(getattr(result, "content", "") or ""))
                 await report_tool_result(
                     self._sdk,
                     result=getattr(result, "content", result),
@@ -229,6 +306,11 @@ class SynapStreamingChatContext(ChatCompletionContext):
             return
 
     async def _report_assistant(self, message: AssistantMessage) -> None:
+        # The model answered after its tools (or called more): the turn did not
+        # end on the tool results.
+        self._pending_summary = []
+        if message.source:
+            self._agent_source = message.source
         # The thought comes first because it is why the model did what it is
         # about to do, and it rides on the same message as the action.
         thought = (getattr(message, "thought", None) or "").strip()
@@ -247,7 +329,8 @@ class SynapStreamingChatContext(ChatCompletionContext):
             text = content.strip()
             if text:
                 self._last_assistant_text = text
-                await report_turn(
+                _remember(self._conversation_id, id(self), self._agent_source, text)
+                await record_turn(
                     self._sdk, role="assistant", content=text, **self._ids()
                 )
             return
@@ -268,6 +351,26 @@ class SynapStreamingChatContext(ChatCompletionContext):
 
     # ── the one gap the model context cannot see ────────────────────────
 
+    async def _flush_summary(self) -> None:
+        """Write the stand-in reply for a turn that ended on its tool results.
+
+        AutoGen's default summary (``tool_call_summary_format="{result}"``) is
+        the results joined by newlines, and the reply the user saw. Skipped when
+        a sibling context already wrote the same text as that agent's message.
+        """
+        results, self._pending_summary = self._pending_summary, []
+        text = "\n".join(r for r in results if r).strip()
+        if not text or text == self._last_assistant_text:
+            return
+        try:
+            if _already_written(self._conversation_id, id(self), self._agent_source, text):
+                return
+            self._last_assistant_text = text
+            _remember(self._conversation_id, id(self), self._agent_source, text)
+            await record_turn(self._sdk, role="assistant", content=text, **self._ids())
+        except Exception:  # noqa: BLE001 — a tap must never break the run
+            logger.debug("synap_autogen: writing the tool-call reply failed", exc_info=True)
+
     async def report_reply(self, result: Any) -> bool:
         """Report the agent's final reply, if it was not reported already.
 
@@ -280,13 +383,13 @@ class SynapStreamingChatContext(ChatCompletionContext):
         set to ``False`` (which is the default unless ``output_content_type``
         is set) a turn that ends in a tool call answers with a
         ``ToolCallSummaryMessage``, and AutoGen never adds that message to the
-        model context. Without this line, such a turn reports its tool calls
-        and results and then stops: anticipation never sees the
-        ``assistant_message`` that says the turn has ended, which is the event
-        it acts on.
+        model context. The context stands in for it, late (at the next user
+        message) and in AutoGen's default format. This line sends the exact
+        reply as soon as the run returns, and the stand-in is not written.
 
-        Returns whether an event went out. ``False`` when there was no stream,
-        when there was nothing to report, or when this exact reply already
+        Returns whether the reply was written (on the stream, or over REST
+        when there is none). ``False`` when the write failed, when there was
+        nothing to report, or when this exact reply already
         went out through ``add_message`` — so calling it on every turn is
         safe and never writes the reply twice.
         """
@@ -296,11 +399,13 @@ class SynapStreamingChatContext(ChatCompletionContext):
             logger.debug("synap_autogen: reading the reply failed", exc_info=True)
             return False
 
+        self._pending_summary = []  # the exact reply replaces the stand-in
         if not text or text == self._last_assistant_text:
             return False
 
         self._last_assistant_text = text
-        return await report_turn(
+        _remember(self._conversation_id, id(self), self._agent_source, text)
+        return await record_turn(
             self._sdk, role="assistant", content=text, **self._ids()
         )
 

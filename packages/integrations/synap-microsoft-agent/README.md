@@ -44,18 +44,19 @@ result = await agent.run("What's my trial expiring?", session=session)
 
 ## What each provider does
 
-- **`SynapContextProvider`** — on every turn, fetches Synap context (facts, preferences, episodes, emotions, temporal events) and appends it as instructions. Records the user + assistant messages back to Synap, and reports the whole turn on the live stream when one is open (see below). This is the provider that owns the turn lifecycle.
+- **`SynapContextProvider`**: on every turn, fetches Synap context (facts, preferences, episodes, emotions, temporal events) and appends it as instructions. Records the user + assistant messages back to Synap, and reports the whole turn on the live stream (see below). This is the provider that owns the turn lifecycle. It also adds `SynapCompactionMiddleware` to every run: once Synap has compacted the conversation, the model sees Synap's compaction and the turns after it instead of the earlier turns your history provider (`InMemoryHistoryProvider`, Redis, Cosmos...) holds. Until then, or if Synap cannot answer, the messages are untouched; MAF's own compaction stays installed. It works wherever the history provider sits in the list.
 
-- **`SynapHistoryProvider`** — persists the conversation message log. Loads prior turns on session resume. Subclass of MAF's `HistoryProvider`, so all its flags (`load_messages`, `store_inputs`, `store_outputs`, `store_context_messages`) work as documented.
+- **`SynapHistoryProvider`**: keeps the conversation log in Synap. Loads Synap's view on session resume (the compaction, then the turns after it). Subclass of MAF's `HistoryProvider`, so all its flags (`load_messages`, `store_inputs`, `store_outputs`, `store_context_messages`) work as documented. Next to `SynapContextProvider` each turn is still written once, by this provider.
 
-- **`SynapShortTermContextProvider`** — injects a compacted summary of the current conversation, refreshed each turn.
+- **`SynapShortTermContextProvider`**: injects Synap's compaction of the current conversation into the instructions, refreshed each turn. It adds no recent turns: your history provider already sends them.
 
 You can use either or both; they coexist.
 
 ## The live stream
 
-If you have `sdk.instance.listen()` running, this integration reports the whole
-turn on it, so Synap's anticipation agent sees more than a question and an
+The first report opens `sdk.instance.listen()` if you have not, and this
+integration reports the whole turn on it (`SYNAP_AUTO_LISTEN=false` turns that
+off and the turns go over REST), so Synap's anticipation agent sees more than a question and an
 answer:
 
 | what happened | event |
@@ -71,13 +72,13 @@ conversation row from the stream event itself, so reporting a turn *and*
 calling `record_message` would store it twice and extract it twice. Each turn
 goes out on the stream if one is open and over REST if it is not.
 
-None of this needs configuration and none of it changes what you see today: with
-no stream open, every writer behaves exactly as it did before. Every report is a
-no-op without a stream, and no report can raise into your agent run.
+Without a stream (auto-listen off, or it will not open) the user and assistant
+turns go over REST and the tool, reasoning and result reports are no-ops. No
+report can raise into your agent run.
 
-A `system` message has no stream event and keeps the REST path: `report_turn`
-maps anything that is not `user` onto `assistant_message`, and a system prompt
-filed as something the assistant said is worse than a REST write.
+A `system` message is not a turn and is not written: it has no stream event
+(`report_turn` would file it as something the assistant said) and `record_message`
+takes `user` or `assistant` only.
 
 ## The Agent Harness
 

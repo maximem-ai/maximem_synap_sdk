@@ -11,6 +11,7 @@
  */
 
 import path from 'path';
+import http2 from 'http2';
 import { fileURLToPath } from 'url';
 import type {
   Credentials,
@@ -33,6 +34,8 @@ const MIN_TTL_SECONDS = 60;
 const MAX_RECONNECT_ATTEMPTS = 10;
 const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
+const OPEN_READY_MS = 10_000;
+const RECONNECT_READY_MS = 5_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const HEARTBEAT_TIMEOUT_MS = 10_000;
 const MAX_MISSED_HEARTBEATS = 3;
@@ -48,6 +51,33 @@ export interface StreamClientOptions {
   useTls?: boolean;
 }
 
+// grpc-js refs the HTTP/2 session for as long as a call is open
+// (transport.js addActiveCall -> session.ref()) and has no option to turn that
+// off, so a script whose turns are done would never exit with the stream up.
+// Sessions to a Synap target get a no-op ref(): grpc-js unrefs a new session
+// itself, and the call can then no longer pin it. grpc-js connects to
+// `${scheme}://${host}:${port}` of the channel target, so only those sessions
+// are touched; any other HTTP/2 connection in the process keeps its ref. The
+// wrapper stays installed so a reconnect is covered too.
+const unrefedAuthorities = new Set<string>();
+let connectWrapped = false;
+
+function unrefSessionsTo(host: string, port: number): void {
+  unrefedAuthorities.add(`${host}:${port}`);
+  if (connectWrapped) return;
+  connectWrapped = true;
+  const real = http2.connect;
+  (http2 as { connect: unknown }).connect = ((...args: unknown[]) => {
+    const session = (real as (...a: unknown[]) => http2.ClientHttp2Session)(...args);
+    const authority = String(args[0] ?? '').replace(/^[a-z]+:\/\//, '');
+    if (unrefedAuthorities.has(authority)) {
+      session.ref = function ref() { return this; };
+    }
+    return session;
+  }) as typeof http2.connect;
+}
+
+
 export class GrpcStreamClient {
   readonly host: string;
   readonly port: number;
@@ -61,6 +91,7 @@ export class GrpcStreamClient {
   private missedHeartbeats = 0;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private shutdownRequested = false;
+  private waitForReadyMs = 0;
 
   private grpc: GrpcLib | null = null;
   private ServiceStub: unknown = null;
@@ -79,10 +110,21 @@ export class GrpcStreamClient {
   get currentState(): StreamState { return this.state; }
   get isConnected(): boolean { return this.state === 'connected'; }
 
-  async connect(): Promise<void> {
+  /**
+   * Open the stream. `waitForReadyMs` (default 10s) waits for the transport (TCP, TLS,
+   * HTTP/2) before calling it open: a gRPC call is lazy, so without the wait
+   * `connect()` returns "connected" for a host that is not there, and every
+   * write afterwards is dropped on the floor instead of going over REST.
+   */
+  async connect(opts: { waitForReadyMs?: number } = {}): Promise<void> {
     await this.loadGrpc();
     this.shutdownRequested = false;
-    await this.establish();
+    this.waitForReadyMs = opts.waitForReadyMs ?? OPEN_READY_MS;
+    try {
+      await this.establish();
+    } finally {
+      this.waitForReadyMs = 0;
+    }
     this.startHeartbeat();
   }
 
@@ -93,8 +135,9 @@ export class GrpcStreamClient {
     this.setState('closed');
   }
 
-  async sendConversationEvent(event: ConversationEventMsg): Promise<void> {
-    if (!this.isConnected || !this.call) return;
+  /** Whether the event was handed to the stream; false means send it another way. */
+  async sendConversationEvent(event: ConversationEventMsg): Promise<boolean> {
+    if (!this.isConnected || !this.call) return false;
     try {
       const msg = {
         conversation_event: {
@@ -116,8 +159,10 @@ export class GrpcStreamClient {
         },
       };
       (this.call as { write: (msg: unknown) => void }).write(msg);
+      return true;
     } catch {
-      // Non-fatal — fire-and-forget telemetry event
+      // Non-fatal: a telemetry event is fire-and-forget; a turn falls back to REST
+      return false;
     }
   }
 
@@ -181,6 +226,7 @@ export class GrpcStreamClient {
     if (!this.grpc || !this.ServiceStub) throw new Error('gRPC not loaded');
 
     const target = `${this.host}:${this.port}`;
+    unrefSessionsTo(this.host, this.port);
     const channelCreds = this.useTls
       ? this.grpc.credentials.createSsl()
       : this.grpc.credentials.createInsecure();
@@ -194,6 +240,19 @@ export class GrpcStreamClient {
     const stub = new (this.ServiceStub as new (t: string, c: unknown, o: unknown) => unknown)(
       target, channelCreds, channelOptions
     ) as Record<string, unknown>;
+    // A stream is a background channel, not work the process is waiting on:
+    // a script that finishes its turns must be able to exit with it open.
+    (stub['getChannel'] as (() => { unref?: () => void }) | undefined)?.call(stub).unref?.();
+
+    if (this.waitForReadyMs > 0) {
+      try {
+        await this.untilReady(stub, this.waitForReadyMs);
+      } catch (err) {
+        try { (stub['close'] as Function).call(stub); } catch { /**/ }
+        this.setState('disconnected');
+        throw new Error(`gRPC stream unreachable at ${target}: ${err}`);
+      }
+    }
 
     const metadata = new this.grpc.Metadata();
     metadata.add('authorization', `Bearer ${this.credentials.api_key}`);
@@ -206,14 +265,46 @@ export class GrpcStreamClient {
       end: () => void;
     };
 
-    call.on('data', (msg: unknown) => this.handleMessage(msg as Record<string, unknown>));
-    call.on('error', (err: unknown) => { void this.handleDisconnect(`error: ${err}`); });
-    call.on('end', () => { void this.handleDisconnect('server_close'); });
+    // A call that was replaced or closed on purpose reports its own death
+    // (cancelled); only the live call may start a reconnect.
+    call.on('data', (msg: unknown) => {
+      if (this.call === call) this.handleMessage(msg as Record<string, unknown>);
+    });
+    call.on('error', (err: unknown) => {
+      if (this.call === call) void this.handleDisconnect(`error: ${err}`);
+    });
+    call.on('end', () => {
+      if (this.call === call) void this.handleDisconnect('server_close');
+    });
 
+    this.channel = stub;
     this.call = call;
     this.setState('connected');
     this.reconnectAttempts = 0;
     this.lastPongAt = Date.now();
+  }
+
+  /**
+   * Resolve when the channel is READY; reject at the first TRANSIENT_FAILURE
+   * (refused, unresolvable, TLS) rather than retrying until the deadline, so a
+   * dead host sends the caller to REST at once.
+   */
+  private async untilReady(stub: Record<string, unknown>, timeoutMs: number): Promise<void> {
+    const grpc = this.grpc!;
+    const channel = (stub['getChannel'] as () => {
+      getConnectivityState(tryToConnect: boolean): number;
+      watchConnectivityState(current: number, deadline: number, cb: (err?: Error) => void): void;
+    }).call(stub);
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const state = channel.getConnectivityState(true);
+      if (state === grpc.connectivityState.READY) return;
+      if (state === grpc.connectivityState.TRANSIENT_FAILURE) throw new Error('connection failed');
+      if (state === grpc.connectivityState.SHUTDOWN) throw new Error('channel shut down');
+      await new Promise<void>((resolve, reject) => {
+        channel.watchConnectivityState(state, deadline, (err) => (err ? reject(err) : resolve()));
+      });
+    }
   }
 
   private handleMessage(msg: Record<string, unknown>): void {
@@ -290,10 +381,14 @@ export class GrpcStreamClient {
     );
     this.reconnectAttempts++;
 
-    await new Promise(r => setTimeout(r, delay));
+    await new Promise(r => setTimeout(r, delay).unref?.());
     if (!this.shutdownRequested) {
+      // Wait for the transport, or a dead host reads as a successful reconnect
+      // and resets the attempt counter, so the backoff never reaches its cap.
+      this.waitForReadyMs = RECONNECT_READY_MS;
       try { await this.establish(); }
       catch { void this.handleDisconnect('reconnect_failed'); }
+      finally { this.waitForReadyMs = 0; }
     }
   }
 
@@ -320,6 +415,7 @@ export class GrpcStreamClient {
         void this.handleDisconnect('heartbeat_write_error');
       }
     }, HEARTBEAT_INTERVAL_MS);
+    this.heartbeatTimer.unref?.();
   }
 
   private stopHeartbeat(): void {
@@ -330,8 +426,15 @@ export class GrpcStreamClient {
   }
 
   private closeCall(): void {
-    try { (this.call as { end: () => void } | null)?.end(); } catch { /**/ }
+    const call = this.call as { end: () => void; cancel?: () => void } | null;
+    const channel = this.channel as { close?: () => void } | null;
     this.call = null;
+    this.channel = null;
+    try { call?.end(); } catch { /**/ }
+    try { call?.cancel?.(); } catch { /**/ }
+    // Each (re)connect builds a new channel; an old one left open keeps its
+    // socket, and the process, alive.
+    try { channel?.close?.(); } catch { /**/ }
   }
 
   private setState(s: StreamState): void {

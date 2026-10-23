@@ -57,10 +57,35 @@ class Fact(BaseModel):
     extracted_at: datetime
     metadata: Dict[str, Any] = Field(default_factory=dict)
     event_date: Optional[datetime] = None
+    # The day the user SAID this, which is not the day the thing happened.
+    #
+    # `event_date` is now empty unless somebody actually stated when the event
+    # took place, so without this field beside it an item whose turn stated no
+    # event date arrives with no machine-readable date at all. On the
+    # 500-question benchmark that was 2,017 of 10,443 served items (19.3%),
+    # where the day they were said reached the caller only inside the content
+    # string as "(said ...)".
+    #
+    # Empty when the client never told the server when the conversation
+    # happened. It is never the server's own ingest or extraction clock.
+    said_at: Optional[datetime] = None
+    # The rest of the event window. `event_date` is its START: "last month"
+    # is 2023-04-01 to 2023-04-30 at precision "month", and reading only the
+    # start makes it look like the 1st. `event_precision` also carries the one
+    # distinction nothing else does: "approximate" has no end, so "around
+    # November 20" and "on November 20" differ only by this label.
+    event_end: Optional[datetime] = None
+    event_precision: Optional[str] = None
     valid_until: Optional[datetime] = None
     temporal_category: Optional[str] = None
     temporal_confidence: float = 0.0
     source_evidence: Optional[List[str]] = None
+    # The search queries of the fetch that found this item, in the order they
+    # were sent. Empty when the fetch named no query, when the server predates
+    # the field, and for an item served from the prefetch cache.
+    matched_queries: List[str] = Field(default_factory=list)
+
+    model_config = {"extra": "allow"}
 
 
 class Preference(BaseModel):
@@ -74,10 +99,26 @@ class Preference(BaseModel):
     extracted_at: datetime
     metadata: Dict[str, Any] = Field(default_factory=dict)
     event_date: Optional[datetime] = None
+    # The day the user SAID this, as distinct from when the event happened.
+    # See the note on `Fact.said_at`.
+    said_at: Optional[datetime] = None
+    # The rest of the event window. `event_date` is its START: "last month"
+    # is 2023-04-01 to 2023-04-30 at precision "month", and reading only the
+    # start makes it look like the 1st. `event_precision` also carries the one
+    # distinction nothing else does: "approximate" has no end, so "around
+    # November 20" and "on November 20" differ only by this label.
+    event_end: Optional[datetime] = None
+    event_precision: Optional[str] = None
     valid_until: Optional[datetime] = None
     temporal_category: Optional[str] = None
     temporal_confidence: float = 0.0
     source_evidence: Optional[List[str]] = None
+    # The search queries of the fetch that found this item, in the order they
+    # were sent. Empty when the fetch named no query, when the server predates
+    # the field, and for an item served from the prefetch cache.
+    matched_queries: List[str] = Field(default_factory=list)
+
+    model_config = {"extra": "allow"}
 
 
 class Episode(BaseModel):
@@ -90,10 +131,26 @@ class Episode(BaseModel):
     participants: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     event_date: Optional[datetime] = None
+    # The day the user SAID this, as distinct from when the event happened.
+    # See the note on `Fact.said_at`.
+    said_at: Optional[datetime] = None
+    # The rest of the event window. `event_date` is its START: "last month"
+    # is 2023-04-01 to 2023-04-30 at precision "month", and reading only the
+    # start makes it look like the 1st. `event_precision` also carries the one
+    # distinction nothing else does: "approximate" has no end, so "around
+    # November 20" and "on November 20" differ only by this label.
+    event_end: Optional[datetime] = None
+    event_precision: Optional[str] = None
     valid_until: Optional[datetime] = None
     temporal_category: Optional[str] = None
     temporal_confidence: float = 0.0
     source_evidence: Optional[List[str]] = None
+    # The search queries of the fetch that found this item, in the order they
+    # were sent. Empty when the fetch named no query, when the server predates
+    # the field, and for an item served from the prefetch cache.
+    matched_queries: List[str] = Field(default_factory=list)
+
+    model_config = {"extra": "allow"}
 
 
 class Emotion(BaseModel):
@@ -106,10 +163,26 @@ class Emotion(BaseModel):
     context: str  # What triggered this
     metadata: Dict[str, Any] = Field(default_factory=dict)
     event_date: Optional[datetime] = None
+    # The day the user SAID this, as distinct from when the event happened.
+    # See the note on `Fact.said_at`.
+    said_at: Optional[datetime] = None
+    # The rest of the event window. `event_date` is its START: "last month"
+    # is 2023-04-01 to 2023-04-30 at precision "month", and reading only the
+    # start makes it look like the 1st. `event_precision` also carries the one
+    # distinction nothing else does: "approximate" has no end, so "around
+    # November 20" and "on November 20" differ only by this label.
+    event_end: Optional[datetime] = None
+    event_precision: Optional[str] = None
     valid_until: Optional[datetime] = None
     temporal_category: Optional[str] = None
     temporal_confidence: float = 0.0
     source_evidence: Optional[List[str]] = None
+    # The search queries of the fetch that found this item, in the order they
+    # were sent. Empty when the fetch named no query, when the server predates
+    # the field, and for an item served from the prefetch cache.
+    matched_queries: List[str] = Field(default_factory=list)
+
+    model_config = {"extra": "allow"}
 
 
 class TemporalEvent(BaseModel):
@@ -117,7 +190,25 @@ class TemporalEvent(BaseModel):
 
     id: str
     content: str
-    event_date: datetime
+    # Optional for the same reason it is optional on `Fact`: the server now
+    # leaves it empty unless somebody actually stated when the event happened.
+    # It was required here, and the parser below dropped any item that arrived
+    # without one, which was harmless only while the server always filled the
+    # field with the conversation's own date. On the benchmark instance 917 of
+    # 5,345 stored temporal events (17%) have no stated event date, so keeping
+    # it required would have deleted every one of them from a typed caller's
+    # response while raw HTTP and the JS SDK still saw them.
+    event_date: Optional[datetime] = None
+    # The day the user SAID this, as distinct from when the event happened.
+    # See the note on `Fact.said_at`.
+    said_at: Optional[datetime] = None
+    # The rest of the event window. `event_date` is its START: "last month"
+    # is 2023-04-01 to 2023-04-30 at precision "month", and reading only the
+    # start makes it look like the 1st. `event_precision` also carries the one
+    # distinction nothing else does: "approximate" has no end, so "around
+    # November 20" and "on November 20" differ only by this label.
+    event_end: Optional[datetime] = None
+    event_precision: Optional[str] = None
     valid_until: Optional[datetime] = None
     temporal_category: str  # "perpetual" | "temporal_fact" | "episode"
     temporal_confidence: float = Field(ge=0.0, le=1.0)
@@ -126,6 +217,46 @@ class TemporalEvent(BaseModel):
     extracted_at: Optional[datetime] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
     source_evidence: Optional[List[str]] = None
+    # The search queries of the fetch that found this item, in the order they
+    # were sent. Empty when the fetch named no query, when the server predates
+    # the field, and for an item served from the prefetch cache.
+    matched_queries: List[str] = Field(default_factory=list)
+
+    model_config = {"extra": "allow"}
+
+
+# Keys the parsers below map onto typed fields. Everything else on a served
+# item is passed through untouched, so a field the server adds is reachable as
+# an attribute the day it ships.
+#
+# ⚠ This exists so that adding a served field does not force an SDK release.
+# `event_end` and `event_precision` were computed by the server, dropped by its
+# own payload, and then dropped again here: the parsers build each model from a
+# hand-picked list of keys, so `extra: "allow"` on the model was never reached.
+# A client could not read "sometime in April" even after the server sent it.
+_CONSUMED_KEYS = frozenset({
+    "id", "content", "confidence", "source", "extracted_at", "metadata",
+    "event_date", "said_at", "valid_until", "temporal_category",
+    "temporal_confidence", "source_evidence", "matched_queries", "strength",
+    "category", "occurred_at", "participants", "emotion_type", "intensity",
+    "detected_at", "context", "trigger", "valid_from",
+    "event_end", "event_precision",
+})
+
+
+def _extras(item: Dict[str, Any], model: type) -> Dict[str, Any]:
+    """Whatever the server sent that this SDK version has no field for.
+
+    The model's own declared fields are excluded as well as the source keys
+    above, which makes this self-maintaining: a hand-written exclusion list
+    missed `significance` on Episode and the parser then received it twice.
+    Any key the model already has a field for cannot collide, and a genuinely
+    new server key still comes through.
+    """
+    if not isinstance(item, dict):
+        return {}
+    skip = _CONSUMED_KEYS | set(getattr(model, "model_fields", {}))
+    return {k: v for k, v in item.items() if k not in skip}
 
 
 # Response Metadata
@@ -313,6 +444,261 @@ class ConversationSummaryModel(BaseModel):
 
 
 # Response Wrappers (Hybrid: typed + raw)
+class RetrievalHealthModel(BaseModel):
+    """Why a fetch may be thinner than the stores can support.
+
+    `degraded` says something went wrong, `level` says how thin the answer is
+    ("partial", "minimal", "failed"), and `code` says whether retrying is worth
+    it ("timeout", "overloaded", "unavailable", "internal"). The server does not
+    name which of its services broke, by design.
+
+    Absent on a healthy fetch, so `response.retrieval is None` means fine.
+    """
+
+    degraded: bool = True
+    level: Optional[str] = None
+    code: Optional[str] = None
+    warnings: List[str] = Field(default_factory=list)
+
+    model_config = {"extra": "allow"}
+
+
+# The two response shapes a context fetch can ask for (`response_shape`).
+RESPONSE_SHAPES = ("by_type", "ranked")
+
+# The memory types, in the order the by-type response lists them.
+MEMORY_TYPES = ("facts", "preferences", "episodes", "emotions", "temporal_events")
+
+# The type of a chunk in a ranked response: a quote from a source document,
+# not an extracted memory. A by-type response files it under "facts".
+EXCERPT_CATEGORY = "excerpts"
+
+
+class RankedItem(BaseModel):
+    """One item of a ranked response (`response_shape="ranked"`).
+
+    The same fields for every type, which is what makes one list possible:
+    `category` says which type it is, `rank` where it stands (1 is best), and
+    `rank_score` the number it was ranked by. The typed views on the response
+    (`facts`, `preferences`, ...) hold the same items as Fact, Preference and
+    the rest, for code written against those.
+    """
+
+    id: str
+    rank: int
+    # "facts" | "preferences" | "episodes" | "emotions" | "temporal_events" |
+    # "excerpts"
+    category: str
+    content: str
+    # Higher is better; sorting on it descending reproduces the order. None
+    # only for an item a server that predates ranking sent.
+    rank_score: Optional[float] = None
+    confidence: float = 0.0
+    source: str = ""
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    event_date: Optional[datetime] = None
+    # The day the user SAID this. See the note on `Fact.said_at`.
+    said_at: Optional[datetime] = None
+    event_end: Optional[datetime] = None
+    event_precision: Optional[str] = None
+    valid_until: Optional[datetime] = None
+    temporal_category: Optional[str] = None
+    temporal_confidence: float = 0.0
+    source_evidence: Optional[List[str]] = None
+    matched_queries: List[str] = Field(default_factory=list)
+
+    model_config = {"extra": "allow"}
+
+
+# How each type is named on a line of the ranked prompt list
+# (`UnifiedContextResponse.format_for_prompt`).
+_RANKED_LABELS = {
+    "facts": "fact",
+    "preferences": "preference",
+    "episodes": "episode",
+    "emotions": "emotion",
+    "temporal_events": "temporal event",
+    EXCERPT_CATEGORY: "excerpt",
+}
+
+
+def _wire_rank_score(item: Dict[str, Any]) -> Optional[float]:
+    """An item's rank score: `metadata.rank_score` on the HTTP response, a
+    top-level `rank_score` on a prefetched (gRPC) item."""
+    md = item.get("metadata")
+    raw = md.get("rank_score") if isinstance(md, dict) else None
+    if raw is None:
+        raw = item.get("rank_score")
+    try:
+        return float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _wire_category(item: Dict[str, Any], fallback: str = "") -> str:
+    """An item's type. A chunk is an excerpt whatever list it came in: a server
+    or a prefetched bundle that predates ranking files it under facts."""
+    if item.get("source") == "chunks":
+        return EXCERPT_CATEGORY
+    return item.get("category") or item.get("context_type") or fallback
+
+
+def rank_items(by_type: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Merge per-type item lists into one list in rank order, numbered from 1.
+
+    For the cases where the server's own order is not available: a server that
+    predates `response_shape` (and returned the five lists), and a prefetched
+    cache hit. Sorted on rank score, highest first; items without one keep
+    their relative order after the scored ones. Each returned dict is a copy
+    carrying `rank` and `category`, so the input is not changed.
+    """
+    flat: List[Dict[str, Any]] = []
+    for ctx_type in list(MEMORY_TYPES) + [t for t in by_type if t not in MEMORY_TYPES]:
+        for it in by_type.get(ctx_type) or []:
+            if isinstance(it, dict):
+                # A prefetched item names its id `item_id`; the typed parsers
+                # read `id`, and would otherwise build every view item with "".
+                flat.append(dict(it, category=_wire_category(it, ctx_type),
+                                 id=it.get("id") or it.get("item_id") or ""))
+    flat.sort(key=lambda it: (_wire_rank_score(it) is None, -(_wire_rank_score(it) or 0.0)))
+    for n, it in enumerate(flat, start=1):
+        it["rank"] = n
+    return flat
+
+
+def _ranked_item_from(r: Dict[str, Any]) -> RankedItem:
+    return RankedItem(
+        id=r.get("id") or r.get("item_id") or "",
+        rank=int(r.get("rank") or 0),
+        category=_wire_category(r),
+        content=r.get("content", ""),
+        rank_score=_wire_rank_score(r),
+        confidence=_coerce_float(r.get("confidence"), default=0.0),
+        source=r.get("source", ""),
+        metadata=r.get("metadata") or {},
+        event_date=_parse_iso_datetime(r.get("event_date")),
+        said_at=_parse_iso_datetime(r.get("said_at")),
+        event_end=_parse_iso_datetime(r.get("event_end")),
+        event_precision=r.get("event_precision"),
+        valid_until=_parse_iso_datetime(r.get("valid_until")),
+        temporal_category=r.get("temporal_category"),
+        temporal_confidence=_coerce_float(r.get("temporal_confidence"), default=0.0),
+        source_evidence=r.get("source_evidence"),
+        matched_queries=list(r.get("matched_queries") or []),
+        **{k: v for k, v in _extras(r, RankedItem).items()
+           if k not in ("item_id", "context_type", "rank_score")},
+    )
+
+
+# One parser per memory type, shared by the by-type lists and by the views a
+# ranked response builds (`ContextResponse.items`), so an item reads the same
+# whichever shape it arrived in.
+def _fact_from(f: Dict[str, Any]) -> Fact:
+    return Fact(
+        id=f.get("id", ""),
+        content=f.get("content", ""),
+        confidence=_coerce_float(f.get("confidence"), default=0.0),
+        source=f.get("source", ""),
+        extracted_at=f.get("extracted_at") or datetime.now(timezone.utc),
+        metadata=f.get("metadata", {}),
+        event_date=_parse_iso_datetime(f.get("event_date")),
+        said_at=_parse_iso_datetime(f.get("said_at")),
+        event_end=_parse_iso_datetime(f.get("event_end")),
+        event_precision=f.get("event_precision"),
+        valid_until=_parse_iso_datetime(f.get("valid_until")),
+        temporal_category=f.get("temporal_category"),
+        temporal_confidence=_coerce_float(f.get("temporal_confidence"), default=0.0),
+        source_evidence=f.get("source_evidence"),
+        matched_queries=list(f.get("matched_queries") or []),
+        **_extras(f, Fact),
+    )
+
+
+def _preference_from(p: Dict[str, Any]) -> Preference:
+    return Preference(
+        id=p.get("id", ""),
+        category=p.get("category", ""),
+        content=p.get("content", ""),
+        strength=_coerce_float(p.get("strength", p.get("confidence")), default=0.0),
+        extracted_at=p.get("extracted_at") or datetime.now(timezone.utc),
+        metadata=p.get("metadata", {}),
+        event_date=_parse_iso_datetime(p.get("event_date")),
+        said_at=_parse_iso_datetime(p.get("said_at")),
+        event_end=_parse_iso_datetime(p.get("event_end")),
+        event_precision=p.get("event_precision"),
+        valid_until=_parse_iso_datetime(p.get("valid_until")),
+        temporal_category=p.get("temporal_category"),
+        temporal_confidence=_coerce_float(p.get("temporal_confidence"), default=0.0),
+        source_evidence=p.get("source_evidence"),
+        matched_queries=list(p.get("matched_queries") or []),
+        **_extras(p, Preference),
+    )
+
+
+def _episode_from(e: Dict[str, Any]) -> Episode:
+    return Episode(
+        id=e.get("id", ""),
+        summary=e.get("summary", e.get("content", "")),
+        occurred_at=e.get("occurred_at") or e.get("extracted_at") or datetime.now(timezone.utc),
+        significance=_coerce_float(e.get("significance", e.get("confidence")), default=0.0),
+        participants=e.get("participants", []),
+        metadata=e.get("metadata", {}),
+        event_date=_parse_iso_datetime(e.get("event_date")),
+        said_at=_parse_iso_datetime(e.get("said_at")),
+        event_end=_parse_iso_datetime(e.get("event_end")),
+        event_precision=e.get("event_precision"),
+        valid_until=_parse_iso_datetime(e.get("valid_until")),
+        temporal_category=e.get("temporal_category"),
+        temporal_confidence=_coerce_float(e.get("temporal_confidence"), default=0.0),
+        source_evidence=e.get("source_evidence"),
+        matched_queries=list(e.get("matched_queries") or []),
+        **_extras(e, Episode),
+    )
+
+
+def _emotion_from(em: Dict[str, Any]) -> Emotion:
+    return Emotion(
+        id=em.get("id", ""),
+        emotion_type=em.get("emotion_type", em.get("category", "")),
+        intensity=_coerce_float(em.get("intensity", em.get("confidence")), default=0.0),
+        detected_at=em.get("detected_at") or em.get("extracted_at") or datetime.now(timezone.utc),
+        context=em.get("context", em.get("content", "")),
+        metadata=em.get("metadata", {}),
+        event_date=_parse_iso_datetime(em.get("event_date")),
+        said_at=_parse_iso_datetime(em.get("said_at")),
+        event_end=_parse_iso_datetime(em.get("event_end")),
+        event_precision=em.get("event_precision"),
+        valid_until=_parse_iso_datetime(em.get("valid_until")),
+        temporal_category=em.get("temporal_category"),
+        temporal_confidence=_coerce_float(em.get("temporal_confidence"), default=0.0),
+        source_evidence=em.get("source_evidence"),
+        matched_queries=list(em.get("matched_queries") or []),
+        **_extras(em, Emotion),
+    )
+
+
+def _temporal_event_from(t: Dict[str, Any]) -> TemporalEvent:
+    return TemporalEvent(
+        id=t.get("id", ""),
+        content=t.get("content", ""),
+        event_date=_parse_iso_datetime(t.get("event_date")),
+        said_at=_parse_iso_datetime(t.get("said_at")),
+        event_end=_parse_iso_datetime(t.get("event_end")),
+        event_precision=t.get("event_precision"),
+        valid_until=_parse_iso_datetime(t.get("valid_until")),
+        temporal_category=t.get("temporal_category", ""),
+        temporal_confidence=_coerce_float(t.get("temporal_confidence"), default=0.0),
+        confidence=_coerce_float(t.get("confidence"), default=0.0),
+        source=t.get("source", ""),
+        extracted_at=_parse_iso_datetime(t.get("extracted_at")),
+        metadata=t.get("metadata", {}),
+        source_evidence=t.get("source_evidence"),
+        matched_queries=list(t.get("matched_queries") or []),
+        **_extras(t, TemporalEvent),
+    )
+
+
+
 class ContextResponse(BaseModel):
     """Response from context fetch operations.
 
@@ -324,11 +710,31 @@ class ContextResponse(BaseModel):
     episodes: List[Episode] = Field(default_factory=list)
     emotions: List[Emotion] = Field(default_factory=list)
     temporal_events: List[TemporalEvent] = Field(default_factory=list)
+    # `response_shape="ranked"` only: every item once, best first, across
+    # types. Empty for a by-type fetch, which is the default. In a ranked
+    # response the five lists above are views of these same items, by type.
+    items: List[RankedItem] = Field(default_factory=list)
+    # `response_shape="ranked"` only: the chunks, quotes from source documents.
+    # A by-type response files them under `facts` instead.
+    excerpts: List[Fact] = Field(default_factory=list)
     conversation_context: Optional[ConversationContextModel] = None
     # C4 conversation-summary sections (populated only in summary mode).
     profile: Optional["UserProfileModel"] = None
     conversations: Optional[List["ConversationSummaryModel"]] = None
     metadata: ResponseMetadata
+    # Why this response may be thinner than the stores can support. None on a
+    # healthy fetch.
+    #
+    # ⚠ This had no typed slot, and that is how a real failure stayed invisible.
+    # On 2026-10-12 a retrieval lost its embedding call, the server returned 200
+    # with ZERO items for a user holding 122 memories, and said so in the
+    # response's `retrieval` block. The server-side field was added after an
+    # identical incident in September precisely so a client could see it. But
+    # the factory below built this model from a hand-picked list of keys, so
+    # `extra: "allow"` was never reached and the block was dropped. A caller
+    # could not tell "this user has no relevant memories" from "our retrieval
+    # broke", and scored the question as a legitimate blank.
+    retrieval: Optional[RetrievalHealthModel] = None
 
     # Raw response for forward compatibility
     model_config = {"extra": "allow"}
@@ -347,95 +753,39 @@ class ContextResponse(BaseModel):
 
     @classmethod
     def from_cloud_response(
-        cls, data: Dict[str, Any], metadata: ResponseMetadata
+        cls, data: Dict[str, Any], metadata: ResponseMetadata,
+        response_shape: str = "by_type",
     ) -> "ContextResponse":
         """Factory to create from cloud API response.
 
         Maps generic ContextItem fields from the cloud API to type-specific
         SDK model fields (e.g. confidence -> strength for Preference).
+
+        ``response_shape`` is what the caller asked for. A ranked response
+        carries ``items``; the typed lists are then built from it. When
+        "ranked" was asked for and the data has no ``items`` (a server or a
+        cache entry that predates the parameter), the five lists are merged
+        into ``items`` here by rank score, so the caller gets the shape it
+        asked for either way.
         """
-        facts = []
-        for f in data.get("facts", []):
-            facts.append(Fact(
-                id=f.get("id", ""),
-                content=f.get("content", ""),
-                confidence=_coerce_float(f.get("confidence"), default=0.0),
-                source=f.get("source", ""),
-                extracted_at=f.get("extracted_at") or datetime.now(timezone.utc),
-                metadata=f.get("metadata", {}),
-                event_date=_parse_iso_datetime(f.get("event_date")),
-                valid_until=_parse_iso_datetime(f.get("valid_until")),
-                temporal_category=f.get("temporal_category"),
-                temporal_confidence=_coerce_float(f.get("temporal_confidence"), default=0.0),
-                source_evidence=f.get("source_evidence"),
-            ))
-
-        preferences = []
-        for p in data.get("preferences", []):
-            preferences.append(Preference(
-                id=p.get("id", ""),
-                category=p.get("category", ""),
-                content=p.get("content", ""),
-                strength=_coerce_float(p.get("strength", p.get("confidence")), default=0.0),
-                extracted_at=p.get("extracted_at") or datetime.now(timezone.utc),
-                metadata=p.get("metadata", {}),
-                event_date=_parse_iso_datetime(p.get("event_date")),
-                valid_until=_parse_iso_datetime(p.get("valid_until")),
-                temporal_category=p.get("temporal_category"),
-                temporal_confidence=_coerce_float(p.get("temporal_confidence"), default=0.0),
-                source_evidence=p.get("source_evidence"),
-            ))
-
-        episodes = []
-        for e in data.get("episodes", []):
-            episodes.append(Episode(
-                id=e.get("id", ""),
-                summary=e.get("summary", e.get("content", "")),
-                occurred_at=e.get("occurred_at") or e.get("extracted_at") or datetime.now(timezone.utc),
-                significance=_coerce_float(e.get("significance", e.get("confidence")), default=0.0),
-                participants=e.get("participants", []),
-                metadata=e.get("metadata", {}),
-                event_date=_parse_iso_datetime(e.get("event_date")),
-                valid_until=_parse_iso_datetime(e.get("valid_until")),
-                temporal_category=e.get("temporal_category"),
-                temporal_confidence=_coerce_float(e.get("temporal_confidence"), default=0.0),
-                source_evidence=e.get("source_evidence"),
-            ))
-
-        emotions = []
-        for em in data.get("emotions", []):
-            emotions.append(Emotion(
-                id=em.get("id", ""),
-                emotion_type=em.get("emotion_type", em.get("category", "")),
-                intensity=_coerce_float(em.get("intensity", em.get("confidence")), default=0.0),
-                detected_at=em.get("detected_at") or em.get("extracted_at") or datetime.now(timezone.utc),
-                context=em.get("context", em.get("content", "")),
-                metadata=em.get("metadata", {}),
-                event_date=_parse_iso_datetime(em.get("event_date")),
-                valid_until=_parse_iso_datetime(em.get("valid_until")),
-                temporal_category=em.get("temporal_category"),
-                temporal_confidence=_coerce_float(em.get("temporal_confidence"), default=0.0),
-                source_evidence=em.get("source_evidence"),
-            ))
-
-        temporal_events = []
-        for t in data.get("temporal_events", []):
-            evt_date = _parse_iso_datetime(t.get("event_date"))
-            if evt_date is None:
-                continue
-            temporal_events.append(TemporalEvent(
-                id=t.get("id", ""),
-                content=t.get("content", ""),
-                event_date=evt_date,
-                valid_until=_parse_iso_datetime(t.get("valid_until")),
-                temporal_category=t.get("temporal_category", ""),
-                temporal_confidence=_coerce_float(t.get("temporal_confidence"), default=0.0),
-                confidence=_coerce_float(t.get("confidence"), default=0.0),
-                source=t.get("source", ""),
-                extracted_at=_parse_iso_datetime(t.get("extracted_at")),
-                metadata=t.get("metadata", {}),
-                source_evidence=t.get("source_evidence"),
-            ))
+        raw_source = data
+        ranked_wire = data.get("items")
+        if response_shape == "ranked" or isinstance(ranked_wire, list):
+            if not isinstance(ranked_wire, list):
+                ranked_wire = rank_items({t: data.get(t) or [] for t in MEMORY_TYPES})
+            data = dict(data)
+            for t in MEMORY_TYPES:
+                data[t] = [it for it in ranked_wire if _wire_category(it) == t]
+            ranked = [_ranked_item_from(it) for it in ranked_wire]
+            excerpts = [_fact_from(it) for it in ranked_wire
+                        if _wire_category(it) == EXCERPT_CATEGORY]
+        else:
+            ranked, excerpts = [], []
+        facts = [_fact_from(f) for f in data.get("facts", [])]
+        preferences = [_preference_from(p) for p in data.get("preferences", [])]
+        episodes = [_episode_from(e) for e in data.get("episodes", [])]
+        emotions = [_emotion_from(em) for em in data.get("emotions", [])]
+        temporal_events = [_temporal_event_from(t) for t in data.get("temporal_events", [])]
 
         conv_ctx = None
         conv_ctx_data = data.get("conversation_context")
@@ -466,11 +816,15 @@ class ContextResponse(BaseModel):
             episodes=episodes,
             emotions=emotions,
             temporal_events=temporal_events,
+            items=ranked,
+            excerpts=excerpts,
             conversation_context=conv_ctx,
             profile=profile,
             conversations=conversations,
             metadata=metadata,
-            raw_data=data,
+            retrieval=(RetrievalHealthModel(**data["retrieval"])
+                       if isinstance(data.get("retrieval"), dict) else None),
+            raw_data=raw_source,
         )
 
 
@@ -544,6 +898,15 @@ class RecentMessage(BaseModel):
     message_id: str
 
 
+class HistoryExcerpt(BaseModel):
+    """An earlier turn, verbatim or cut to its matching sentences, found by
+    the local history search."""
+
+    position: Optional[int] = None  # the turn number, when known
+    role: str
+    text: str
+
+
 class ContextForPromptResponse(BaseModel):
     """Response from get_context_for_prompt()."""
 
@@ -559,6 +922,18 @@ class ContextForPromptResponse(BaseModel):
     recent_message_count: int = 0
     compacted_message_count: int = 0
     total_message_count: int = 0
+
+    # The framed compaction block alone (it is also inside formatted_context),
+    # for a framework that keeps its own message list: put it in a system
+    # message ahead of recent_messages, in place of the turns it covers.
+    context_block: Optional[str] = None
+    compaction_id: Optional[str] = None
+    # Earlier turns matched to the latest user message by the local search,
+    # also appended to formatted_context.
+    history_excerpts: List[HistoryExcerpt] = []
+    # The same excerpts rendered as appended to formatted_context, for a
+    # framework that puts context_block in a system message.
+    history_block: Optional[str] = None
 
 
 # Unified cross-scope response
@@ -576,6 +951,11 @@ class UnifiedContextResponse(BaseModel):
     episodes: List[Episode] = Field(default_factory=list)
     emotions: List[Emotion] = Field(default_factory=list)
     temporal_events: List[TemporalEvent] = Field(default_factory=list)
+    # `response_shape="ranked"` only: every item once, best first across
+    # scopes and types, renumbered from 1. Empty for a by-type fetch.
+    items: List[RankedItem] = Field(default_factory=list)
+    # `response_shape="ranked"` only: the chunks (quotes from source documents).
+    excerpts: List[Fact] = Field(default_factory=list)
 
     scope_map: Dict[str, str] = Field(default_factory=dict)
 
@@ -602,6 +982,11 @@ class UnifiedContextResponse(BaseModel):
         duplicate IDs). Each item is attributed to its source scope
         in scope_map.
 
+        Ranked responses (``response_shape="ranked"``) also have their
+        ``items`` merged into one list ordered by ``rank_score``. Scores
+        compare across scopes: each item is scored on its own against the
+        same queries, not relative to the rest of its scope's batch.
+
         Args:
             scope_results: List of (scope_name, ContextResponse) tuples.
                            Failed scopes should be filtered out before calling.
@@ -615,6 +1000,9 @@ class UnifiedContextResponse(BaseModel):
         episodes: List[Episode] = []
         emotions: List[Emotion] = []
         temporal_events: List[TemporalEvent] = []
+        excerpts: List[Fact] = []
+        ranked: List[RankedItem] = []
+        ranked_ids: set = set()
         scope_map: Dict[str, str] = {}
         scopes_queried: List[str] = []
         first_metadata: Optional[ResponseMetadata] = None
@@ -663,7 +1051,25 @@ class UnifiedContextResponse(BaseModel):
                     temporal_events.append(te)
                     scope_map[te.id] = scope_name
 
-        total = len(facts) + len(preferences) + len(episodes) + len(emotions) + len(temporal_events)
+            for ex in response.excerpts:
+                if ex.id not in seen_ids:
+                    seen_ids.add(ex.id)
+                    excerpts.append(ex)
+                    scope_map[ex.id] = scope_name
+
+            for it in response.items:
+                if it.id not in ranked_ids:
+                    ranked_ids.add(it.id)
+                    ranked.append(it)
+
+        # One order across scopes. Python's sort is stable, so equal scores keep
+        # scope order (the first scope wins, as it does for duplicates above),
+        # and items without a score go last in the order they came.
+        ranked.sort(key=lambda it: (it.rank_score is None, -(it.rank_score or 0.0)))
+        ranked = [it.model_copy(update={"rank": n}) for n, it in enumerate(ranked, start=1)]
+
+        total = (len(facts) + len(preferences) + len(episodes) + len(emotions)
+                 + len(temporal_events) + len(excerpts))
 
         return UnifiedContextResponse(
             facts=facts,
@@ -671,6 +1077,8 @@ class UnifiedContextResponse(BaseModel):
             episodes=episodes,
             emotions=emotions,
             temporal_events=temporal_events,
+            items=ranked,
+            excerpts=excerpts,
             scope_map=scope_map,
             scopes_queried=scopes_queried,
             total_items=total,
@@ -695,7 +1103,14 @@ class UnifiedContextResponse(BaseModel):
         """
         sections: List[str] = []
 
-        if self.facts:
+        # A ranked response is printed as one numbered list in rank order, which
+        # is the point of asking for it: the typed sections below would split
+        # the order back up by type. A by-type response prints as it always did.
+        if self.items:
+            sections.append(self._format_ranked_items(include_scope))
+        typed = not self.items
+
+        if typed and self.facts:
             lines = []
             for f in self.facts:
                 line = f"- {f.content}"
@@ -704,7 +1119,7 @@ class UnifiedContextResponse(BaseModel):
                 lines.append(line)
             sections.append("### Facts\n" + "\n".join(lines))
 
-        if self.preferences:
+        if typed and self.preferences:
             lines = []
             for p in self.preferences:
                 line = f"- {p.content}"
@@ -718,7 +1133,7 @@ class UnifiedContextResponse(BaseModel):
                 lines.append(line)
             sections.append("### Preferences\n" + "\n".join(lines))
 
-        if self.episodes:
+        if typed and self.episodes:
             lines = []
             for e in self.episodes:
                 line = f"- {e.summary}"
@@ -727,7 +1142,7 @@ class UnifiedContextResponse(BaseModel):
                 lines.append(line)
             sections.append("### Episodes\n" + "\n".join(lines))
 
-        if self.emotions:
+        if typed and self.emotions:
             lines = []
             for em in self.emotions:
                 line = f"- {em.emotion_type}: {em.context}"
@@ -741,7 +1156,7 @@ class UnifiedContextResponse(BaseModel):
                 lines.append(line)
             sections.append("### Emotions\n" + "\n".join(lines))
 
-        if self.temporal_events:
+        if typed and self.temporal_events:
             lines = []
             for te in self.temporal_events:
                 line = f"- {te.content}"
@@ -782,6 +1197,22 @@ class UnifiedContextResponse(BaseModel):
             return ""
 
         return "\n\n".join(blocks)
+
+    def _format_ranked_items(self, include_scope: bool) -> str:
+        """``### Memories`` as one numbered list, best first.
+
+        One line per item: ``1. [fact] content``. The type is on the line because
+        the list mixes types, and an excerpt is a quote rather than an extracted
+        memory. With ``include_scope`` the scope follows the type:
+        ``1. [fact, scope: user] content``.
+        """
+        lines = []
+        for n, it in enumerate(self.items, start=1):
+            label = _RANKED_LABELS.get(it.category, it.category or "item")
+            if include_scope:
+                label += f", scope: {self.scope_map.get(it.id, 'unknown')}"
+            lines.append(f"{n}. [{label}] {it.content}")
+        return "### Memories\n" + "\n".join(lines)
 
     def _format_profile_block(self) -> Optional[str]:
         """Render the ``## Caller Profile`` section, or None when empty."""

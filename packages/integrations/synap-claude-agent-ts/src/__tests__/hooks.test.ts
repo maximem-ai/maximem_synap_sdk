@@ -315,7 +315,7 @@ describe('createSynapHooks — failure degradation', () => {
         }),
       },
     });
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const hooks = createSynapHooks({ sdk, userId: 'u1', conversationId: 'conv-1' });
     const cb = extractCallback(hooks);
 
@@ -326,8 +326,8 @@ describe('createSynapHooks — failure degradation', () => {
     // Should still return context from successful fetch
     const r = result as { hookSpecificOutput?: { additionalContext?: string } };
     expect(r.hookSpecificOutput?.additionalContext).toContain('User is a VIP.');
-    expect(errSpy).toHaveBeenCalled();
-    errSpy.mockRestore();
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 
   it('non-2xx sdk.fetch (simulated via thrown error) → {} (graceful)', async () => {

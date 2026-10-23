@@ -1,7 +1,9 @@
 """Tests for create_synap_hooks: Agno pre/post hooks that report the turn.
 
 Documented contract (from hooks.py):
-- 'Silent without a stream': no `listen()`, no events, and nothing over REST.
+- Turns are always written: on the stream when `listen()` is running, over
+  REST (`conversation.record_message`) otherwise, never both. Tool calls,
+  tool results and reasoning are stream-only.
 - 'Never raises': a hook is telemetry and must not interrupt a run.
 - A tool call and its result share Agno's own `tool_call_id`.
 """
@@ -90,18 +92,44 @@ def test_returns_the_kwargs_an_agent_takes():
 
 
 # ---------------------------------------------------------------------------
-# Stream first, and never a REST write on top of it
+# Turns: stream first, REST when there is no stream, never both
 # ---------------------------------------------------------------------------
 
 
-class TestStreamOnlyNoRestDoubleWrite:
-    def test_no_stream_means_no_events_at_all(self):
+class TestTurnsStreamFirstRestFallback:
+    def test_no_stream_writes_each_turn_over_rest_exactly_once(self):
+        """Most users never start listen(); their conversation must still be kept."""
         sdk = _streaming_sdk(is_listening=False)
         pre, post = _hooks(sdk)
         pre(run_input=_run_input(), run_context=_run_context(), user_id="alice")
-        post(run_output=_run_output(), run_context=_run_context(), user_id="alice")
+        post(run_output=_run_output(tools=[_tool_execution()], reasoning_content="hmm"),
+             run_context=_run_context(), user_id="alice")
         sdk.instance.send_message.assert_not_awaited()
+        calls = sdk.conversation.record_message.await_args_list
+        assert [(c.kwargs["role"], c.kwargs["content"]) for c in calls] == [
+            ("user", "where is my order"),
+            ("assistant", "it ships tomorrow"),
+        ]
+        for c in calls:
+            assert c.kwargs["conversation_id"] == "sess-1"
+            assert c.kwargs["user_id"] == "alice"
+            assert c.kwargs["customer_id"] == "acme"
+
+    def test_no_stream_sends_no_tool_or_reasoning_events(self):
+        sdk = _streaming_sdk(is_listening=False)
+        _, post = _hooks(sdk)
+        post(run_output=_run_output(tools=[_tool_execution()], reasoning_content="hmm"),
+             run_context=_run_context(), user_id="alice")
         sdk.instance.record_tool_call.assert_not_awaited()
+        sdk.instance.record_tool_result.assert_not_awaited()
+        sdk.instance.record_thinking.assert_not_awaited()
+
+    def test_no_stream_and_no_conversation_id_writes_nothing(self):
+        sdk = _streaming_sdk(is_listening=False)
+        pre, post = _hooks(sdk)
+        pre(run_input=_run_input(), run_context=_run_context(session_id=""), user_id="alice")
+        post(run_output=_run_output(), run_context=_run_context(session_id=""), user_id="alice")
+        sdk.conversation.record_message.assert_not_awaited()
 
     def test_a_reported_turn_is_NOT_also_written_over_rest(self):
         """The server persists user_message/assistant_message from the stream
@@ -110,7 +138,20 @@ class TestStreamOnlyNoRestDoubleWrite:
         pre, post = _hooks(sdk)
         pre(run_input=_run_input(), run_context=_run_context(), user_id="alice")
         post(run_output=_run_output(), run_context=_run_context(), user_id="alice")
+        assert len(_sent(sdk, "user_message")) == 1
+        assert len(_sent(sdk, "assistant_message")) == 1
         sdk.conversation.record_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_async_hooks_fall_back_to_rest_too(self):
+        sdk = _streaming_sdk(is_listening=False)
+        hooks = create_synap_async_hooks(sdk)
+        await hooks["pre_hooks"][0](
+            run_input=_run_input(), run_context=_run_context(), user_id="alice")
+        await hooks["post_hooks"][0](
+            run_output=_run_output(), run_context=_run_context(), user_id="alice")
+        roles = [c.kwargs["role"] for c in sdk.conversation.record_message.await_args_list]
+        assert roles == ["user", "assistant"]
 
 
 # ---------------------------------------------------------------------------
@@ -412,14 +453,14 @@ def test_agno_still_passes_the_hook_args_we_declare():
         {"run_input": 1, "run_context": 2, "agent": 3, "session": 4,
          "user_id": 5, "debug_mode": 6, "metadata": 7},
     )
-    assert set(pre_args) == {"run_input", "run_context", "user_id"}
+    assert set(pre_args) == {"run_input", "run_context", "session", "user_id"}
 
     post_args = filter_hook_args(
         post,
         {"run_output": 1, "agent": 2, "session": 3, "run_context": 4,
          "user_id": 5, "debug_mode": 6, "metadata": 7},
     )
-    assert set(post_args) == {"run_output", "run_context", "user_id"}
+    assert set(post_args) == {"run_output", "run_context", "session", "user_id"}
 
 
 def test_the_agno_fields_the_hooks_read_still_exist():

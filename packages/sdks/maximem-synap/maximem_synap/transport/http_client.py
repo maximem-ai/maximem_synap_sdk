@@ -4,6 +4,7 @@ import asyncio
 import json
 import random
 import logging
+import threading
 from typing import Any, Dict, Optional, Callable
 from datetime import datetime, timezone
 
@@ -14,6 +15,7 @@ from .base import BaseTransport
 from ..models.errors import (
     SynapError,
     SynapTransientError,
+    SynapPermanentError,
     NetworkTimeoutError,
     RateLimitError,
     ServiceUnavailableError,
@@ -129,10 +131,23 @@ class HTTPTransport:
             if heartbeat_interval is not None
             else self.HEARTBEAT_INTERVAL_SECONDS
         )
-        self._heartbeat_task: Optional["asyncio.Task"] = None
+        # One heartbeat task per event loop, keyed by id(loop).
+        self._heartbeat_tasks: Dict[int, "asyncio.Task"] = {}
 
-        # Create httpx client with timeout + keepalive config
-        self._client = httpx.AsyncClient(
+        # An httpx.AsyncClient keeps pooled connections that belong to the event
+        # loop that opened them, so it cannot be shared across loops: reusing it
+        # on another loop fails with "bound to a different event loop", and on a
+        # loop that has since closed with "Event loop is closed". We therefore
+        # keep one client per running loop, built on first use there. Entries are
+        # (loop, client) keyed by id(loop); the stored loop guards against a
+        # recycled id.
+        self._clients: Dict[int, Any] = {}
+        self._clients_lock = threading.Lock()
+        # Test hook: a client assigned to ``_client`` is used for every loop.
+        self._client_override: Optional[httpx.AsyncClient] = None
+
+    def _build_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
             base_url=self.base_url,
             timeout=httpx.Timeout(
                 connect=self.timeouts.connect,
@@ -143,6 +158,39 @@ class HTTPTransport:
             limits=self._limits,
         )
 
+    def _client_for_loop(self) -> httpx.AsyncClient:
+        """Return the client for the running loop, building it on first use."""
+        if self._client_override is not None:
+            return self._client_override
+        loop = asyncio.get_running_loop()
+        with self._clients_lock:
+            entry = self._clients.get(id(loop))
+            if entry is not None and entry[0] is loop:
+                return entry[1]
+            # Connections owned by a closed loop are already dead; drop them.
+            for key in [k for k, (lp, _) in self._clients.items() if lp.is_closed()]:
+                del self._clients[key]
+            client = self._build_client()
+            self._clients[id(loop)] = (loop, client)
+            return client
+
+    @property
+    def _client(self) -> httpx.AsyncClient:
+        return self._client_for_loop()
+
+    @_client.setter
+    def _client(self, value: httpx.AsyncClient) -> None:
+        self._client_override = value
+
+    @property
+    def _heartbeat_task(self) -> Optional["asyncio.Task"]:
+        """The heartbeat task of the running loop, or None."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        return self._heartbeat_tasks.get(id(loop))
+
     def _ensure_heartbeat(self) -> None:
         """Start the keepalive heartbeat once a running loop exists.
 
@@ -152,13 +200,21 @@ class HTTPTransport:
         """
         if not self._heartbeat_interval:
             return
-        if self._heartbeat_task is not None and not self._heartbeat_task.done():
-            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        self._heartbeat_task = loop.create_task(self._heartbeat_loop())
+        # Loops can run on several threads at once, so guard the bookkeeping.
+        with self._clients_lock:
+            # A task whose loop has closed never finishes, so prune those first.
+            for key in [
+                k for k, t in self._heartbeat_tasks.items()
+                if t.done() or t.get_loop().is_closed()
+            ]:
+                del self._heartbeat_tasks[key]
+            if id(loop) in self._heartbeat_tasks:
+                return
+            self._heartbeat_tasks[id(loop)] = loop.create_task(self._heartbeat_loop())
 
     async def _heartbeat_loop(self) -> None:
         while True:
@@ -172,10 +228,30 @@ class HTTPTransport:
 
     async def close(self) -> None:
         """Close the HTTP client and stop the heartbeat."""
-        if self._heartbeat_task is not None:
-            self._heartbeat_task.cancel()
-            self._heartbeat_task = None
-        await self._client.aclose()
+        current = asyncio.get_running_loop()
+        with self._clients_lock:
+            tasks = list(self._heartbeat_tasks.values())
+            self._heartbeat_tasks.clear()
+            entries = list(self._clients.values())
+            self._clients.clear()
+        for task in tasks:
+            task_loop = task.get_loop()
+            if task_loop is current:
+                task.cancel()
+            elif not task_loop.is_closed():
+                task_loop.call_soon_threadsafe(task.cancel)
+        if self._client_override is not None:
+            await self._client_override.aclose()
+        for loop, client in entries:
+            if loop is current:
+                await client.aclose()
+            elif not loop.is_closed():
+                # Another live loop owns this client; close it there. Best effort,
+                # we do not wait on a loop we do not control.
+                try:
+                    asyncio.run_coroutine_threadsafe(client.aclose(), loop)
+                except RuntimeError:
+                    pass
 
     async def request(
         self,
@@ -377,7 +453,10 @@ class HTTPTransport:
         except Exception:
             error_message = response.text
 
-        if response.status_code == 401:
+        # 403 too, as the JS SDK maps it. With no branch of its own it fell
+        # through to the SynapTransientError at the bottom, which tells a
+        # caller to retry an access refusal that will never succeed.
+        if response.status_code in (401, 403):
             raise AuthenticationError(error_message, correlation_id=correlation_id)
 
         if response.status_code == 402:
@@ -451,6 +530,15 @@ class HTTPTransport:
         if response.status_code >= 500:
             raise ServiceUnavailableError(
                 error_message,
+                correlation_id=correlation_id,
+            )
+
+        # Any other 4xx is the request's fault and will fail the same way
+        # again, so it is permanent, as the JS SDK now raises it. It was a
+        # SynapTransientError, which tells a caller to retry it.
+        if 400 <= response.status_code < 500:
+            raise SynapPermanentError(
+                f"HTTP {response.status_code}: {error_message}",
                 correlation_id=correlation_id,
             )
 

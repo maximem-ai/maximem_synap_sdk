@@ -364,9 +364,9 @@ class TestFailurePaths:
         cb = _hook_callable(
             create_synap_hooks(sdk, user_id="alice", conversation_id="conv-1")
         )
-        with caplog.at_level(logging.ERROR, logger="synap_claude_agent.hooks"):
+        with caplog.at_level(logging.WARNING):
             await cb({"prompt": "hi"}, None, MagicMock())
-        assert any("record_message failed" in r.message for r in caplog.records)
+        assert any("turn write failed" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_failing_sdk_fixture_returns_empty_dict(self, failing_sdk):
