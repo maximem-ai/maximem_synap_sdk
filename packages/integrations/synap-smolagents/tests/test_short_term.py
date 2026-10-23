@@ -7,6 +7,17 @@ from synap_smolagents import synap_st_instructions
 from synap_integrations_common import SynapIntegrationError
 
 
+def _compacted(mock_sdk, block="## Conversation so far (compacted)\nThe budget is 2,400 EUR."):
+    resp = MagicMock()
+    resp.available = True
+    resp.context_block = block
+    resp.history_block = None
+    # Recent turns ride in formatted_context; the agent already sends its own.
+    resp.formatted_context = block + "\n\nuser: where is my order"
+    mock_sdk.conversation.context.get_context_for_prompt = AsyncMock(return_value=resp)
+    return mock_sdk
+
+
 def _unavailable(mock_sdk):
     resp = MagicMock()
     resp.available = False
@@ -43,22 +54,33 @@ def test_rejects_bad_on_error(mock_sdk):
 
 def test_prepends_context_above_instructions(mock_sdk):
     out = synap_st_instructions(
-        mock_sdk, "conv", instructions="You are a helpful assistant."
+        _compacted(mock_sdk), "conv", instructions="You are a helpful assistant."
     )
-    assert "Recent conversation summary" in out
+    assert "2,400 EUR" in out
     assert "You are a helpful assistant." in out
-    assert out.index("Recent conversation summary") < out.index("You are a helpful assistant.")
+    assert out.index("2,400 EUR") < out.index("You are a helpful assistant.")
     assert "<synap_short_term_context>" in out
 
 
 def test_tags_dropped_when_preamble_none(mock_sdk):
     out = synap_st_instructions(
-        mock_sdk, "conv", instructions="BASE",
+        _compacted(mock_sdk), "conv", instructions="BASE",
         preamble_open=None, preamble_close=None,
     )
     assert "<synap_short_term_context>" not in out
-    assert "Recent conversation summary" in out
+    assert "2,400 EUR" in out
     assert "BASE" in out
+
+
+def test_recent_turns_are_not_added_beside_the_agents_own_steps(mock_sdk):
+    out = synap_st_instructions(_compacted(mock_sdk), "conv", instructions="BASE")
+    assert "where is my order" not in out
+
+
+def test_no_compaction_means_bare_instructions(mock_sdk):
+    """The default mock has formatted_context (recent turns) but no compaction
+    block: every one of those turns is in the agent's own steps."""
+    assert synap_st_instructions(mock_sdk, "conv", instructions="BASE") == "BASE"
 
 
 def test_style_flows_to_sdk(mock_sdk):

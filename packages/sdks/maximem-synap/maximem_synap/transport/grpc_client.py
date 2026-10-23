@@ -196,6 +196,7 @@ class GRPCTransport:
         on_message: Optional[Callable[[Dict[str, Any]], None]] = None,
         telemetry_callback: Optional[Callable[[Dict], None]] = None,
         storage_path: Optional[str] = None,
+        on_conversation_state: Optional[Callable[[str, int], None]] = None,
     ):
         self.instance_id = instance_id
         self.host = host or self.DEFAULT_HOST
@@ -207,6 +208,9 @@ class GRPCTransport:
         self.on_reconnect = on_reconnect
         self.on_disconnect = on_disconnect
         self.on_message = on_message
+        # (conversation_id, message_count), sent by the server after it has
+        # written a streamed message. See ConversationState in the proto.
+        self.on_conversation_state = on_conversation_state
         self.telemetry_callback = telemetry_callback
 
         # State
@@ -488,6 +492,17 @@ class GRPCTransport:
 
                 if payload_type == "signal":
                     self._handle_signal(message.signal)
+                    continue
+
+                if payload_type == "conversation_state":
+                    if self.on_conversation_state:
+                        state = message.conversation_state
+                        try:
+                            self.on_conversation_state(
+                                state.conversation_id, int(state.message_count)
+                            )
+                        except Exception as e:
+                            logger.warning(f"Conversation state handler error: {e}")
                     continue
 
                 if payload_type == "context_bundle":
@@ -1009,6 +1024,7 @@ class GRPCTransport:
         served_item_ids: Optional[List[str]] = None,
         scope: str = "",
         source_bundle_ids: Optional[List[str]] = None,
+        query_count: int = 0,
     ) -> None:
         """Emit a ContextUsedEvent over the Listen stream.
 
@@ -1034,6 +1050,7 @@ class GRPCTransport:
             timestamp_ms=now_ms,
             scope=scope or "",
             source_bundle_ids=list(source_bundle_ids or []),
+            query_count=max(0, int(query_count or 0)),
         )
         event = synap_service_pb2.StreamEvent(context_used=used)
         async with self._write_lock:
@@ -1084,9 +1101,26 @@ class GRPCTransport:
                     "entity_id": item.entity_id,
                     "created_at": item.created_at,
                     "event_date": item.event_date or None,
+                    "said_at": item.said_at or None,
                     "valid_until": item.valid_until or None,
                     "temporal_category": item.temporal_category or None,
                     "temporal_confidence": item.temporal_confidence,
+                    # The score the server ranked the item by. Presence matters:
+                    # a stub or a server that predates the field leaves it
+                    # unset, and that reads as "not ranked", never as 0.0.
+                    "rank_score": (
+                        item.rank_score
+                        if "rank_score" in type(item).DESCRIPTOR.fields_by_name
+                        and item.HasField("rank_score")
+                        else None
+                    ),
+                    # The questions the memory answers, which the anticipation
+                    # cache matches against; empty from a server that predates them.
+                    "questions": (
+                        list(item.questions)
+                        if "questions" in type(item).DESCRIPTOR.fields_by_name
+                        else []
+                    ),
                 }
                 for item in item_list.items
             ]
@@ -1107,6 +1141,12 @@ class GRPCTransport:
                 "compaction_id": cc.compaction_id or None,
                 "compacted_at": cc.compacted_at or None,
                 "conversation_id": cc.conversation_id or None,
+                # `getattr` because a stub built from an older proto has no
+                # such field. 0 means the server did not say.
+                "compacted_message_count": int(getattr(cc, "compacted_message_count", 0) or 0),
+                "total_message_count": int(getattr(cc, "total_message_count", 0) or 0),
+                # Compaction v3's framed block; "" from a server before v3.
+                "context_block": getattr(cc, "context_block", "") or None,
             }
 
         return {

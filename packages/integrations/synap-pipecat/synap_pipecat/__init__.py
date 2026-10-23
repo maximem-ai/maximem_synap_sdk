@@ -6,9 +6,12 @@ Pipecat's pipeline is a chain of :class:`FrameProcessor` nodes that exchange
 1. **Before the user context aggregator** — inject relevant memory as an
    extra system message so the LLM sees it before generating its reply.
    Provided here as :class:`SynapMemoryProcessor`.
-2. **After the assistant context aggregator** — capture the user's final
-   transcription and the assistant's streamed response so they can be
-   persisted to a long-term store. Provided here as :class:`SynapRecorder`.
+2. **After the assistant context aggregator** — record each completed turn
+   to Synap: on the gRPC stream, which the first turn opens if you did not
+   (``SYNAP_AUTO_LISTEN=false`` turns that off), and over REST only when the
+   stream cannot carry it. Once Synap has compacted the conversation, the
+   shared context's earlier turns are replaced by the compaction. Provided
+   here as :class:`SynapRecorder`; pass it the shared ``context=``.
 
 Typical wiring::
 
@@ -36,7 +39,13 @@ Synap blip must never break a live call; writes surface as
 ``SynapIntegrationError`` via ``ErrorFrame``).
 """
 
+from synap_pipecat.compaction import splice_synap_history
 from synap_pipecat.processors import SynapMemoryProcessor, SynapRecorder
 from synap_pipecat.short_term import SynapShortTermProcessor
 
-__all__ = ["SynapMemoryProcessor", "SynapRecorder", "SynapShortTermProcessor"]
+__all__ = [
+    "SynapMemoryProcessor",
+    "SynapRecorder",
+    "SynapShortTermProcessor",
+    "splice_synap_history",
+]

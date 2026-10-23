@@ -40,17 +40,14 @@ for await (const message of query({
 }
 ```
 
-`createSynapHooks` installs six hooks, not one. Five of them only do anything
-while a Synap stream is open; see the next section.
+`createSynapHooks` installs seven hooks, not one. The first prompt opens
+Synap's live stream by itself; see the next section.
 
 ### 1b. The live stream — what the agent is doing, as it does it
 
-Synap's `Listen` stream carries five per-turn events. Open one and the hooks
-above report four of them with no further wiring:
-
-```ts
-await sdk.instance.listen();   // that is the whole opt-in
-```
+Synap's `Listen` stream carries five per-turn events. The hooks above open the
+stream on the first event (no `sdk.instance.listen()` call needed) and report
+four of them:
 
 | Synap event | Hook | Persisted? |
 | --- | --- | --- |
@@ -60,20 +57,33 @@ await sdk.instance.listen();   // that is the whole opt-in
 | `assistant_message` | `Stop` | yes, and **this is the event that wakes the anticipation agent** |
 | end of session | `SessionEnd` | — |
 
-Two things worth knowing:
+Things worth knowing:
 
 - **`agent_thinking` is not reported**, because the Claude Agent SDK exposes no
-  hook carrying the model's reasoning text. Four of the five events is what the
-  framework makes available, and we would rather say so than invent a signal.
+  hook carrying the model's reasoning text.
 - **Stream first, REST only as a fallback, never both.** The server persists a
-  turn it receives on the stream itself, so the hook skips
-  `sdk.conversation.record_message` when the stream accepted the turn and falls
-  back to it when there is no stream or the send failed.
+  turn it receives on the stream itself, so a turn goes over REST
+  (`sdk.conversation.record_message`) only when the stream cannot open. The
+  assistant's reply is written the same way.
+- **Opt out** with `SYNAP_AUTO_LISTEN=false` (or `setAutoListen(sdk, false)`):
+  turns then go over REST and the stream-only events are not sent. A stream you
+  opened with `listen()` yourself is used either way. The stream does not keep a
+  plain `node script.js` alive once your work is done.
+- `recordUserPrompts: false` stops the user's prompt being recorded. The
+  assistant's reply and the tool events are not affected by it.
 
-If you never call `listen()`, behaviour is exactly what it was before: the
-prompt is recorded over REST and nothing else is sent. `recordUserPrompts:
-false` turns off both halves of the conversation on both paths; it does not
-affect tool events, which are never persisted.
+### 1c. Synap's compaction
+
+Claude Code owns the transcript and runs its own compaction, and the hook
+surface cannot replace either: `PreCompact` and `PostCompact` receive input and
+return nothing the CLI reads, and `additionalContext` only ever adds a message.
+What `createSynapHooks` does instead is add Synap's compaction block as
+`additionalContext`: on the first prompt (a new process on an existing Synap
+conversation), whenever Synap compacts again, and from a `SessionStart` hook
+with `source: "compact"`, which fires right after the CLI replaced its history
+with its own summary and discarded what was added before. Only the compaction
+block goes in, never the turns after it, which the transcript already holds.
+`createSynapShortTermHook` injects the same block, once per compaction.
 
 ### 2. MCP tools — explicit read/write
 

@@ -1,23 +1,30 @@
 """Synap hooks for the Claude Agent SDK.
 
-Wires a ``UserPromptSubmit`` hook that:
+Hooks that:
 
-1. Fetches Synap context for the incoming prompt and returns it via
-   ``hookSpecificOutput.additionalContext`` — the SDK stitches that into
-   Claude's prompt automatically.
-2. Records the user's prompt back to Synap conversation history so future
-   turns can recall it.
+1. ``UserPromptSubmit``: fetch Synap context for the incoming prompt and return
+   it via ``hookSpecificOutput.additionalContext``, which the SDK stitches into
+   Claude's prompt. That is the user's long-term memory and, through
+   :func:`synap_claude_agent.short_term.history_context`, Synap's compaction of
+   this conversation when Claude Code's transcript does not already hold it.
+   The user's prompt is recorded back to Synap too.
+2. ``PreToolUse`` / ``PostToolUse``: report tool calls and results.
+3. ``Stop``: record the agent's reply (``last_assistant_message``) and end the
+   session.
+4. ``PreCompact``: when Claude Code is about to compact the transcript, hand its
+   summarizer Synap's compaction to build on.
 
-The hook NEVER raises. A failing Synap call returns ``{}`` (no additional
+The hooks NEVER raise. A failing Synap call returns ``{}`` (no additional
 context, no block) so agent runs continue uninterrupted. This mirrors the
 policy we use for LangChain's SynapCallbackHandler and MAF's
-SynapContextProvider.after_run — context providers must not crash the agent.
+SynapContextProvider.after_run: context providers must not crash the agent.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+import weakref
+from typing import Any, Dict, Optional
 
 from claude_agent_sdk import HookMatcher
 from claude_agent_sdk.types import (
@@ -27,12 +34,20 @@ from claude_agent_sdk.types import (
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
     end_session,
+    fetch_compacted_history,
+    is_synap_history,
+    record_turn,
     report_tool_call,
     report_tool_result,
-    report_turn,
 )
 
+from synap_claude_agent.short_term import history_context
+
 logger = logging.getLogger(__name__)
+
+# What `report_assistant_turn` wrote last, per SDK and conversation, so the Stop
+# hook that reads the same reply does not write it a second time.
+_manual_turns: "weakref.WeakKeyDictionary[Any, Dict[str, str]]" = weakref.WeakKeyDictionary()
 
 
 _DEFAULT_CONTEXT_PREAMBLE = (
@@ -76,20 +91,28 @@ def create_synap_hooks(
 
     Stream events
     -------------
-    When the application has an active ``sdk.instance.listen()`` stream, these
-    hooks also report the run on it: the user's turn, every tool call, every
-    tool result, and the end of the session. That is what anticipation reads,
-    and it is what makes the NEXT turn's fetch a cache hit instead of a cold
-    retrieval.
+    The first hook to report opens ``sdk.instance.listen()`` if you have not
+    (``SYNAP_AUTO_LISTEN=false`` stops that), and the user's turn, every tool
+    call, every tool result, the agent's reply and the end of the session go on
+    it. That is what anticipation reads, and it is what makes the NEXT turn's
+    fetch a cache hit instead of a cold retrieval. When the stream cannot carry
+    a turn, the user's and the assistant's turns go over REST instead; tool
+    calls and results exist only on the stream.
 
-    Nothing here requires a stream. With no ``listen()`` running, every report
-    is a no-op and these hooks behave exactly as they did before.
+    The reply comes from the ``Stop`` hook's ``last_assistant_message``. Claude
+    Code sends it on versions that carry the field (2.1.308 does); on one that
+    does not, call :func:`report_assistant_turn` yourself once your run returns.
 
-    ⚠ One event cannot come from a hook: ``assistant_message``, which is the
-    event anticipation actually acts on. The Claude Agent SDK's hook inputs do
-    not carry the final assistant text — ``StopHookInput`` has the session id
-    and nothing else. Call :func:`report_assistant_turn` yourself once your run
-    returns, or anticipation never fires for this agent.
+    Claude Code's transcript
+    ------------------------
+    Claude Code owns the transcript, and these hooks cannot replace it: a hook
+    can add context to a prompt (``additionalContext``) but not remove what the
+    transcript already holds. What they do is add Synap's compaction when the
+    transcript lacks it, and feed it to Claude Code's own summarizer when it
+    compacts. To make a resumed session start from Synap's compaction instead of
+    its own stored transcript, also pass
+    :func:`synap_claude_agent.create_synap_session_store` as
+    ``ClaudeAgentOptions(session_store=...)``.
     """
     if sdk is None:
         raise ValueError("create_synap_hooks requires a non-None sdk")
@@ -129,44 +152,34 @@ def create_synap_hooks(
                 user_id, conv_id, exc, exc_info=True,
             )
 
+        # Before the prompt is recorded: Synap's answer would otherwise end with
+        # the prompt itself.
+        history = ""
+        if conv_id:
+            history = await history_context(
+                sdk, str(conv_id), input_data,
+                site="synap_claude_agent.UserPromptSubmit",
+            )
+
         if record_user_prompts and conv_id:
-            # Stream first, REST only as a fallback, NEVER both.
-            #
-            # ⚠ This used to do both, with a comment saying `record_message`
-            # was "the durable write" and the stream event was "what
-            # anticipation reads", so "the two are not interchangeable". That
-            # comment was wrong. The server persists `user_message` off the
-            # stream itself (`grpc/servicer.py:489`), so sending both stored
-            # the turn twice and put it through extraction twice. Found by an
-            # agent reading this file while working on a sibling package.
-            sent = await report_turn(
+            # The stream, opened if need be; REST only when it cannot carry the
+            # turn. Never both: the server persists a streamed turn itself.
+            await record_turn(
                 sdk, role="user", content=str(prompt),
                 conversation_id=str(conv_id), user_id=user_id,
                 customer_id=customer_id,
             )
-            if not sent:
-                try:
-                    await sdk.conversation.record_message(
-                        conversation_id=conv_id,
-                        role="user",
-                        content=str(prompt),
-                        user_id=user_id,
-                        customer_id=customer_id,
-                    )
-                except Exception as exc:  # noqa: BLE001 — must not raise
-                    logger.error(
-                        "synap_claude_agent.UserPromptSubmit: record_message failed "
-                        "conversation_id=%s error=%s",
-                        conv_id, exc, exc_info=True,
-                    )
 
-        if not formatted:
+        parts = [preamble.format(body=formatted)] if formatted else []
+        if history:
+            parts.append(history)
+        if not parts:
             return {}
 
         return {
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
-                "additionalContext": preamble.format(body=formatted),
+                "additionalContext": "\n\n".join(parts),
             }
         }
 
@@ -221,16 +234,51 @@ def create_synap_hooks(
         tool_use_id: Optional[str],
         context: HookContext,
     ) -> dict[str, Any]:
-        """Close the session so the turn is finalised now rather than on a timer."""
-        conv_id = conversation_id or _field(input_data, "session_id", None) or ""
-        await end_session(sdk, str(conv_id))
+        """Record the reply, then close the session so the turn is finalised now
+        rather than on a timer."""
+        conv_id = str(conversation_id or _field(input_data, "session_id", None) or "")
+        reply = _field(input_data, "last_assistant_message", None)
+        if conv_id and isinstance(reply, str) and reply.strip() and not is_synap_history(reply):
+            if _manual_turns.get(sdk, {}).pop(conv_id, None) != reply:
+                await record_turn(
+                    sdk, role="assistant", content=reply,
+                    conversation_id=conv_id, user_id=user_id, customer_id=customer_id,
+                )
+        await end_session(sdk, conv_id)
         return {}
+
+    async def on_pre_compact(
+        input_data: Any,
+        tool_use_id: Optional[str],
+        context: HookContext,
+    ) -> dict[str, Any]:
+        """Give Claude Code's summarizer Synap's compaction to build on.
+
+        Claude Code appends ``systemMessage`` to its summarization prompt as
+        "Additional Instructions" (checked on Claude Code 2.1.308). Its summary
+        replaces its transcript, so this is the only point where Synap's view can
+        reach what Claude Code keeps.
+        """
+        conv_id = conversation_id or _field(input_data, "session_id", None)
+        if not conv_id:
+            return {}
+        history = await fetch_compacted_history(sdk, str(conv_id))
+        if history is None:
+            return {}
+        return {
+            "systemMessage": (
+                "Synap holds this conversation's own compaction, given below. Build "
+                "your summary on it and keep its names, figures and decisions "
+                "exactly.\n\n" + history.preamble
+            )
+        }
 
     return {
         "UserPromptSubmit": [HookMatcher(hooks=[on_user_prompt_submit])],
         "PreToolUse": [HookMatcher(hooks=[on_pre_tool_use])],
         "PostToolUse": [HookMatcher(hooks=[on_post_tool_use])],
         "Stop": [HookMatcher(hooks=[on_stop])],
+        "PreCompact": [HookMatcher(hooks=[on_pre_compact])],
     }
 
 
@@ -242,25 +290,24 @@ async def report_assistant_turn(
     user_id: str,
     customer_id: str = "",
 ) -> bool:
-    """Report the agent's reply. Call this once your run returns.
+    """Write the agent's reply yourself. Returns whether it was written.
 
-    This cannot be a hook. The Claude Agent SDK's hook inputs do not carry the
-    final assistant text: ``StopHookInput`` has a session id and a flag, and
-    nothing else. So the one event anticipation actually acts on is the one
-    event the hooks cannot produce.
-
-    Without it, Synap sees the question and the tools and never learns what was
-    answered, and the next turn's fetch is a cold retrieval. One line at the
-    end of your run is the whole cost.
-
-    Returns whether it was sent: False when no ``listen()`` stream is running,
-    which is not an error.
+    The ``Stop`` hook already writes it, from ``last_assistant_message``, so most
+    callers never need this. It is for a Claude Code that does not send that
+    field, or a run without the hooks; if you call it and also use them, the
+    reply is written once.
     """
-    return await report_turn(
+    written = await record_turn(
         sdk, role="assistant", content=content or "",
         conversation_id=conversation_id, user_id=user_id,
         customer_id=customer_id,
     )
+    if written:
+        try:
+            _manual_turns.setdefault(sdk, {})[conversation_id] = content
+        except TypeError:  # an SDK that cannot be weakly referenced
+            pass
+    return written
 
 
 def _field(input_data: Any, name: str, default: Any) -> Any:

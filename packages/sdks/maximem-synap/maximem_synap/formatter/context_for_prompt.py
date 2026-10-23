@@ -28,7 +28,7 @@ from ..models.context import (
     CompactionResponse,
 )
 from ..models.enums import CompactionLevel
-from ..cache.short_term_store import CachedShortTermContext
+from ..cache.short_term_store import CONTEXT_BLOCK_PREFIX, CachedShortTermContext
 
 
 logger = logging.getLogger("synap.sdk.formatter.context_for_prompt")
@@ -78,6 +78,8 @@ class LocalContextFormatter:
             recent_message_count=len(recent),
             compacted_message_count=_count_compacted_messages(entry),
             total_message_count=len(recent) + _count_compacted_messages(entry),
+            context_block=_block(entry),
+            compaction_id=entry.compaction_id,
         )
 
     @staticmethod
@@ -203,11 +205,28 @@ def _format_block(
     return _format_structured(entry, recent)
 
 
+def _block(entry: CachedShortTermContext) -> Optional[str]:
+    """The v3 block, which is printed as received, once, under its own header."""
+    if entry.context_block:
+        return entry.context_block.strip()
+    if entry.summary and entry.summary.startswith(CONTEXT_BLOCK_PREFIX):
+        return entry.summary.strip()
+    return None
+
+
 def _format_structured(
     entry: CachedShortTermContext,
     recent: List[RecentMessage],
 ) -> str:
     parts: List[str] = []
+    block = _block(entry)
+    if block:
+        parts.append(block)
+        if recent:
+            parts.append(f"## Recent Turns ({len(recent)})")
+            for m in recent:
+                parts.append(f"**{m.role}**: {m.content}")
+        return "\n\n".join(p for p in parts if p).strip()
     if entry.summary:
         parts.append("## Summary")
         parts.append(entry.summary.strip())
@@ -250,11 +269,14 @@ def _format_narrative(
     recent: List[RecentMessage],
 ) -> str:
     parts: List[str] = []
-    if entry.summary:
+    block = _block(entry)
+    if block:
+        parts.append(block)
+    elif entry.summary:
         parts.append(entry.summary.strip())
-    if entry.conversational_paragraph:
+    if not block and entry.conversational_paragraph:
         parts.append(entry.conversational_paragraph.strip())
-    elif entry.factual_paragraph:
+    elif not block and entry.factual_paragraph:
         parts.append(entry.factual_paragraph.strip())
 
     if recent:
@@ -268,6 +290,10 @@ def _format_bullets(
     recent: List[RecentMessage],
 ) -> str:
     parts: List[str] = []
+    block = _block(entry)
+    if block:
+        # The block is structured text already; bulleting it would mangle it.
+        return "\n".join([block] + [f"- {m.role}: {m.content}" for m in recent]).strip()
     if entry.summary:
         parts.append("- Summary: " + entry.summary.strip())
 

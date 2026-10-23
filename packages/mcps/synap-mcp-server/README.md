@@ -67,12 +67,25 @@ assistant's reply as arguments. Set `MCP_STREAM_EVENTS=true` and each logged
 exchange is also reported as a conversation turn on `POST /v1/events/batch`,
 the HTTP door onto the same listening path the gRPC stream feeds, so the
 anticipation agent sees the turn and not only the memory extracted from it.
-There is no gRPC stream here to use: this server holds no SDK, keeps no state
-between requests, and every request can carry a different tenant's key.
+This server does not use the SDK's gRPC stream, as the other integrations do:
+it holds no SDK, keeps no state between requests, and every request can carry a
+different tenant's key, so a stream per key would be an unbounded pool of
+connections that nothing closes. Moving it onto the SDK would be a rewrite of
+its transport for a caller that has no use for what the stream brings back.
+
+Nor does it replace anything of Synap's compaction: the caller's agent keeps
+its own history and no tool here returns a conversation.
 
 It is **off by default**, on purpose. Turning it on adds a second backend call
 per `log_exchange`, writes the turn to conversation history in addition to the
 long-range document, and runs the anticipation agent, which bills model calls.
+
+It is not on by default for a second reason. Synap extracts from a conversation
+when it is compacted, which starts once ten messages have been recorded.
+Recording every exchange as turns *instead of* the long-range document would
+hold the memory back until then (the next `recall_context` finds nothing, and
+there is no `ingestion_id` to check); recording them *as well* extracts each
+exchange twice.
 
 What does not change either way: `log_exchange` still queues the long-range
 document and still returns the `ingestion_id` that `check_memory_status` and

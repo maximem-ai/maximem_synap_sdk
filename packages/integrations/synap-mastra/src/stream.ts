@@ -1,14 +1,12 @@
-// Report a Mastra turn on the Synap stream.
+// Report a Mastra run to Synap: the turns, and on the stream everything between.
 //
-// `SynapMemory` was already the one place every message in a Mastra Agent run
-// passes through, but it only ever wrote the two ends of a turn over REST:
-// the user's text and the assistant's text. Synap never saw the middle. The
-// reasoning, the tools the agent called and what they returned have no durable
-// home anywhere else, and they are exactly what lets the anticipation agent
-// predict the next turn. Without them every fetch is a cold retrieval.
+// A Mastra Agent run produces more than the two ends of a turn. The reasoning,
+// the tools the agent called and what they returned have no durable home
+// anywhere else, and they are exactly what lets the anticipation agent predict
+// the next turn. Without them every fetch is a cold retrieval.
 //
-// `saveMessages` receives `MastraDBMessage`s, whose `content.parts` carry all
-// five events:
+// The messages Mastra hands over (`MastraDBMessage`s, from the output processor
+// or from `saveMessages`) carry all five events in `content.parts`:
 //
 //   ===========================  ==========================================
 //   part                          what it is
@@ -23,22 +21,22 @@
 // `toolInvocation.toolCallId` is Mastra's own id and is the same value on the
 // call and on the result, so the two travel paired.
 //
-// Two rules hold throughout, and they come from `stream-events.ts`.
+// Rules, from `stream-events.ts`.
 //
-// *Silent without a stream.* Everything here needs an active
-// `sdk.instance.listen()`. Most callers do not have one, and for them
-// `report()` returns `false` before it touches the message. Reporting must not
-// change behaviour for someone who has not opted into streaming.
+// *The stream is the default.* The first report opens it, so a caller who never
+// called `sdk.instance.listen()` still gets all five events. The turns
+// themselves are written through `recordTurn`: stream first, REST when the
+// stream cannot carry them, never both. Reasoning and tool events are
+// stream-only. `SYNAP_AUTO_LISTEN=false` keeps the stream closed.
 //
 // *Never throws.* This runs inside the Agent's own save path, where an
 // exception from telemetry would end the run. No context is worth that.
 
 import {
+  recordTurn,
   reportReasoning,
   reportToolCall,
   reportToolResult,
-  reportTurn,
-  streamIsActive,
 } from "./stream-events.js";
 
 export interface SynapStreamOptions {
@@ -114,30 +112,25 @@ export class SynapMastraStreamReporter {
   ) {}
 
   /**
-   * Report one saved message.
+   * Record one message: its turn, and on the stream its parts.
    *
-   * Returns whether the *turn* is now the server's. `true` means the server
-   * received a `user_message` or `assistant_message` for this text and will
-   * persist it itself, so the caller must NOT also write it over
-   * `conversation.record_message`: that would store the turn twice.
+   * Returns whether the *turn* is now Synap's, written on the stream or over
+   * REST (`recordTurn` picks, and never does both). Reasoning and tool events
+   * never persist as conversation, so they never make this `true`.
    *
-   * `false` means nothing was persisted by this call and the caller's ordinary
-   * REST write is still the only record of the turn. The reasoning and tool
-   * events never persist as conversation, so they never make this `true`.
+   * A turn is remembered once written, on either path, so Mastra re-saving a
+   * message it has already saved does not write it again.
    */
   async report(message: unknown, info: SynapStreamMessageInfo): Promise<boolean> {
     // A system message is the instructions, not a turn, and the stream has no
-    // event for one. It stays on the REST path exactly as it was.
+    // event for one.
     if (info.role !== "user" && info.role !== "assistant") return false;
     // Every event needs a conversation to belong to.
     if (!info.threadId) return false;
-    // The early exit that keeps a non-streaming user's behaviour identical.
-    if (!streamIsActive(this.sdk)) return false;
     try {
       return await this.dispatch(message, info);
     } catch {
-      // A tap must never break the Agent's run, and a half-reported message
-      // must fall back to REST rather than go missing.
+      // A tap must never break the Agent's run.
       return false;
     }
   }
@@ -176,17 +169,16 @@ export class SynapMastraStreamReporter {
     const key = messageId
       ? `turn:${messageId}:${info.role}:${fingerprint(info.text)}`
       : "";
-    // Already on the stream, so the server already has this turn. Telling the
-    // caller it was sent is what stops the REST write duplicating it.
+    // Already written, so the server already has this turn.
     if (key && this.sent.has(key)) return true;
 
-    const sent = await reportTurn(this.sdk, {
+    const sent = await recordTurn(this.sdk, {
       ...scope,
       role: info.role,
       content: info.text,
     });
-    // Only remembered once it actually went out, so a failed send falls back
-    // to REST now and is not suppressed on a retry.
+    // Only remembered once it actually went out, so a failed write is not
+    // suppressed on a retry.
     if (sent && key) this.sent.add(key);
     return sent;
   }
