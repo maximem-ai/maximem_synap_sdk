@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import sqlite3
 from pathlib import Path
 from typing import Optional, Dict, Any, Sequence
 
@@ -146,8 +147,20 @@ class CacheManager:
         if backend_key in self._backends:
             return self._backends[backend_key]
 
-        # Create new backend
-        backend = SQLiteCacheBackend(db_path)
+        # Create new backend. An unwritable storage path (a read-only
+        # container) raised a bare PermissionError out of the first fetch,
+        # past every `except SynapError`; it now turns the cache off, as the
+        # turn store already does.
+        try:
+            backend = SQLiteCacheBackend(db_path)
+        except (OSError, sqlite3.Error) as exc:
+            logger.warning(
+                "Response cache at %s unavailable (%s); continuing without a local "
+                "cache. Set storage_path to a writable folder, or cache_backend=None.",
+                db_path, exc,
+            )
+            self.enabled = False
+            return NullCacheBackend()
         self._backends[backend_key] = backend
         return backend
 
