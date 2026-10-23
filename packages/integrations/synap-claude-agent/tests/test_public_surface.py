@@ -102,12 +102,13 @@ def test_no_unexpected_public_names_in_all():
     `report_assistant_turn` joined them when the hooks started reporting runs
     on the Synap stream. It is public deliberately and cannot be a hook: the
     Claude Agent SDK's hook inputs never carry the final assistant text, and
-    that is the one event anticipation acts on.
+    that is the one event anticipation acts on. `create_synap_session_store`
+    is the one place the SDK lets a caller decide what a resumed session starts from.
     """
     import synap_claude_agent
     expected = {
         "create_synap_hooks", "create_synap_mcp_server", "create_synap_st_hook",
-        "report_assistant_turn",
+        "report_assistant_turn", "create_synap_session_store",
     }
     assert set(synap_claude_agent.__all__) == expected
 

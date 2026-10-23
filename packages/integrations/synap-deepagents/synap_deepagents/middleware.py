@@ -3,9 +3,14 @@
 Two middlewares, for the two kinds of context:
 
 - :class:`SynapMemoryMiddleware` — long-term memory, retrieved using the user's
-  actual question as the search query.
-- :class:`SynapShortTermMiddleware` — compacted history of the current
-  conversation, refreshed each turn.
+  actual question as the search query. Given a ``conversation_id`` (and a
+  ``user_id``) it also records the conversation on Synap's gRPC stream, which the
+  first turn opens, and puts Synap's compaction in place of the turns before the
+  current one: the job of
+  :class:`~synap_deepagents.stream.SynapStreamMiddleware`, which then must not
+  be added as well.
+- :class:`SynapShortTermMiddleware` — Synap's compaction of the current
+  conversation in place of the turns it covers, read on every model call.
 
 **Why not just use deepagents' own ``MemoryMiddleware``?** Because it cannot ask
 a question. It calls ``backend.download_files(sources)`` with a list of paths and
@@ -43,7 +48,9 @@ from deepagents.middleware._utils import append_to_system_message
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import run_async
 
-from synap_deepagents.short_term import compose_system_prompt, fetch_st_block
+from synap_deepagents.history import fetch_history, inner, is_spliced, splice_request
+from synap_deepagents.short_term import compose_system_prompt
+from synap_deepagents.stream import SynapStreamMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -78,18 +85,6 @@ class SynapMemoryStateUpdate(TypedDict):
 
     synap_memory: str
     synap_memory_query: str
-
-
-class SynapShortTermState(AgentState):
-    """State schema for :class:`SynapShortTermMiddleware`."""
-
-    synap_short_term: NotRequired[Annotated[str, PrivateStateAttr]]
-
-
-class SynapShortTermStateUpdate(TypedDict):
-    """State update emitted by :class:`SynapShortTermMiddleware`."""
-
-    synap_short_term: str
 
 
 def _latest_user_text(messages: Optional[List[Any]]) -> str:
@@ -138,7 +133,15 @@ class SynapMemoryMiddleware(AgentMiddleware[SynapMemoryState, ContextT, Response
         user_id: External user ID. At least one of ``user_id`` or
             ``customer_id`` is required.
         customer_id: External customer ID.
-        conversation_id: Optional conversation scope.
+        conversation_id: Optional conversation scope. With ``user_id`` as well,
+            this also turns on the conversation half: the user's question, the
+            reasoning, each tool call and result and the answer are recorded on
+            Synap's gRPC stream (opened by the first one; ``SYNAP_AUTO_LISTEN=false``
+            turns that off), and once Synap has compacted the conversation the
+            model is sent the compaction in place of the turns before the current
+            one. Do not also add a ``SynapStreamMiddleware`` for the same
+            conversation: this already runs one, and the events would go out
+            twice.
         max_results: ``max_results`` passed to ``sdk.fetch``.
         mode: ``"fast"`` (default) or ``"accurate"``. This sits on every turn,
             so ``"fast"`` is the sane default.
@@ -205,6 +208,17 @@ class SynapMemoryMiddleware(AgentMiddleware[SynapMemoryState, ContextT, Response
         self.user_id = user_id
         self.customer_id = customer_id
         self.conversation_id = conversation_id
+        # The conversation half. Needs both ids: a turn belongs to a user.
+        self._conversation: Optional[SynapStreamMiddleware] = (
+            SynapStreamMiddleware(
+                sdk=sdk,
+                conversation_id=conversation_id,
+                user_id=user_id,
+                customer_id=customer_id or "",
+            )
+            if conversation_id and user_id
+            else None
+        )
         self.max_results = max_results
         self.mode = mode
         self.precision_level = precision_level
@@ -248,6 +262,8 @@ class SynapMemoryMiddleware(AgentMiddleware[SynapMemoryState, ContextT, Response
         self, state: SynapMemoryState, runtime: Any, config: Optional[RunnableConfig] = None
     ) -> Optional[SynapMemoryStateUpdate]:
         """Retrieve memory for the pending user message."""
+        if self._conversation is not None:
+            await self._conversation.abefore_agent(state, runtime)
         query = _latest_user_text(state.get("messages"))
         if self._should_skip(state, query):
             return None
@@ -282,7 +298,10 @@ class SynapMemoryMiddleware(AgentMiddleware[SynapMemoryState, ContextT, Response
         handler: Callable[[ModelRequest[ContextT]], ModelResponse[ResponseT]],
     ) -> ModelResponse[ResponseT]:
         """Inject memory, then delegate."""
-        return handler(self.modify_request(request))
+        request = self.modify_request(request)
+        if self._conversation is not None:
+            return self._conversation.wrap_model_call(request, handler)
+        return handler(request)
 
     async def awrap_model_call(
         self,
@@ -290,28 +309,63 @@ class SynapMemoryMiddleware(AgentMiddleware[SynapMemoryState, ContextT, Response
         handler: Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse[ResponseT]]],
     ) -> ModelResponse[ResponseT]:
         """Async variant of :meth:`wrap_model_call`."""
-        return await handler(self.modify_request(request))
+        request = self.modify_request(request)
+        if self._conversation is not None:
+            return await self._conversation.awrap_model_call(request, handler)
+        return await handler(request)
+
+    # ── the conversation half: only does anything with a conversation_id ──
+
+    async def aafter_model(self, state: Any, runtime: Any) -> Optional[dict]:
+        if self._conversation is not None:
+            await self._conversation.aafter_model(state, runtime)
+        return None
+
+    def after_model(self, state: Any, runtime: Any) -> Optional[dict]:
+        if self._conversation is not None:
+            self._conversation.after_model(state, runtime)
+        return None
+
+    async def aafter_agent(self, state: Any, runtime: Any) -> Optional[dict]:
+        if self._conversation is not None:
+            await self._conversation.aafter_agent(state, runtime)
+        return None
+
+    def after_agent(self, state: Any, runtime: Any) -> Optional[dict]:
+        if self._conversation is not None:
+            self._conversation.after_agent(state, runtime)
+        return None
+
+    async def awrap_tool_call(self, request: Any, handler: Callable[[Any], Awaitable[Any]]) -> Any:
+        if self._conversation is not None:
+            return await self._conversation.awrap_tool_call(request, handler)
+        return await handler(request)
+
+    def wrap_tool_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
+        if self._conversation is not None:
+            return self._conversation.wrap_tool_call(request, handler)
+        return handler(request)
 
 
-class SynapShortTermMiddleware(
-    AgentMiddleware[SynapShortTermState, ContextT, ResponseT]
-):
-    """Inject Synap short-term conversation context, refreshed every turn.
+class SynapShortTermMiddleware(AgentMiddleware[AgentState, ContextT, ResponseT]):
+    """Replace the turns Synap has compacted with the compaction, on every model call.
 
-    Use this instead of :func:`~synap_deepagents.short_term.synap_st_instructions`
-    when the agent is long-running and the static snapshot taken at construction
-    would go stale.
+    Once Synap has compacted the conversation, the model is sent the compaction
+    in the system message, then the turns Synap holds after it, then the current
+    turn (tool calls and results intact). Until then, and whenever Synap cannot
+    answer, the request goes through untouched. The agent's own summarizer stays
+    installed as the fallback. It is asked for on every model call, not once per
+    invocation, because a long tool loop can cross the compaction partway.
 
     Args:
         sdk: An initialised :class:`~maximem_synap.MaximemSynapSDK`.
         conversation_id: Synap conversation ID. **Required.**
         style: One of ``"structured"``, ``"narrative"``, ``"bullet_points"``.
-        on_error: ``"fallback"`` (default) injects nothing on SDK failure;
-            ``"raise"`` propagates ``SynapIntegrationError``.
-        preamble_open / preamble_close: Wrapping tags for the injected block.
+            Kept for compatibility; the compaction has one rendering.
+        on_error: ``"fallback"`` (default) leaves the request alone on SDK
+            failure; ``"raise"`` propagates ``SynapIntegrationError``.
+        preamble_open / preamble_close: Wrapping tags for the compaction.
     """
-
-    state_schema = SynapShortTermState
 
     def __init__(
         self,
@@ -331,43 +385,30 @@ class SynapShortTermMiddleware(
         self.preamble_open = preamble_open
         self.preamble_close = preamble_close
 
-    async def abefore_agent(
-        self, state: SynapShortTermState, runtime: Any, config: Optional[RunnableConfig] = None
-    ) -> SynapShortTermStateUpdate:
-        """Fetch the short-term block for this turn."""
-        block = await fetch_st_block(
+    async def _asplice(self, request: ModelRequest[ContextT]) -> ModelRequest[ContextT]:
+        if is_spliced(request):
+            return request  # an outer layer already did
+        history = await fetch_history(
             self.sdk,
             self.conversation_id,
             style=self.style,
             on_error=self.on_error,  # type: ignore[arg-type]
             site="synap_deepagents.SynapShortTermMiddleware",
         )
-        return SynapShortTermStateUpdate(synap_short_term=block)
-
-    def before_agent(
-        self, state: SynapShortTermState, runtime: Any, config: Optional[RunnableConfig] = None
-    ) -> SynapShortTermStateUpdate:
-        """Synchronous entry point. See :meth:`abefore_agent`."""
-        return run_async(self.abefore_agent(state, runtime, config))
-
-    def modify_request(self, request: ModelRequest[ContextT]) -> ModelRequest[ContextT]:
-        """Prepend the short-term block to the system message."""
-        block = (request.state.get("synap_short_term") or "").strip()
-        if not block:
+        if history is None:
             return request
-        wrapped = compose_system_prompt(
-            block, "", self.preamble_open, self.preamble_close
+        block = compose_system_prompt(
+            inner(history.preamble), "", self.preamble_open, self.preamble_close
         )
-        new_system_message = append_to_system_message(request.system_message, wrapped)
-        return request.override(system_message=new_system_message)
+        return splice_request(request, history, block)
 
     def wrap_model_call(
         self,
         request: ModelRequest[ContextT],
         handler: Callable[[ModelRequest[ContextT]], ModelResponse[ResponseT]],
     ) -> ModelResponse[ResponseT]:
-        """Inject short-term context, then delegate."""
-        return handler(self.modify_request(request))
+        """Splice Synap's history in, then delegate."""
+        return handler(run_async(self._asplice(request)))
 
     async def awrap_model_call(
         self,
@@ -375,7 +416,7 @@ class SynapShortTermMiddleware(
         handler: Callable[[ModelRequest[ContextT]], Awaitable[ModelResponse[ResponseT]]],
     ) -> ModelResponse[ResponseT]:
         """Async variant of :meth:`wrap_model_call`."""
-        return await handler(self.modify_request(request))
+        return await handler(await self._asplice(request))
 
 
 __all__ = [

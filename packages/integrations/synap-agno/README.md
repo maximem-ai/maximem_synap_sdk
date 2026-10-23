@@ -15,15 +15,18 @@ Requires `agno>=2.0`, `maximem-synap>=0.2.0`.
 ```python
 from agno.agent import Agent
 from agno.models.openai import OpenAIChat
+import asyncio
+
 from maximem_synap import MaximemSynapSDK
 from synap_agno import SynapDb, create_synap_hooks
 
 sdk = MaximemSynapSDK(api_key="sk-...")
+asyncio.run(sdk.initialize())  # required: without it every Synap call fails
 
 agent = Agent(
     db=SynapDb(sdk, customer_id="acme"),
     model=OpenAIChat(id="gpt-4o-mini"),
-    enable_user_memories=True,
+    update_memory_on_run=True,  # Agno 2.5+; enable_user_memories was removed in Agno 3.0
     **create_synap_hooks(sdk, customer_id="acme"),
 )
 
@@ -31,11 +34,18 @@ agent.run("Remember that I prefer tea over coffee", user_id="alice")
 agent.run("What do you remember about me?", user_id="alice")
 ```
 
+For async agents (`await agent.arun(...)`) use `AsyncSynapDb` instead of `SynapDb`.
+
+Synap retrieval answers a question; it cannot list everything stored for a user.
+`get_user_memories(user_id, search_content="...")` returns what matches that topic; with no
+search term it asks `default_query` and returns a best-effort sample.
+
 ## Reporting the turn
 
 `create_synap_hooks` returns the `pre_hooks` / `post_hooks` an `Agent` takes. With
 `sdk.instance.listen()` running they put the whole turn on Synap's live stream, which
-is what the anticipation agent reads:
+is what the anticipation agent reads. The first run opens that stream by itself, so there is
+no `listen()` to call (`SYNAP_AUTO_LISTEN=false` turns that off):
 
 | Event | Source |
 |-------|--------|
@@ -47,9 +57,17 @@ is what the anticipation agent reads:
 
 Notes:
 
-- **Silent without a stream, and never over REST.** No `listen()`, no events. This
-  package has never recorded conversation turns over the REST API and these hooks do
-  not start: writing the turn twice would extract it twice.
+- **The stream opens by default.** The first hook call opens `sdk.instance.listen()` and the
+  turns, tool calls, tool results and reasoning go on it. When the stream cannot carry them
+  (it will not open, or `SYNAP_AUTO_LISTEN=false`), the user and assistant turns go over REST
+  (`conversation.record_message`) under Agno's `session_id` (or your `conversation_id=`);
+  never both. Tool calls, tool results and reasoning need the stream.
+- **Synap's compaction replaces the history Agno sends.** The pre-hook reads Synap's view of the
+  conversation; once Synap has compacted it, the model sees the compaction block and the turns
+  after it instead of the earlier turns Agno stored (the stored session is not changed).
+  Until then, and whenever Synap cannot answer, Agno's own history (and its `compaction=`, if
+  you set one) is sent as before. This needs `db=` on the agent, as Agno's history does, and
+  the hooks on it.
 - **Tool events land at the end of the run, not during it.** Agno's `tool_hooks` fire
   around each call, but the arguments Agno passes them carry no call id
   (`function_call` is bound to the next link in the middleware chain, not to the
@@ -76,5 +94,5 @@ Need durable sessions or traces? Use `SqliteDb` / `PostgresDb` from Agno directl
 
 - **Reads** (`get_user_memory`, `get_user_memories`, `get_all_memory_topics`) degrade gracefully — SDK failures log at `ERROR` and return empty results.
 - **Writes** (`upsert_user_memory`, `upsert_memories`) surface `SynapIntegrationError` so ingestion outages are observable.
-- **Deletes** (`delete_user_memory`, `delete_user_memories`, `clear_memories`) warn once and no-op — Synap has no public delete API. Same contract used by [synap-crewai](../synap-crewai/).
+- **Deletes** (`delete_user_memory`, `delete_user_memories`) call `memories.delete` for the Synap ids `get_user_memories` reports. Any other id (Agno assigns its own when it saves a memory) and `clear_memories` warn once and no-op. A failed delete is logged, not raised.
 - **Stats** (`get_user_memory_stats`) warns once and returns `([], 0)` — Synap doesn't expose aggregate counts.

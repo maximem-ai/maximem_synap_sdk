@@ -19,7 +19,7 @@ class ContextType(str, Enum):
     PREFERENCES = "preferences"
     EPISODES = "episodes"
     EMOTIONS = "emotions"
-    TEMPORAL = "temporal"
+    TEMPORAL = "temporal_events"
     ALL = "all"
 
 

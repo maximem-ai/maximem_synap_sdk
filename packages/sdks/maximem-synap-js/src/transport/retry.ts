@@ -89,6 +89,12 @@ export function shouldRetry(input: RetryDecisionInput): RetryDecision {
     return { retry: false, delaySeconds: 0, reason: 'not_transient' };
   }
 
+  // The trial cap and an inactive subscription arrive as 429 but clear with a
+  // plan change or a new cycle, never within a retry.
+  if (error instanceof RateLimitError && error.reason) {
+    return { retry: false, delaySeconds: 0, reason: 'credit_stop' };
+  }
+
   const idempotent = input.idempotent ?? IDEMPOTENT_METHODS.has(method.toUpperCase());
   if (outcomeUnknown && !idempotent) {
     // The request may have been processed. For ingestion that means a retry

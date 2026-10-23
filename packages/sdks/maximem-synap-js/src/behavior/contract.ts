@@ -58,6 +58,46 @@ export interface BehaviorContract {
     stop_words: string[];
     alias_token: { pattern: string; note: string };
   };
+  semantic_match: {
+    model: string;
+    mode: 'bm25' | 'semantic';
+    min_cosine: number;
+    serve_min_cosine: number;
+    asked_kind: boolean;
+    max_queries: number;
+    item_questions: boolean;
+    canonical_query: 'off' | 'canon' | 'both';
+    self_pronouns: Record<string, [string, string][] | string>;
+    asked_details: Record<string, { query: string; value: string } | string>;
+    bundle_serve_min_cosine: number;
+    sure_min_cosine: number;
+    race_deadline_ms: number;
+  };
+  history_search: {
+    max_excerpts: number;
+    max_words_per_excerpt: number;
+    min_matched_terms: number;
+    rrf_k: number;
+    recency_weight: number;
+    min_cosine?: number;
+    previous_turns?: number;
+    previous_turn_words?: number;
+    rare_term_max_share?: number;
+    tool_result_max_chars?: number;
+    passages?: boolean;
+    passages_per_turn?: number;
+    early_query?: { pattern: string; flags?: string; note?: string };
+    asked_kinds?: Record<string, { query: string; value: string } | string>;
+    irregular_forms?: Record<string, string>;
+    heading: string;
+    store_limits: {
+      max_conversations: number;
+      max_turns_per_conversation: number;
+      max_bytes_per_conversation: number;
+      idle_ttl_seconds: number;
+      max_file_bytes: number;
+    };
+  };
 }
 
 export const CONTRACT = contractJson as unknown as BehaviorContract;
@@ -105,6 +145,10 @@ export const STOP_WORDS: ReadonlySet<string> = new Set(CONTRACT.bm25.stop_words)
 // longest-first exactly as the contract lists it.
 export const SUFFIXES: readonly string[] = CONTRACT.bm25.suffixes;
 export const ALIAS_TOKEN_SOURCE = CONTRACT.bm25.alias_token.pattern;
+/** Local search over a conversation's earlier turns (cache/history-search.ts). */
+export const HISTORY_SEARCH = CONTRACT.history_search;
+/** Matching fetch queries to prefetched items by meaning (context/anticipation-cache.ts). */
+export const SEMANTIC_MATCH = CONTRACT.semantic_match;
 
 /** True when any query string looks like an explicit memory-recall ask. */
 export function isRecallQuery(searchQuery: readonly (string | null | undefined)[] | null | undefined): boolean {

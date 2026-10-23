@@ -12,6 +12,17 @@ Error-handling split follows the LangChain analogue:
   the caller explicitly wrote data and has a right to know if it
   didn't land.
 
+## What :meth:`aget` returns
+
+This memory *replaces* the agent's chat buffer, so :meth:`aget` is the one place
+that decides what history the model is sent. It keeps the messages put on it in
+this process (full fidelity: tool calls, results, reasoning) and, once Synap has
+compacted the conversation, replaces every turn before the current one with
+Synap's compaction and the turns after it. Until then the local messages are
+returned as they are. It used to return Synap's formatted context (which already
+contains the recent turns), then the recent turns again, then every local
+message: each turn two or three times, and unbounded.
+
 ## The live stream
 
 ``aput`` is the one place every message an agent produces passes through.
@@ -25,10 +36,12 @@ nothing in between.
 
 Everything but the turns is stream-only: there is no REST equivalent for a
 tool call, and none of it is memory. The turns follow the one rule that
-matters, **stream first, REST only as a fallback, never both**, because
-the server persists ``user_message`` and ``assistant_message`` straight off
-the stream (``grpc/servicer.py``), so a ``record_message`` on top of a
-delivered stream event writes the turn twice and extracts it twice.
+matters: on the gRPC stream, which the first event opens (there is no
+``listen()`` to call; ``SYNAP_AUTO_LISTEN=false`` turns that off), REST only
+as a fallback, **never both**, because the server persists ``user_message`` and
+``assistant_message`` straight off the stream (``grpc/servicer.py``), so a REST
+write on top of a delivered stream event writes the turn twice and extracts it
+twice.
 
 Reasoning and tool calls ride on an assistant message's ``blocks`` as
 ``ThinkingBlock`` and ``ToolCallBlock``; a tool result arrives as its own
@@ -41,18 +54,26 @@ instead of failing to import.
 """
 
 import logging
+from collections import Counter
 from typing import Any, List, Optional
 
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from llama_index.core.memory.types import BaseMemory
 
 from maximem_synap import MaximemSynapSDK
-from synap_integrations_common import run_async, wrap_sdk_errors_async
+from synap_integrations_common import (
+    CompactedHistory,
+    SynapIntegrationError,
+    is_synap_history,
+    record_turn,
+    run_async,
+    splice_history,
+)
+from synap_integrations_common.history import HISTORY_CLOSE, HISTORY_OPEN
 from synap_integrations_common.stream_events import (
     report_reasoning,
     report_tool_call,
     report_tool_result,
-    report_turn,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,6 +95,23 @@ def _text_of(message: Any) -> str:
     """
     content = getattr(message, "content", None)
     return "" if content is None else str(content)
+
+
+_ROLES = {
+    MessageRole.USER: "user",
+    MessageRole.ASSISTANT: "assistant",
+    MessageRole.SYSTEM: "system",
+}
+_ROLE_OF_NAME = {"user": MessageRole.USER, "assistant": MessageRole.ASSISTANT,
+                 "system": MessageRole.SYSTEM}
+
+
+def _role_of(message: Any) -> str:
+    return _ROLES.get(getattr(message, "role", None), "other")
+
+
+def _make_message(role: str, text: str) -> ChatMessage:
+    return ChatMessage(role=_ROLE_OF_NAME[role], content=text)
 
 
 def _blocks(message: Any) -> List[Any]:
@@ -169,27 +207,65 @@ class SynapChatMemory(BaseMemory):
                     self._conversation_id, exc, exc_info=True,
                 )
 
+        local = list(self._messages)
+        history, recent = await self._load_history()
+        if history is not None:
+            # Synap's compaction in place of every turn before the current one.
+            # Only text is swapped; the current turn (and the tool calls and
+            # results after it) stay as the agent built them.
+            try:
+                messages.extend(splice_history(
+                    local, history,
+                    role_of=_role_of, text_of=_text_of, make_message=_make_message,
+                ))
+                return messages
+            except Exception:  # noqa: BLE001 — the local messages still stand
+                logger.warning("SynapChatMemory.aget: could not splice the compacted "
+                               "history", exc_info=True)
+        if local:
+            messages.extend(local)
+        else:
+            # A fresh process picking a conversation up: nothing put here yet,
+            # so Synap's recent turns are the history.
+            messages.extend(_make_message(role, text) for role, text in recent)
+        return messages
+
+    async def _load_history(self) -> tuple:
+        """``(compaction or None, recent turns)`` as Synap holds them.
+
+        The compaction is None until the conversation has been compacted, and
+        on any SDK failure (logged at ERROR; a lookup miss must not stop the
+        agent).
+        """
         try:
-            prompt_ctx = await self._sdk.conversation.context.get_context_for_prompt(
+            ctx = await self._sdk.conversation.context.get_context_for_prompt(
                 conversation_id=self._conversation_id,
             )
-            if prompt_ctx.formatted_context:
-                messages.append(ChatMessage(
-                    role=MessageRole.SYSTEM,
-                    content=f"Conversation history:\n{prompt_ctx.formatted_context}",
-                ))
-            for msg in prompt_ctx.recent_messages:
-                role = MessageRole.USER if msg.role == "user" else MessageRole.ASSISTANT
-                messages.append(ChatMessage(role=role, content=msg.content))
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "SynapChatMemory.aget: get_context_for_prompt failed "
                 "conversation_id=%s error=%s",
                 self._conversation_id, exc, exc_info=True,
             )
-
-        messages.extend(self._messages)
-        return messages
+            return None, []
+        recent = [
+            (m.role, str(m.content))
+            for m in (getattr(ctx, "recent_messages", None) or [])
+            if getattr(m, "role", None) in ("user", "assistant")
+            and isinstance(getattr(m, "content", None), str) and m.content.strip()
+        ]
+        compaction = getattr(ctx, "context_block", None)
+        if getattr(ctx, "available", True) is False or not isinstance(compaction, str) \
+                or not compaction.strip():
+            return None, recent
+        parts = [compaction.strip()]
+        found = getattr(ctx, "history_block", None)
+        if isinstance(found, str) and found.strip():
+            parts.append(found.strip())
+        return CompactedHistory(
+            preamble=f"{HISTORY_OPEN}\n" + "\n\n".join(parts) + f"\n{HISTORY_CLOSE}",
+            turns=tuple(recent),
+        ), recent
 
     def get_all(self) -> List[ChatMessage]:
         return self.get()
@@ -230,28 +306,33 @@ class SynapChatMemory(BaseMemory):
             # After the turn: the model says its piece, then asks for tools.
             await self._report_tool_calls(message)
 
-    async def _record(self, role: str, content: str) -> None:
-        """Stream first, and fall back to REST only if there was no stream.
+    async def aput_messages(self, messages: List[ChatMessage]) -> None:
+        """Put each message with :meth:`aput`, on the caller's event loop.
 
-        ⚠ Never both. ``report_turn`` returns whether the event actually went
-        out, which is what makes this decidable rather than guessed.
+        ⚠ ``BaseMemory.aput_messages`` is ``asyncio.to_thread(self.put_messages)``,
+        and that calls the sync ``put``, which runs :meth:`aput` on the
+        integrations' background loop. The gRPC stream lives on the loop that
+        opened it, so from there nothing could use it: every turn fell back to
+        REST and every tool call, result and reasoning step was dropped. This is
+        the method ``FunctionAgent`` calls to hand over its whole scratchpad.
         """
-        if await report_turn(
+        for message in messages:
+            await self.aput(message)
+
+    async def _record(self, role: str, content: str) -> None:
+        """On the stream (opened here if need be), REST only if the stream could
+        not carry it, never both. Raises if neither took the turn."""
+        if is_synap_history(content):
+            return  # the compaction aget returned, not something anybody said
+        if not await record_turn(
             self._sdk, role=role, content=content,
             conversation_id=self._conversation_id,
             user_id=self._user_id, customer_id=self._customer_id,
         ):
-            return
-        async with wrap_sdk_errors_async(
-            "llamaindex.aput", logger,
-            role=role, conversation_id=self._conversation_id,
-        ):
-            await self._sdk.conversation.record_message(
-                conversation_id=self._conversation_id,
-                role=role,
-                content=content,
-                user_id=self._user_id,
-                customer_id=self._customer_id,
+            raise SynapIntegrationError(
+                "llamaindex.aput",
+                "the turn was not recorded: neither the gRPC stream nor REST accepted it",
+                {"role": role, "conversation_id": self._conversation_id},
             )
 
     # ─── the three events this memory never reported ────────────────────
@@ -310,10 +391,36 @@ class SynapChatMemory(BaseMemory):
         )
 
     def set(self, messages: List[ChatMessage]) -> None:
-        self._messages = list(messages)
+        run_async(self.aset(messages))
 
     async def aset(self, messages: List[ChatMessage]) -> None:
+        """Replace the local messages, and record the turns Synap does not have.
+
+        An agent calls this with the ``chat_history`` it was handed. Turns that
+        were already put on this memory, or that Synap already holds after its
+        last compaction, are not recorded again; the rest are, so a history
+        that arrives this way reaches Synap like any other.
+        """
+        previous = Counter(
+            (_role_of(m), _text_of(m).strip()) for m in self._messages
+        )
         self._messages = list(messages)
+        known = previous + await self._synap_turns()
+        for message in messages:
+            role = _role_of(message)
+            text = _text_of(message).strip()
+            if role not in ("user", "assistant") or not text:
+                continue
+            key = (role, text)
+            if known[key] > 0:
+                known[key] -= 1
+                continue
+            await self._record(role, text)
+
+    async def _synap_turns(self) -> Counter:
+        """The turns Synap holds after its last compaction, by (role, text)."""
+        _, recent = await self._load_history()  # logs, and answers [], on failure
+        return Counter((role, text.strip()) for role, text in recent)
 
     def reset(self) -> None:
         self._messages.clear()

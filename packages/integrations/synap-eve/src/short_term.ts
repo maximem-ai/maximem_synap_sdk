@@ -2,8 +2,15 @@
 //
 // eve's own durability (Vercel Workflows event-log replay) persists a single
 // session's turn state; it is not cross-session recall and it does not surface
-// Synap's compacted short-term summary. This module injects that summary into
-// the system prompt as a first-class eve extension point.
+// Synap's compaction. This module injects that compaction into the system
+// prompt as a first-class eve extension point.
+//
+// It injects the compaction (the summary of the turns the conversation has
+// outgrown, plus earlier turns history search found), never the recent turns:
+// eve's own history already carries those, and `formatted_context` repeats
+// them, so injecting it sent every recent turn twice. Before the first
+// compaction there is nothing to add. To make eve's own checkpoint Synap's, see
+// `createSynapCompactionModel`.
 //
 // `createSynapInstructions` returns a `defineDynamic` resolver for
 // `agent/instructions/`, evaluated at `turn.started`. It *augments* the system
@@ -22,6 +29,7 @@
 import { defineDynamic } from "eve/tools";
 import { defineInstructions } from "eve/instructions";
 
+import { compactedHistoryFrom } from "./stream-events.js";
 import {
   resolveConversationId,
   type EveSessionLike,
@@ -37,7 +45,10 @@ const DEFAULT_PREAMBLE_OPEN = "<synap_short_term_context>";
 const DEFAULT_PREAMBLE_CLOSE = "</synap_short_term_context>";
 
 export interface SynapShortTermResult {
-  /** The short-term string ready to splice into a system prompt. Empty if none. */
+  /**
+   * Synap's compaction, ready to splice into a system prompt. Empty before the
+   * first compaction. Does not repeat the recent turns.
+   */
   formattedContext: string;
   /** Whether the server reported any short-term context (compaction or recent turns). */
   available: boolean;
@@ -82,7 +93,7 @@ export async function fetchSynapShortTerm(
     });
     if (!response.available) return { formattedContext: "", available: false };
     return {
-      formattedContext: (response.formatted_context ?? "").trim(),
+      formattedContext: compactedHistoryFrom(response)?.preamble ?? "",
       available: response.available,
     };
   } catch (err) {
