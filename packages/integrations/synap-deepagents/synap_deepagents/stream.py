@@ -5,8 +5,11 @@ through, middleware that puts recalled memory in the prompt, two tools the model
 can call. None of it tells Synap what the agent is *doing*, so the anticipation
 agent saw a run it could not anticipate: no question, no tools, no answer.
 
-:class:`SynapStreamMiddleware` is the write half. Add it to ``middleware=[...]``
-and the five events go out on the gRPC stream ``sdk.instance.listen()`` opened:
+:class:`SynapStreamMiddleware` is the write half, and
+:class:`~synap_deepagents.SynapMemoryMiddleware` runs it for you when it is given
+a ``conversation_id``. Either way the five events go out on the gRPC stream, which
+the first of them opens (there is no ``listen()`` to call; ``SYNAP_AUTO_LISTEN=false``
+turns that off):
 
 ===================  ========================================================
 event                where it comes from
@@ -50,7 +53,13 @@ reported: no error, no log above debug, nothing failing.
 :func:`_tool_output` unwraps them first.
 
 Two rules hold throughout, the same two ``synap_integrations_common`` holds:
-silent when no stream is running, and never raises into the graph.
+a turn goes over REST when the stream cannot carry it (tool and reasoning events,
+which have no REST form, are dropped), and nothing raises into the graph.
+
+**It also reads.** On every model call it asks Synap for the conversation's
+compaction and, once there is one, replaces the turns before the current one
+with it (see :mod:`synap_deepagents.history`). The agent's own summarizer stays
+installed as the fallback.
 
 Wiring::
 
@@ -59,7 +68,6 @@ Wiring::
     from synap_deepagents import SynapMemoryMiddleware, SynapStreamMiddleware
 
     sdk = MaximemSynapSDK(api_key="sk-...")
-    await sdk.instance.listen()
 
     agent = create_deep_agent(
         model="anthropic:claude-sonnet-5",
@@ -71,7 +79,10 @@ Wiring::
         ],
     )
 
-One middleware covers one conversation: the de-duplication is per instance.
+One middleware covers one conversation: the de-duplication is per instance. Do
+not put a ``SynapStreamMiddleware`` beside a
+``SynapMemoryMiddleware(conversation_id=...)`` for the same conversation; that
+middleware already runs one, and the events would go out twice.
 """
 
 from __future__ import annotations
@@ -84,17 +95,22 @@ from langchain.agents.middleware.types import (
     AgentMiddleware,
     AgentState,
     ContextT,
+    ModelRequest,
+    ModelResponse,
     ResponseT,
     ToolCallRequest,
 )
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
+    fetch_compacted_history,
+    record_turn,
     report_reasoning,
     report_tool_call,
     report_tool_result,
-    report_turn,
     run_async,
 )
+
+from synap_deepagents.history import is_spliced, splice_request
 
 logger = logging.getLogger(__name__)
 
@@ -266,14 +282,13 @@ class SynapStreamMiddleware(AgentMiddleware[AgentState, ContextT, ResponseT]):
             B2C instance (``user_context_isolation=equals_customer``): the server
             rejects a call carrying one. Leave it unset there.
 
-    Turn reporting is stream first, REST only as a fallback, and never both. The
-    server persists ``user_message`` and ``assistant_message`` from the stream
-    itself (``grpc/servicer.py``), so a ``record_message`` on top of a delivered
-    stream event writes the turn twice and extracts it twice.
-    :func:`~synap_integrations_common.stream_events.report_turn` returns whether
-    the event actually went out, which is what makes the choice decidable rather
-    than guessed. Tool calls, tool results and reasoning have no REST equivalent:
-    with no stream open they are simply not reported.
+    Turns go on the gRPC stream, which the first event opens (no ``listen()``
+    call is needed; ``SYNAP_AUTO_LISTEN=false`` turns that off), REST only when
+    the stream cannot carry them, and never both: the server persists
+    ``user_message`` and ``assistant_message`` from the stream itself
+    (``grpc/servicer.py``), so a REST write on top of a delivered stream event
+    writes the turn twice and extracts it twice. Tool calls, tool results and
+    reasoning have no REST equivalent: with no stream they are not reported.
 
     Example::
 
@@ -318,33 +333,16 @@ class SynapStreamMiddleware(AgentMiddleware[AgentState, ContextT, ResponseT]):
     # ── turn recording ───────────────────────────────────────────────────
 
     async def _record(self, role: str, content: str) -> None:
-        """Stream first; REST only when there was no stream. Never both."""
-        if await report_turn(
+        """On the stream (opened by the first turn), REST only when the stream
+        cannot carry it, never both. Never raises."""
+        await record_turn(
             self.sdk,
             role=role,
             content=content,
             conversation_id=self.conversation_id,
             user_id=self.user_id,
             customer_id=self.customer_id,
-        ):
-            return
-        try:
-            await self.sdk.conversation.record_message(
-                conversation_id=self.conversation_id,
-                role=role,
-                content=content,
-                user_id=self.user_id,
-                customer_id=self.customer_id,
-            )
-        except Exception as exc:  # noqa: BLE001 — middleware must not raise
-            logger.error(
-                "SynapStreamMiddleware: record_message failed "
-                "role=%s conversation_id=%s error=%s",
-                role,
-                self.conversation_id,
-                exc,
-                exc_info=True,
-            )
+        )
 
     # ── the user turn: once per invocation ───────────────────────────────
 
@@ -439,6 +437,42 @@ class SynapStreamMiddleware(AgentMiddleware[AgentState, ContextT, ResponseT]):
         """Synchronous entry point. See :meth:`aafter_agent`."""
         _bridge(self._areport_assistant(state), "after_agent")
         return None
+
+    # ── history: Synap's compaction in place of the earlier turns ────────
+
+    async def _asplice(self, request: ModelRequest) -> ModelRequest:
+        """The request with Synap's compaction in place of the earlier turns.
+
+        Asked for on every model call: a tool loop can run long enough for the
+        compaction to land partway through a turn. Untouched until there is one,
+        and when Synap cannot answer.
+        """
+        if is_spliced(request):
+            return request  # an outer layer already did
+        history = await fetch_compacted_history(self.sdk, self.conversation_id)
+        if history is None:
+            return request
+        return splice_request(request, history)
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        """Send the model Synap's history, then delegate."""
+        return await handler(await self._asplice(request))
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        """Synchronous entry point. See :meth:`awrap_model_call`."""
+        try:
+            request = run_async(self._asplice(request))
+        except Exception:  # noqa: BLE001 — the run's own messages still stand
+            logger.warning("synap: could not read the compacted history", exc_info=True)
+        return handler(request)
 
     # ── tools: the call and its result, sharing one id ───────────────────
 

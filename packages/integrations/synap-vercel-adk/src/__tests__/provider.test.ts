@@ -41,3 +41,16 @@ describe('SynapProvider', () => {
     expect(() => provider.wrap(fakeModel, { userId: 'u1' })).not.toThrow();
   });
 });
+
+describe('a model from a newer AI SDK', () => {
+  it('warns once that replies are not recorded (the middleware is LanguageModelV1)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    process.env['SYNAP_API_KEY'] = 'sk-test';
+    const provider = await new SynapProvider({}).init();
+    const v2 = { specificationVersion: 'v2', modelId: 'm' } as unknown as LanguageModelV1;
+    provider.wrap(v2, { userId: 'u1' });
+    provider.wrap(v2, { userId: 'u1' });
+    expect(warn.mock.calls.filter((c) => String(c[0]).includes('specification v2'))).toHaveLength(1);
+    warn.mockRestore();
+  });
+});

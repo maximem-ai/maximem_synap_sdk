@@ -38,6 +38,10 @@ describe('@maximem/synap-mastra public surface', () => {
     expect(typeof pkg.synapShortTermInstructions).toBe('function');
   });
 
+  it('exports setAutoListen, the opt-out for the stream that opens itself', () => {
+    expect(typeof pkg.setAutoListen).toBe('function');
+  });
+
   // ── No unexpected extras (surface stability) ──────────────────────────────
 
   it('does not export unexpected runtime values', () => {
@@ -48,6 +52,7 @@ describe('@maximem/synap-mastra public surface', () => {
       'fetchSynapShortTerm',
       'buildSynapShortTermSystem',
       'synapShortTermInstructions',
+      'setAutoListen',
     ]);
     const actual = Object.keys(pkg).filter(
       (k) => typeof (pkg as Record<string, unknown>)[k] !== 'undefined',

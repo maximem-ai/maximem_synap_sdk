@@ -17,10 +17,16 @@ import logging
 from typing import List, Sequence
 
 from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from maximem_synap import MaximemSynapSDK
-from synap_integrations_common import run_async, wrap_sdk_errors_async
+from synap_integrations_common import (
+    SynapIntegrationError,
+    record_turn,
+    run_async,
+)
+
+from synap_langchain._messages import message_text, turn_role
 
 logger = logging.getLogger(__name__)
 
@@ -91,38 +97,68 @@ class SynapChatMessageHistory(BaseChatMessageHistory):
             )
             return []
 
-        if not prompt_ctx or not prompt_ctx.recent_messages:
+        if not prompt_ctx:
             return []
 
         msgs: List[BaseMessage] = []
-        for rm in prompt_ctx.recent_messages:
+        # The compaction block (and the earlier turns the SDK found for the
+        # latest message) stands in for the turns it covers: recent_messages
+        # holds only the turns after it. Older SDKs send neither.
+        preamble = "\n\n".join(
+            part for part in (getattr(prompt_ctx, "context_block", None),
+                              getattr(prompt_ctx, "history_block", None)) if isinstance(part, str) and part
+        )
+        if preamble:
+            msgs.append(SystemMessage(content=preamble))
+        for rm in prompt_ctx.recent_messages or []:
             role = getattr(rm, "role", None) or "user"
-            content = getattr(rm, "content", "") or ""
+            content = str(getattr(rm, "content", "") or "")
             if role == "assistant":
-                msgs.append(AIMessage(content=str(content)))
-            else:
-                msgs.append(HumanMessage(content=str(content)))
+                msgs.append(AIMessage(content=content))
+            elif role == "user":
+                msgs.append(HumanMessage(content=content))
+            elif role == "system":
+                msgs.append(SystemMessage(content=content))
+            # Anything else (a tool turn) is not something either side said.
         return msgs
 
     def add_messages(self, messages: Sequence[BaseMessage]) -> None:
         run_async(self.aadd_messages(messages))
 
     async def aadd_messages(self, messages: Sequence[BaseMessage]) -> None:
-        """Write messages. Surfaces SDK errors (caller invoked this explicitly)."""
+        """Write messages. Surfaces SDK errors (caller invoked this explicitly).
+
+        Only what a user or the assistant said is written, on the gRPC stream
+        (opened on the first write) and over REST when the stream cannot carry
+        it. A system message, including the compaction this store returned, is
+        not a turn; a tool result goes to the SDK's local archive instead.
+        """
         for msg in messages:
-            role = "assistant" if isinstance(msg, AIMessage) else "user"
-            async with wrap_sdk_errors_async(
-                "langchain.aadd_messages",
-                logger,
+            if isinstance(msg, ToolMessage):
+                # What a tool returned, not something the user said: kept in
+                # the SDK's local archive for history search, never sent as a turn.
+                archive = getattr(self.sdk, "archive_tool_result", None)
+                if callable(archive):
+                    archive(self.conversation_id, msg.content, tool_name=getattr(msg, "name", None))
+                continue
+            role = turn_role(msg)
+            if role is None:
+                continue
+            text = message_text(msg)
+            if not text.strip():
+                continue  # tool calls only: no words to record
+            if not await record_turn(
+                self.sdk,
                 role=role,
+                content=text,
                 conversation_id=self.conversation_id,
+                user_id=self.user_id,
+                customer_id=self.customer_id,
             ):
-                await self.sdk.conversation.record_message(
-                    conversation_id=self.conversation_id,
-                    role=role,
-                    content=str(msg.content),
-                    user_id=self.user_id,
-                    customer_id=self.customer_id,
+                raise SynapIntegrationError(
+                    "langchain.aadd_messages",
+                    "the turn was not recorded: neither the gRPC stream nor REST accepted it",
+                    {"role": role, "conversation_id": self.conversation_id},
                 )
 
     def clear(self) -> None:

@@ -787,3 +787,55 @@ class TestNoneOfItBreaksThePipeline:
         ])
         assert [r["status"] for r in results] == ["skipped", "written"]
         sdk.conversation.record_message.assert_awaited_once()
+
+
+# ── the ledger: a turn is written once even when its stamp is lost ───────────
+
+
+def _unstamped(*pairs):
+    return [ChatMessage.from_user(t) if r == "user" else ChatMessage.from_assistant(t)
+            for r, t in pairs]
+
+
+def test_resent_history_without_the_stamp_is_not_written_again(mock_sdk):
+    store = SynapMemoryStore(mock_sdk, user_id="u1")
+    turn1 = [("user", "hi"), ("assistant", "hello")]
+    turn2 = [*turn1, ("user", "and you?"), ("assistant", "fine")]
+    assert store.write_messages("c1", _unstamped(*turn1)) == 2
+    assert store.write_messages("c1", _unstamped(*turn2)) == 2  # fresh objects, no meta
+    assert mock_sdk.conversation.record_message.await_count == 4
+
+
+def test_a_repeated_message_is_a_new_turn_and_a_resend_is_not(mock_sdk):
+    store = SynapMemoryStore(mock_sdk, user_id="u1")
+    assert store.write_messages("c1", _unstamped(("user", "yes"))) == 1
+    both = [("user", "yes"), ("assistant", "ok"), ("user", "yes")]
+    assert store.write_messages("c1", _unstamped(*both)) == 2  # the second "yes" and "ok"
+    assert store.write_messages("c1", _unstamped(*both)) == 0
+
+
+def test_the_ledger_is_per_conversation(mock_sdk):
+    store = SynapMemoryStore(mock_sdk, user_id="u1")
+    assert store.write_messages("c1", _unstamped(("user", "hi"))) == 1
+    assert store.write_messages("c2", _unstamped(("user", "hi"))) == 1
+
+
+def test_a_failed_write_is_retried_not_remembered(mock_sdk):
+    store = SynapMemoryStore(mock_sdk, user_id="u1")
+    mock_sdk.conversation.record_message.side_effect = RuntimeError("down")
+    with pytest.raises(Exception):
+        store.write_messages("c1", _unstamped(("user", "hi")))
+    mock_sdk.conversation.record_message.side_effect = None
+    assert store.write_messages("c1", _unstamped(("user", "hi"))) == 1
+
+
+def test_the_ledger_is_bounded(mock_sdk, monkeypatch):
+    import synap_haystack.store as store_mod
+    monkeypatch.setattr(store_mod, "_LEDGER_KEYS_PER_CONVERSATION", 3)
+    monkeypatch.setattr(store_mod, "_LEDGER_CONVERSATIONS", 2)
+    store = SynapMemoryStore(mock_sdk, user_id="u1")
+    store.write_messages("c1", _unstamped(*[("user", f"m{i}") for i in range(10)]))
+    assert len(store._ledger["c1"]) == 3
+    for cid in ("c2", "c3"):
+        store.write_messages(cid, _unstamped(("user", "x")))
+    assert list(store._ledger) == ["c2", "c3"]
