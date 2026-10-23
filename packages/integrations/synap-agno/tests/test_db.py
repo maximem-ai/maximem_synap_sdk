@@ -25,7 +25,7 @@ import pytest
 from agno.db.in_memory.in_memory_db import InMemoryDb
 from agno.db.schemas.memory import UserMemory
 
-from synap_agno.db import SynapDb, _fact_to_user_memory, _MARKER
+from synap_agno.db import SynapDb, _MARKER
 from synap_integrations_common import SynapIntegrationError
 
 
@@ -121,8 +121,8 @@ def _run_sync(coro):
         loop.close()
 
 
-# Patch run_async to use a fresh event loop (avoids nest_asyncio in test context).
-_patch_run_async = patch("synap_agno.db.run_async", side_effect=_run_sync)
+# Patch run_blocking to use a fresh event loop (avoids nest_asyncio in test context).
+_patch_run_async = patch("synap_agno.db.run_blocking", side_effect=_run_sync)
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +141,7 @@ class TestSynapDbConstruction:
         assert db.customer_id == ""
         assert db.mode == "accurate"
         assert db.max_results == 50
+        assert db.default_query == "What do you know about this user?"
         assert db._delete_warned is False
         assert db._stats_warned is False
 
@@ -166,72 +167,6 @@ class TestSynapDbConstruction:
 # ---------------------------------------------------------------------------
 
 
-class TestFactToUserMemory:
-    def test_maps_content_and_metadata_fields(self):
-        fact = _make_marked_fact(
-            memory_id="mem-xyz",
-            user_id="bob",
-            content="Bob's preference",
-            agent_id="agent-1",
-            team_id="team-1",
-            topics=["cooking", "travel"],
-            input_="I love cooking",
-            feedback="positive",
-            created_at=1100,
-            updated_at=2200,
-        )
-        mem = _fact_to_user_memory(fact)
-        assert mem.memory == "Bob's preference"
-        assert mem.memory_id == "mem-xyz"
-        assert mem.user_id == "bob"
-        assert mem.agent_id == "agent-1"
-        assert mem.team_id == "team-1"
-        assert mem.topics == ["cooking", "travel"]
-        assert mem.input == "I love cooking"
-        assert mem.feedback == "positive"
-        assert mem.created_at == 1100
-        assert mem.updated_at == 2200
-
-    def test_falls_back_to_fact_id_when_no_memory_id_in_metadata(self):
-        fact = MagicMock()
-        fact.content = "bare"
-        fact.id = "fact-id-fallback"
-        fact.metadata = {_MARKER: True}  # no 'memory_id' key
-        mem = _fact_to_user_memory(fact)
-        assert mem.memory_id == "fact-id-fallback"
-
-    def test_none_metadata_returns_memory_from_content(self):
-        class _BareObj:
-            content = "content only"
-            id = "bare-id"
-            metadata = None
-
-        mem = _fact_to_user_memory(_BareObj())
-        assert mem.memory == "content only"
-
-    def test_absent_metadata_attr_returns_memory_from_content(self):
-        class _NoMeta:
-            content = "no meta"
-            id = "no-meta-id"
-
-        mem = _fact_to_user_memory(_NoMeta())
-        assert mem.memory == "no meta"
-
-    def test_topics_must_be_list_or_none(self):
-        # topics present as list → list
-        fact = _make_marked_fact(topics=["a", "b"])
-        mem = _fact_to_user_memory(fact)
-        assert isinstance(mem.topics, list)
-        assert mem.topics == ["a", "b"]
-
-    def test_non_list_topics_in_metadata_maps_to_none(self):
-        fact = MagicMock()
-        fact.content = "c"
-        fact.id = "id"
-        fact.metadata = {_MARKER: True, "topics": "not-a-list"}
-        mem = _fact_to_user_memory(fact)
-        # non-list topics value → None (safe fallback)
-        assert mem.topics is None
 
 
 # ---------------------------------------------------------------------------
@@ -446,67 +381,6 @@ class TestUpsertMemories:
 # ---------------------------------------------------------------------------
 
 
-class TestGetUserMemory:
-    def test_returns_user_memory_for_existing_id(self):
-        fact = _make_marked_fact("mem-001", user_id="alice", content="dark mode")
-        sdk = _make_sdk(fetch_response=_response_with_facts(fact))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_user_memory("mem-001")
-        assert isinstance(result, UserMemory)
-        assert result.memory_id == "mem-001"
-        assert result.memory == "dark mode"
-
-    def test_returns_none_when_memory_id_not_found(self):
-        fact = _make_marked_fact("mem-001")
-        sdk = _make_sdk(fetch_response=_response_with_facts(fact))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_user_memory("mem-999")
-        assert result is None
-
-    def test_user_id_filter_returns_none_for_wrong_user(self):
-        fact = _make_marked_fact("mem-001", user_id="alice")
-        sdk = _make_sdk(fetch_response=_response_with_facts(fact))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_user_memory("mem-001", user_id="bob")
-        assert result is None
-
-    def test_user_id_filter_returns_memory_for_correct_user(self):
-        fact = _make_marked_fact("mem-001", user_id="alice")
-        sdk = _make_sdk(fetch_response=_response_with_facts(fact))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_user_memory("mem-001", user_id="alice")
-        assert result is not None
-        assert result.user_id == "alice"
-
-    def test_skips_untagged_facts(self):
-        tagged = _make_marked_fact("mem-001")
-        untagged = _make_untagged_fact("mem-002")
-        sdk = _make_sdk(fetch_response=_response_with_facts(tagged, untagged))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_user_memory("mem-002")
-        assert result is None  # untagged fact should not match
-
-    def test_returns_dict_when_deserialize_false(self):
-        fact = _make_marked_fact("mem-001")
-        sdk = _make_sdk(fetch_response=_response_with_facts(fact))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_user_memory("mem-001", deserialize=False)
-        assert isinstance(result, dict)
-
-    def test_passes_memory_id_as_search_query_to_sdk(self):
-        sdk = _make_sdk(fetch_response=_empty_response())
-        with _patch_run_async:
-            db = SynapDb(sdk, customer_id="acme")
-            db.get_user_memory("mem-target")
-        kw = sdk.fetch.call_args.kwargs
-        assert "mem-target" in kw["search_query"]
-        assert kw["customer_id"] == "acme"
 
 
 # ---------------------------------------------------------------------------
@@ -514,21 +388,6 @@ class TestGetUserMemory:
 # ---------------------------------------------------------------------------
 
 
-class TestGetUserMemoryFailure:
-    def test_returns_none_on_sdk_error(self):
-        sdk = _make_sdk(fetch_error=RuntimeError("sdk boom"))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_user_memory("mem-001")
-        assert result is None  # graceful degrade, not a crash
-
-    def test_logs_error_on_sdk_failure(self, caplog):
-        sdk = _make_sdk(fetch_error=RuntimeError("sdk boom"))
-        with caplog.at_level(logging.ERROR, logger="synap_agno.db"):
-            with _patch_run_async:
-                db = SynapDb(sdk)
-                db.get_user_memory("mem-001")
-        assert any("sdk.fetch failed" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -536,169 +395,6 @@ class TestGetUserMemoryFailure:
 # ---------------------------------------------------------------------------
 
 
-class TestGetUserMemories:
-    def _db_with_facts(self, *facts) -> tuple[SynapDb, MagicMock]:
-        sdk = _make_sdk(fetch_response=_response_with_facts(*facts))
-        return SynapDb(sdk), sdk
-
-    def test_returns_all_tagged_memories(self):
-        f1 = _make_marked_fact("m1", user_id="alice")
-        f2 = _make_marked_fact("m2", user_id="bob")
-        sdk = _make_sdk(fetch_response=_response_with_facts(f1, f2))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_user_memories()
-        assert len(result) == 2
-
-    def test_skips_untagged_facts(self):
-        tagged = _make_marked_fact("m1")
-        untagged = _make_untagged_fact("m2")
-        sdk = _make_sdk(fetch_response=_response_with_facts(tagged, untagged))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_user_memories()
-        assert len(result) == 1
-        assert result[0].memory_id == "m1"
-
-    def test_filters_by_user_id(self):
-        f1 = _make_marked_fact("m1", user_id="alice")
-        f2 = _make_marked_fact("m2", user_id="bob")
-        sdk = _make_sdk(fetch_response=_response_with_facts(f1, f2))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_user_memories(user_id="alice")
-        assert len(result) == 1
-        assert result[0].user_id == "alice"
-
-    def test_filters_by_agent_id(self):
-        f1 = _make_marked_fact("m1", agent_id="agent-1")
-        f2 = _make_marked_fact("m2", agent_id="agent-2")
-        sdk = _make_sdk(fetch_response=_response_with_facts(f1, f2))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_user_memories(agent_id="agent-1")
-        assert len(result) == 1
-        assert result[0].memory_id == "m1"
-
-    def test_filters_by_team_id(self):
-        f1 = _make_marked_fact("m1", team_id="team-a")
-        f2 = _make_marked_fact("m2", team_id="team-b")
-        sdk = _make_sdk(fetch_response=_response_with_facts(f1, f2))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_user_memories(team_id="team-a")
-        assert len(result) == 1
-
-    def test_filters_by_topic_intersection(self):
-        f1 = _make_marked_fact("m1", topics=["coding", "python"])
-        f2 = _make_marked_fact("m2", topics=["cooking"])
-        sdk = _make_sdk(fetch_response=_response_with_facts(f1, f2))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_user_memories(topics=["coding"])
-        assert len(result) == 1
-        assert result[0].memory_id == "m1"
-
-    def test_passes_search_content_as_search_query(self):
-        sdk = _make_sdk(fetch_response=_empty_response())
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            db.get_user_memories(search_content="dark mode")
-        kw = sdk.fetch.call_args.kwargs
-        assert kw["search_query"] == ["dark mode"]
-
-    def test_no_search_content_passes_none_query(self):
-        sdk = _make_sdk(fetch_response=_empty_response())
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            db.get_user_memories()
-        kw = sdk.fetch.call_args.kwargs
-        assert kw["search_query"] is None
-
-    def test_passes_correct_fetch_kwargs(self):
-        sdk = _make_sdk(fetch_response=_empty_response())
-        with _patch_run_async:
-            db = SynapDb(sdk, customer_id="acme", mode="fast", max_results=10)
-            db.get_user_memories(user_id="alice")
-        kw = sdk.fetch.call_args.kwargs
-        assert kw["user_id"] == "alice"
-        assert kw["customer_id"] == "acme"
-        assert kw["mode"] == "fast"
-        assert kw["include_conversation_context"] is False
-
-    def test_sort_by_created_at_desc_default(self):
-        f1 = _make_marked_fact("m1", created_at=1000)
-        f2 = _make_marked_fact("m2", created_at=3000)
-        f3 = _make_marked_fact("m3", created_at=2000)
-        sdk = _make_sdk(fetch_response=_response_with_facts(f1, f2, f3))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_user_memories(sort_by="created_at")
-        ids = [m.memory_id for m in result]
-        assert ids == ["m2", "m3", "m1"]
-
-    def test_sort_by_created_at_asc(self):
-        f1 = _make_marked_fact("m1", created_at=1000)
-        f2 = _make_marked_fact("m2", created_at=3000)
-        f3 = _make_marked_fact("m3", created_at=2000)
-        sdk = _make_sdk(fetch_response=_response_with_facts(f1, f2, f3))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_user_memories(sort_by="created_at", sort_order="asc")
-        ids = [m.memory_id for m in result]
-        assert ids == ["m1", "m3", "m2"]
-
-    def test_sort_by_updated_at_desc(self):
-        f1 = _make_marked_fact("m1", updated_at=5000)
-        f2 = _make_marked_fact("m2", updated_at=1000)
-        sdk = _make_sdk(fetch_response=_response_with_facts(f1, f2))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_user_memories(sort_by="updated_at")
-        assert result[0].memory_id == "m1"
-
-    def test_pagination_limit_and_page(self):
-        facts = [_make_marked_fact(f"m{i}", created_at=i) for i in range(5)]
-        sdk = _make_sdk(fetch_response=_response_with_facts(*facts))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            # Page 0, limit 2 → first 2 items (after sort desc)
-            page0 = db.get_user_memories(sort_by="created_at", limit=2, page=0)
-            page1 = db.get_user_memories(sort_by="created_at", limit=2, page=1)
-        assert len(page0) == 2
-        assert len(page1) == 2
-        # Ensure no overlap
-        ids0 = {m.memory_id for m in page0}
-        ids1 = {m.memory_id for m in page1}
-        assert ids0.isdisjoint(ids1)
-
-    def test_returns_list_of_user_memories_when_deserialize_true(self):
-        f = _make_marked_fact("m1")
-        sdk = _make_sdk(fetch_response=_response_with_facts(f))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_user_memories(deserialize=True)
-        assert isinstance(result, list)
-        assert all(isinstance(m, UserMemory) for m in result)
-
-    def test_returns_tuple_of_dicts_and_count_when_deserialize_false(self):
-        f = _make_marked_fact("m1")
-        sdk = _make_sdk(fetch_response=_response_with_facts(f))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_user_memories(deserialize=False)
-        assert isinstance(result, tuple)
-        dicts, count = result
-        assert isinstance(dicts, list)
-        assert count == 1
-        assert isinstance(dicts[0], dict)
-
-    def test_empty_response_returns_empty_list(self):
-        sdk = _make_sdk(fetch_response=_empty_response())
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_user_memories()
-        assert result == []
 
 
 # ---------------------------------------------------------------------------
@@ -706,21 +402,6 @@ class TestGetUserMemories:
 # ---------------------------------------------------------------------------
 
 
-class TestGetUserMemoriesFailure:
-    def test_returns_empty_list_on_sdk_error(self):
-        sdk = _make_sdk(fetch_error=RuntimeError("sdk boom"))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_user_memories()
-        assert result == []
-
-    def test_logs_error_on_sdk_failure(self, caplog):
-        sdk = _make_sdk(fetch_error=RuntimeError("sdk boom"))
-        with caplog.at_level(logging.ERROR, logger="synap_agno.db"):
-            with _patch_run_async:
-                db = SynapDb(sdk)
-                db.get_user_memories(user_id="alice")
-        assert any("sdk.fetch failed" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -772,70 +453,6 @@ class TestGetUserMemoryStats:
 # ---------------------------------------------------------------------------
 
 
-class TestGetAllMemoryTopics:
-    def test_returns_sorted_unique_topics(self):
-        f1 = _make_marked_fact("m1", topics=["python", "coding"])
-        f2 = _make_marked_fact("m2", topics=["cooking", "python"])  # python appears twice
-        sdk = _make_sdk(fetch_response=_response_with_facts(f1, f2))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_all_memory_topics()
-        assert result == sorted(set(result))  # sorted
-        assert len(result) == len(set(result))  # unique
-        assert "python" in result
-
-    def test_filters_topics_by_user_id(self):
-        f1 = _make_marked_fact("m1", user_id="alice", topics=["music"])
-        f2 = _make_marked_fact("m2", user_id="bob", topics=["gaming"])
-        sdk = _make_sdk(fetch_response=_response_with_facts(f1, f2))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_all_memory_topics(user_id="alice")
-        assert result == ["music"]
-
-    def test_skips_non_agno_facts(self):
-        tagged = _make_marked_fact("m1", topics=["included"])
-        untagged = _make_untagged_fact("m2")
-        untagged.metadata["topics"] = ["excluded"]
-        sdk = _make_sdk(fetch_response=_response_with_facts(tagged, untagged))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_all_memory_topics()
-        assert "excluded" not in result
-        assert "included" in result
-
-    def test_ignores_non_string_topic_values(self):
-        fact = MagicMock()
-        fact.content = "c"
-        fact.id = "m1"
-        fact.metadata = {
-            _MARKER: True,
-            "user_id": "alice",
-            "topics": ["valid", 123, None, "also-valid"],
-        }
-        sdk = _make_sdk(fetch_response=_response_with_facts(fact))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_all_memory_topics()
-        assert "valid" in result
-        assert "also-valid" in result
-        # non-strings must be filtered out (only isinstance(t, str) are added)
-        assert 123 not in result
-        assert None not in result
-
-    def test_returns_empty_list_when_no_facts(self):
-        sdk = _make_sdk(fetch_response=_empty_response())
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_all_memory_topics()
-        assert result == []
-
-    def test_degrades_gracefully_on_sdk_error(self):
-        sdk = _make_sdk(fetch_error=RuntimeError("boom"))
-        with _patch_run_async:
-            db = SynapDb(sdk)
-            result = db.get_all_memory_topics()
-        assert result == []
 
 
 # ---------------------------------------------------------------------------
@@ -930,10 +547,11 @@ class TestPublicSurface:
         assert "synap_st_instructions" in synap_agno.__all__
 
     def test_no_extra_public_exports(self):
-        """__all__ should contain exactly the four documented exports."""
+        """__all__ should contain exactly the documented exports."""
         import synap_agno
         assert set(synap_agno.__all__) == {
             "SynapDb",
+            "AsyncSynapDb",
             "synap_st_instructions",
             "create_synap_hooks",
             "create_synap_async_hooks",

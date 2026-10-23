@@ -7,7 +7,8 @@ CAMEL records on the assistant message, the tool results it records as
 
 These pin that contract:
 
-- stream first, REST only as a fallback, never both;
+- turns are conversation messages: stream first, REST otherwise, never both,
+  and never a ``memories.create`` transcript;
 - tool arguments arrive as the parsed dict, not as the JSON string CAMEL stores;
 - what is reported as a tool result survives ``json.dumps``, because the SDK
   encodes it and ``stream_events`` swallows whatever that raises;
@@ -20,6 +21,7 @@ import json
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid5
 
 from camel.memories import MemoryRecord
 from camel.messages import BaseMessage, FunctionCallingMessage
@@ -28,7 +30,7 @@ from camel.utils.tool_result import ToolResult
 
 from synap_camel_ai import SynapAgentMemory
 from synap_camel_ai import memory as memory_module
-from synap_camel_ai.memory import _tool_args, _tool_result
+from synap_camel_ai.memory import _CAMEL_NAMESPACE, _tool_args, _tool_result
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────────
@@ -37,11 +39,15 @@ from synap_camel_ai.memory import _tool_args, _tool_result
 def _streaming_sdk(is_listening: bool = True):
     sdk = MagicMock()
     sdk.instance.is_listening = is_listening
+    if not is_listening:
+        # A stream that will not open: the turn goes over REST.
+        sdk.instance.listen = AsyncMock(side_effect=RuntimeError("no stream"))
     sdk.instance.send_message = AsyncMock()
     sdk.instance.record_thinking = AsyncMock()
     sdk.instance.record_tool_call = AsyncMock()
     sdk.instance.record_tool_result = AsyncMock()
     sdk.memories.create = AsyncMock()
+    sdk.conversation.record_message = AsyncMock()
     return sdk
 
 
@@ -134,7 +140,7 @@ def test_the_events_carry_the_conversation_and_the_scope():
     assert kwargs["customer_id"] == "acme"
 
 
-# ── stream first, REST only as a fallback ────────────────────────────────────
+# ── turns: stream first, REST otherwise, never both ─────────────────────────
 
 
 class TestStreamFirstRestFallback:
@@ -152,38 +158,42 @@ class TestStreamFirstRestFallback:
         assert kwargs["event_type"] == "assistant_message"
         assert kwargs["role"] == "assistant"
 
-    def test_a_streamed_turn_is_NOT_also_ingested_over_rest(self):
-        """The double-write this rule exists to prevent.
-
-        The server persists the streamed turn and extracts from the
-        conversation it builds; the transcript ingest does the same job again.
-        """
+    def test_a_streamed_turn_is_NOT_also_written_over_rest(self):
+        """The server persists the streamed turn from the event itself."""
         sdk = _streaming_sdk()
         mem = _memory(sdk)
         mem.write_records([user_rec()])
         mem.write_records([asst_rec()])
+        assert sdk.instance.send_message.await_count == 2
+        sdk.conversation.record_message.assert_not_awaited()
         sdk.memories.create.assert_not_awaited()
 
-    def test_with_no_stream_the_transcript_is_ingested_as_before(self):
+    def test_with_no_stream_each_turn_is_recorded_once_over_rest(self):
         sdk = _streaming_sdk(is_listening=False)
         mem = _memory(sdk)
-        mem.write_records([user_rec()])
-        mem.write_records([asst_rec()])
-        sdk.memories.create.assert_awaited_once()
+        mem.write_records([user_rec("where is my order")])
+        mem.write_records([asst_rec("it ships tomorrow")])
+        assert [
+            (c.kwargs["role"], c.kwargs["content"], c.kwargs["conversation_id"])
+            for c in sdk.conversation.record_message.await_args_list
+        ] == [
+            ("user", "where is my order", "conv-1"),
+            ("assistant", "it ships tomorrow", "conv-1"),
+        ]
         sdk.instance.send_message.assert_not_awaited()
+        sdk.memories.create.assert_not_awaited()
 
-    def test_a_failed_send_falls_back_to_the_transcript(self):
-        """``report_turn`` says whether it went out, so this is decidable."""
+    def test_a_failed_send_falls_back_to_rest_for_that_turn(self):
+        """``record_turn`` falls back per turn, so a dead stream loses nothing."""
         sdk = _streaming_sdk()
         sdk.instance.send_message.side_effect = RuntimeError("stream died")
         mem = _memory(sdk)
         mem.write_records([user_rec()])
         mem.write_records([asst_rec()])
-        sdk.memories.create.assert_awaited_once()
+        assert sdk.conversation.record_message.await_count == 2
+        sdk.memories.create.assert_not_awaited()
 
-    def test_a_dropped_QUESTION_also_falls_back(self):
-        """A turn is both halves. Losing the question and keeping the answer
-        leaves Synap a reply to a question nobody asked."""
+    def test_only_the_dropped_turn_goes_over_rest(self):
         sdk = _streaming_sdk()
 
         def only_the_question_fails(**kwargs):
@@ -192,16 +202,16 @@ class TestStreamFirstRestFallback:
 
         sdk.instance.send_message.side_effect = only_the_question_fails
         _memory(sdk).write_records([user_rec(), asst_rec()])
-        sdk.memories.create.assert_awaited_once()
+        sdk.conversation.record_message.assert_awaited_once()
+        assert sdk.conversation.record_message.await_args.kwargs["role"] == "user"
 
-    def test_with_no_stream_the_async_bridge_is_never_entered(self, monkeypatch):
-        """A caller who never opened a stream behaves exactly as before.
-
-        ``run_async`` applies ``nest_asyncio`` to whatever loop it finds, which
-        patches that loop's class globally. Doing it on every write for people
-        who never asked for streaming is a side effect they did not sign up
-        for; ``_report`` answers no before reaching the bridge.
-        """
+    def test_a_write_of_only_system_prompts_never_enters_the_bridge(
+        self, monkeypatch
+    ):
+        """``run_async`` applies ``nest_asyncio`` to whatever loop it finds,
+        which patches that loop's class globally. A system prompt has nowhere
+        to go, so it does not pay for that. Anything else may open the stream,
+        so it does."""
         sdk = _streaming_sdk(is_listening=False)
         calls = []
         real = memory_module.run_async
@@ -211,15 +221,23 @@ class TestStreamFirstRestFallback:
             return real(coro)
 
         monkeypatch.setattr(memory_module, "run_async", counted)
-        _memory(sdk).write_records([user_rec()])
-        assert calls == []
-
-    def test_a_tool_lap_does_not_ingest_the_transcript_mid_turn(self):
-        sdk = _streaming_sdk()
         mem = _memory(sdk)
+        mem.write_records([
+            MemoryRecord(
+                message=BaseMessage.make_system_message("system", "SYS"),
+                role_at_backend=OpenAIBackendRole.SYSTEM,
+            )
+        ])
+        assert calls == []
         mem.write_records([user_rec()])
+        assert len(calls) == 1
+
+    def test_a_tool_lap_is_not_a_turn(self):
+        sdk = _streaming_sdk(is_listening=False)
+        mem = _memory(sdk)
         mem.write_records([tool_call_rec()])
         mem.write_records([tool_result_rec()])
+        sdk.conversation.record_message.assert_not_awaited()
         sdk.memories.create.assert_not_awaited()
 
 
@@ -395,6 +413,14 @@ class TestReasoning:
 
 
 class TestARecordIsReportedOnce:
+    def test_replaying_the_same_record_over_rest_records_it_once(self):
+        sdk = _streaming_sdk(is_listening=False)
+        mem = _memory(sdk)
+        record = user_rec()
+        mem.write_records([record])
+        mem.write_records([record])
+        assert sdk.conversation.record_message.await_count == 1
+
     def test_replaying_the_same_record_reports_it_once(self):
         """``ChatAgent.load_memory`` writes another memory's records into this
         one. Without the guard every historical turn is reported again."""
@@ -456,24 +482,6 @@ class TestNoneOfItBreaksTheStep:
         mem = _memory(sdk, on_error="raise")
         with pytest.raises(RuntimeError, match="no loop"):
             mem.write_records([user_rec(), asst_rec()])
-
-    def test_the_transcript_is_still_attempted_when_the_stream_bridge_fails(
-        self, monkeypatch
-    ):
-        sdk = _streaming_sdk()
-        calls = []
-
-        def boom(coro):
-            calls.append(coro)
-            coro.close()
-            raise RuntimeError("no loop to run this on")
-
-        monkeypatch.setattr(memory_module, "run_async", boom)
-        mem = _memory(sdk)
-        mem.write_records([user_rec(), asst_rec()])
-        # The stream never took the write, so the REST path must still try:
-        # one coroutine for the report, one for the transcript ingest.
-        assert len(calls) == 2
 
     def test_a_stream_that_raises_does_not_raise_out(self):
         sdk = _streaming_sdk()
@@ -585,4 +593,36 @@ class TestARealChatAgentReportsTheWholeTurn:
 
     def test_and_nothing_is_written_twice_over_rest(self, agent_and_sdk):
         _agent, sdk = agent_and_sdk
+        sdk.conversation.record_message.assert_not_awaited()
         sdk.memories.create.assert_not_awaited()
+
+
+def test_a_real_chatagent_without_a_stream_records_both_turns_over_rest(
+    monkeypatch,
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    from camel.agents import ChatAgent
+
+    sdk = _streaming_sdk(is_listening=False)
+    mem = SynapAgentMemory(sdk, "alice")
+    agent = ChatAgent(system_message="You are helpful", memory=mem)
+    agent.update_memory(
+        BaseMessage.make_user_message("user", "where is my order"),
+        OpenAIBackendRole.USER,
+    )
+    agent.record_message(
+        BaseMessage(
+            role_name="assistant",
+            role_type=agent.role_type,
+            meta_dict={},
+            content="it ships tomorrow",
+        )
+    )
+    calls = sdk.conversation.record_message.await_args_list
+    assert [(c.kwargs["role"], c.kwargs["content"]) for c in calls] == [
+        ("user", "where is my order"),
+        ("assistant", "it ships tomorrow"),
+    ]
+    # The default conversation id is derived from the agent's own id.
+    assert calls[0].kwargs["conversation_id"] == str(uuid5(_CAMEL_NAMESPACE, str(agent.agent_id)))
+    sdk.memories.create.assert_not_awaited()

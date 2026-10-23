@@ -1,9 +1,15 @@
 // Synap short-term context for Mastra agents.
 //
-// `SynapMemory` already pipes ST through `recall()` for users who adopt
-// it as their full memory backend. This module is the **standalone**
-// path: drop ST into the system prompt of any Mastra Agent without
-// committing to the full SynapMemory backend.
+// `SynapMemory` replaces Mastra's history with Synap's compaction for users who
+// adopt it as their full memory backend. This module is the **standalone**
+// path: drop Synap's compaction into the system prompt of any Mastra Agent
+// without committing to the full SynapMemory backend.
+//
+// What it returns is the compaction (the summary of the turns the conversation
+// has outgrown, plus earlier turns history search found), never the recent
+// turns. The Agent's own history already carries those and `formatted_context`
+// repeats them, so putting `formatted_context` in the system prompt sent every
+// recent turn twice. Until the first compaction there is nothing to add.
 //
 // Quality contract mirrors the Python LangGraph adapter template:
 //
@@ -14,6 +20,7 @@
 //     is a no-op — never wipes the user's system prompt.
 //   - Preamble tags are overridable; pass null for both to emit raw.
 
+import { compactedHistoryFrom } from "./stream-events.js";
 import type { SynapSdkLike } from "./types.js";
 
 const SUPPORTED_STYLES = ["structured", "narrative", "bullet_points"] as const;
@@ -25,7 +32,10 @@ const DEFAULT_PREAMBLE_CLOSE = "</synap_short_term_context>";
 export type SynapShortTermOnError = "fallback" | "raise";
 
 export interface SynapShortTermResult {
-  /** The ST string ready to splice into a system prompt. Empty if none. */
+  /**
+   * Synap's compaction, ready to splice into a system prompt. Empty before the
+   * first compaction. Does not repeat the recent turns.
+   */
   formattedContext: string;
   /** Whether the server reported any ST (compaction or recent turns). */
   available: boolean;
@@ -40,7 +50,7 @@ export interface FetchSynapShortTermOptions {
 }
 
 /**
- * Fetch Synap short-term context for `conversationId`.
+ * Fetch Synap's compaction for `conversationId`.
  *
  * Returns `{ formattedContext: '', available: false }` on no-content
  * AND on SDK failure with the default `onError: 'fallback'`.
@@ -76,8 +86,8 @@ export async function fetchSynapShortTerm(
     if (!response.available) {
       return { formattedContext: "", available: false };
     }
-    const formatted = (response.formatted_context ?? "").trim();
-    return { formattedContext: formatted, available: response.available };
+    const preamble = compactedHistoryFrom(response)?.preamble ?? "";
+    return { formattedContext: preamble, available: response.available };
   } catch (err) {
     if (onError === "raise") throw err;
     console.warn(

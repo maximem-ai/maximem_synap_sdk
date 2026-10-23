@@ -49,32 +49,30 @@ agent.invoke({"messages": [{"role": "user", "content": "What do I prefer?"}]})
 | Surface | Class | Use when |
 |---|---|---|
 | Backend | `SynapBackend` | You want memory to reach the agent through its own `read_file` / `grep` / `write_file` tools |
-| Middleware | `SynapMemoryMiddleware` | You want recall scoped to the user's actual question |
+| Middleware | `SynapMemoryMiddleware` | You want recall scoped to the user's actual question; with a `conversation_id` it also records the conversation and sends Synap's compaction |
 | Tools | `SynapSearchTool`, `SynapStoreTool` | You want the model to reach for memory deliberately |
-| Stream | `SynapStreamMiddleware` | You want Synap to see the turn as it happens, not just answer questions about it |
+| Stream | `SynapStreamMiddleware` | The conversation half of the above on its own (do not combine the two) |
 
 They compose. A common setup is the backend for automatic recall plus the tools for deliberate lookups, with the stream middleware alongside.
 
-## Reporting the run on Synap's live stream
+## Recording the conversation, and Synap's compaction
 
-The first three surfaces read. `SynapStreamMiddleware` writes: it reports the five events Synap's anticipation agent watches for, on the gRPC stream `sdk.instance.listen()` opened.
+Give `SynapMemoryMiddleware` a `conversation_id` (and a `user_id`) and it does two more things, with nothing else to add:
 
 ```python
 from deepagents import create_deep_agent
 from maximem_synap import MaximemSynapSDK
-from synap_deepagents import SynapMemoryMiddleware, SynapStreamMiddleware
+from synap_deepagents import SynapMemoryMiddleware
 
 sdk = MaximemSynapSDK(api_key="sk-...")
-await sdk.instance.listen()
 
 agent = create_deep_agent(
     model="anthropic:claude-sonnet-5",
-    middleware=[
-        SynapMemoryMiddleware(sdk=sdk, user_id="alice"),
-        SynapStreamMiddleware(sdk=sdk, conversation_id="conv-123", user_id="alice"),
-    ],
+    middleware=[SynapMemoryMiddleware(sdk=sdk, user_id="alice", conversation_id="conv-123")],
 )
 ```
+
+**It reports the run on the gRPC stream, which the first event opens.** There is no `listen()` to call. A turn goes over REST only when the stream cannot carry it (tool calls, results and reasoning have no REST form and are dropped), and never both, because the server persists a streamed turn itself. `SYNAP_AUTO_LISTEN=false` (or `synap_integrations_common.set_auto_listen(sdk, False)`) turns the auto-open off.
 
 | Event | Hook | Why that hook |
 |---|---|---|
@@ -84,9 +82,13 @@ agent = create_deep_agent(
 | tool result | `wrap_tool_call` | Same hook, so the call and the result share `tool_call["id"]` by construction rather than by agreement |
 | assistant turn | `after_agent` | The exit node. `assistant_message` means a turn just ended, and the text the model produces alongside a tool call is not the answer to anything |
 
-Turn recording is **stream first, REST only as a fallback, never both** — the server persists `user_message` and `assistant_message` from the stream itself, so recording them again over REST writes and extracts the turn twice. Tool calls, results and reasoning have no REST equivalent: with no stream open they are simply not reported, and the middleware costs nothing.
+**It sends the model Synap's compaction in place of the older turns.** On every model call it asks Synap for the conversation's compaction. Once there is one, the model is sent the compaction (in the system message), then the turns Synap holds after it, then the current turn with its tool calls and results intact. Until then, and whenever Synap cannot answer, the messages go through as they are. The graph's stored state is never changed.
 
-Nothing in it can raise into the graph, and one middleware covers one conversation (the de-duplication is per instance).
+deepagents' own `SummarizationMiddleware` stays installed as the fallback. One limit to know: `create_deep_agent` builds its summarizer into the base stack and appends your middleware after it, and the first middleware in the stack wraps the rest, so the summarizer sees a long history first and can spend a model call on it before the splice replaces what it produced. Nothing a caller passes to `create_deep_agent` runs ahead of it.
+
+`SynapStreamMiddleware(sdk=, conversation_id=, user_id=)` is the same two things without the recall, for when you use `memory=[...]` or `SynapBackend` for recall. Do not add it next to `SynapMemoryMiddleware(conversation_id=...)`: that already runs one, and every event would go out twice. `SynapShortTermMiddleware` is only the compaction half.
+
+Nothing in any of it can raise into the graph, and one middleware covers one conversation (the de-duplication is per instance).
 
 ## `grep` is a semantic search
 
@@ -122,7 +124,7 @@ Use `memory=[...]` **or** `SynapMemoryMiddleware`, not both — they write to th
 
 ## Short-term context
 
-Long-term memory and short-term context are different things. Short-term is the compacted history of the *current* conversation:
+Long-term memory and short-term context are different things. Short-term is Synap's compaction of the *current* conversation:
 
 ```python
 from synap_deepagents import synap_st_instructions
@@ -133,7 +135,7 @@ system_prompt = await synap_st_instructions(
 agent = create_deep_agent(model="...", system_prompt=system_prompt)
 ```
 
-That is a snapshot taken once. For a long-running agent, use `SynapShortTermMiddleware` instead, which refreshes each turn.
+That is a snapshot taken once, and it sits beside the agent's full history. For a long-running agent, use `SynapShortTermMiddleware(sdk=, conversation_id=)` (or the conversation half of `SynapMemoryMiddleware` above) instead: it reads the compaction on every model call and replaces the turns it covers. Neither form adds the recent turns, which the agent already sends.
 
 ## Error policy
 
