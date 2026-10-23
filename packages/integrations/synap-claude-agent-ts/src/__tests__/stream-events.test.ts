@@ -16,14 +16,20 @@
  * Every assertion is on what reached the fake SDK. A test that asserts a call
  * "did not throw" passes on code that reports nothing at all.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   endSession,
+  ensureStream,
+  fetchCompactedHistory,
+  isSynapHistory,
+  recordTurn,
   reportReasoning,
   reportToolCall,
   reportToolResult,
   reportTurn,
+  setAutoListen,
+  spliceHistory,
   streamIsActive,
 } from '../stream-events.js';
 
@@ -331,5 +337,593 @@ describe('end of session', () => {
     const { sdk, calls } = fakeSdk();
     expect(await endSession(sdk, '')).toBe(false);
     expect(calls).toEqual([]);
+  });
+});
+
+// ------------------------------------------------- the stream opens itself
+
+/**
+ * An SDK whose stream is closed until `listen()` is called, the way the real
+ * one behaves: `instance.is_listening` is a getter, `listen()` throws
+ * `ListeningAlreadyActiveError` when a stream exists.
+ */
+function lazySdk(opts: {
+  listenFails?: boolean;
+  neverOpens?: boolean;
+  listenHangs?: boolean;
+  restThrows?: boolean;
+} = {}) {
+  const calls: Call[] = [];
+  const rest: unknown[] = [];
+  const state = { listening: false, listens: 0 };
+  const record = (method: string) => async (options: unknown) => {
+    calls.push({ method, options });
+  };
+  const sdk = {
+    instance: {
+      get is_listening() { return state.listening; },
+      async listen() {
+        if (state.listening) throw new Error('Listening is already active on this instance');
+        state.listens += 1;
+        if (opts.listenHangs === true) return new Promise<void>(() => {});
+        await Promise.resolve();
+        if (opts.listenFails === true) throw new Error('connection refused');
+        if (opts.neverOpens !== true) state.listening = true;
+      },
+      send_message: record('send_message'),
+      record_tool_call: record('record_tool_call'),
+      record_tool_result: record('record_tool_result'),
+      record_thinking: record('record_thinking'),
+      end_session: record('end_session'),
+    },
+    conversation: {
+      async record_message(options: unknown) {
+        if (opts.restThrows === true) throw new Error('503');
+        rest.push(options);
+      },
+    },
+  };
+  return { sdk, calls, rest, state };
+}
+
+describe('the first report opens the stream', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('opens the stream on the first turn and sends it there', async () => {
+    const { sdk, calls, state } = lazySdk();
+    expect(streamIsActive(sdk)).toBe(false);
+    expect(await reportTurn(sdk, { role: 'user', content: 'hi', userId: 'u1', conversationId: 'c1' }))
+      .toBe(true);
+    expect(state.listens).toBe(1);
+    expect(streamIsActive(sdk)).toBe(true);
+    expect(calls[0]?.method).toBe('send_message');
+  });
+
+  it('reads the real SDK\'s `is_listening` getter, not only a method', () => {
+    // The published SDK has no `instance.isListening()`; that method lives on
+    // its private `_internal`. Reading only the method made every real SDK
+    // look permanently closed.
+    expect(streamIsActive({ instance: { is_listening: true } })).toBe(true);
+    expect(streamIsActive({ instance: { is_listening: false } })).toBe(false);
+  });
+
+  it('a stream the caller opened is used and never reopened', async () => {
+    const { sdk, state } = lazySdk();
+    await sdk.instance.listen();
+    expect(await ensureStream(sdk)).toBe(true);
+    expect(state.listens).toBe(1);
+  });
+
+  it('concurrent first reports share one open', async () => {
+    const { sdk, calls, state } = lazySdk();
+    const results = await Promise.all([
+      reportTurn(sdk, { role: 'user', content: 'a', userId: 'u1', conversationId: 'c1' }),
+      reportToolCall(sdk, { toolName: 't', userId: 'u1', conversationId: 'c1' }),
+      reportReasoning(sdk, { content: 'x', userId: 'u1', conversationId: 'c1' }),
+    ]);
+    expect(results).toEqual([true, true, true]);
+    expect(state.listens).toBe(1);
+    expect(calls).toHaveLength(3);
+  });
+
+  it('tool calls, tool results and reasoning also open it', async () => {
+    for (const report of [
+      (sdk: unknown) => reportToolCall(sdk, { toolName: 't', userId: 'u1' }),
+      (sdk: unknown) => reportToolResult(sdk, { result: 'r', userId: 'u1' }),
+      (sdk: unknown) => reportReasoning(sdk, { content: 'x', userId: 'u1' }),
+    ]) {
+      const { sdk, state } = lazySdk();
+      expect(await report(sdk)).toBe(true);
+      expect(state.listens).toBe(1);
+    }
+  });
+
+  it('a failed open is not retried for a minute, and warns once', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { sdk, state } = lazySdk({ listenFails: true });
+    expect(await ensureStream(sdk)).toBe(false);
+    expect(await ensureStream(sdk)).toBe(false);
+    expect(state.listens).toBe(1);
+    vi.advanceTimersByTime(61_000);
+    expect(await ensureStream(sdk)).toBe(false);
+    expect(state.listens).toBe(2);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('a listen() that never answers is given up on after ten seconds', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { sdk } = lazySdk({ listenHangs: true });
+    const pending = ensureStream(sdk);
+    await vi.advanceTimersByTimeAsync(10_001);
+    expect(await pending).toBe(false);
+  });
+
+  it('a listen() that resolves without a stream counts as a failure', async () => {
+    const { sdk, state } = lazySdk({ neverOpens: true });
+    expect(await ensureStream(sdk)).toBe(false);
+    expect(await ensureStream(sdk)).toBe(false);
+    expect(state.listens).toBe(1);
+  });
+
+  it('SYNAP_AUTO_LISTEN=false leaves the stream closed', async () => {
+    vi.stubEnv('SYNAP_AUTO_LISTEN', 'false');
+    const { sdk, state } = lazySdk();
+    expect(await ensureStream(sdk)).toBe(false);
+    expect(state.listens).toBe(0);
+  });
+
+  it('setAutoListen(sdk, false) leaves it closed for that SDK only', async () => {
+    const off = lazySdk();
+    const on = lazySdk();
+    setAutoListen(off.sdk, false);
+    expect(await ensureStream(off.sdk)).toBe(false);
+    expect(await ensureStream(on.sdk)).toBe(true);
+    expect(off.state.listens).toBe(0);
+  });
+
+  it('setAutoListen(sdk, true) beats the environment', async () => {
+    vi.stubEnv('SYNAP_AUTO_LISTEN', 'false');
+    const { sdk } = lazySdk();
+    setAutoListen(sdk, true);
+    expect(await ensureStream(sdk)).toBe(true);
+  });
+
+  it('an opted-out SDK that already has a stream still uses it', async () => {
+    const { sdk, calls } = lazySdk();
+    await sdk.instance.listen();
+    setAutoListen(sdk, false);
+    expect(await reportTurn(sdk, { role: 'user', content: 'hi', userId: 'u1' })).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('never throws on things that are not an SDK', async () => {
+    expect(await ensureStream(null)).toBe(false);
+    expect(await ensureStream(undefined)).toBe(false);
+    expect(await ensureStream('sdk')).toBe(false);
+    expect(await ensureStream({ instance: null })).toBe(false);
+  });
+
+  it('endSession never opens a stream', async () => {
+    const { sdk, calls, state } = lazySdk();
+    expect(await endSession(sdk, 'c1')).toBe(false);
+    expect(state.listens).toBe(0);
+    expect(calls).toEqual([]);
+  });
+
+  it('a tool result with no stream is archived locally and never sent', async () => {
+    const archive = vi.fn();
+    const { sdk, calls } = lazySdk({ neverOpens: true });
+    (sdk as unknown as { archive_tool_result: typeof archive }).archive_tool_result = archive;
+    await reportToolResult(sdk, { result: 'r', toolName: 't', userId: 'u1', conversationId: 'c1' });
+    expect(archive).toHaveBeenCalledWith('c1', 'r', { tool_name: 't' });
+    expect(calls).toEqual([]);
+  });
+});
+
+// ------------------------------------- one open, however many copies of this file
+
+/**
+ * An SDK that models the real one's stream client, which the older fakes do
+ * not: `listen()` creates the client at once and `connect` takes `connectMs`;
+ * `listen()` throws `ListeningAlreadyActiveError` for as long as a client
+ * exists (connecting, connected or reconnecting), while `is_listening` is true
+ * only when connected. `dropFor(ms)` puts the client into a reconnect.
+ */
+class ListeningAlreadyActiveError extends Error {
+  override name = 'ListeningAlreadyActiveError';
+}
+
+function clientSdk(opts: { connectMs?: number; failFirst?: number } = {}) {
+  const state = { listens: 0, hasClient: false, connected: false, failures: 0 };
+  const sdk = {
+    instance: {
+      get is_listening() { return state.connected; },
+      async listen() {
+        if (state.hasClient) throw new ListeningAlreadyActiveError('Listening is already active on this instance');
+        state.listens += 1;
+        if (state.failures < (opts.failFirst ?? 0)) {
+          state.failures += 1;
+          await new Promise((r) => setTimeout(r, 5));
+          throw new Error('connect timed out');
+        }
+        state.hasClient = true;
+        await new Promise((r) => setTimeout(r, opts.connectMs ?? 20));
+        state.connected = true;
+      },
+      async send_message(_options?: unknown) {},
+    },
+  };
+  const dropFor = (ms: number) => {
+    state.connected = false;
+    setTimeout(() => { state.connected = true; }, ms);
+  };
+  return { sdk, state, dropFor };
+}
+
+describe('one open per SDK, whatever imports this file', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it('two copies of the module share one open', async () => {
+    // eve bundles the helper separately for hooks and for instructions; each
+    // bundle is its own module scope, so a module-level map is one per copy.
+    const first = await import('../stream-events.js');
+    vi.resetModules();
+    const second = await import('../stream-events.js');
+    expect(second.ensureStream).not.toBe(first.ensureStream);
+    const { sdk, state } = clientSdk({ connectMs: 50 });
+    const results = await Promise.all([first.ensureStream(sdk), second.ensureStream(sdk)]);
+    expect(results).toEqual([true, true]);
+    expect(state.listens).toBe(1);
+  });
+
+  it('opt-out is shared across copies too', async () => {
+    const first = await import('../stream-events.js');
+    vi.resetModules();
+    const second = await import('../stream-events.js');
+    const { sdk, state } = clientSdk();
+    first.setAutoListen(sdk, false);
+    expect(await second.ensureStream(sdk)).toBe(false);
+    expect(state.listens).toBe(0);
+  });
+
+  it('keeps the state on the SDK under a registry symbol, out of enumeration', async () => {
+    const { sdk } = clientSdk();
+    await ensureStream(sdk);
+    expect(Object.keys(sdk)).toEqual(['instance']);
+    expect(Object.getOwnPropertySymbols(sdk)).toContain(Symbol.for('@maximem/synap-stream-events.state'));
+  });
+
+  it('still opens one stream on an SDK that cannot take a property', async () => {
+    const { sdk, state } = clientSdk({ connectMs: 20 });
+    Object.freeze(sdk);
+    const results = await Promise.all([ensureStream(sdk), ensureStream(sdk)]);
+    expect(results).toEqual([true, true]);
+    expect(state.listens).toBe(1);
+  });
+});
+
+describe('a stream that is already on its way is used, not failed', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  async function opened(sdk: object): Promise<void> {
+    const p = ensureStream(sdk);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await p).toBe(true);
+  }
+
+  it('a reconnecting stream (listen() says already active) is waited for', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { sdk, state, dropFor } = clientSdk();
+    await opened(sdk);
+    dropFor(500);
+    const pending = ensureStream(sdk);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(await pending).toBe(true);
+    // The one real open; the second call asked, was refused, and waited.
+    expect(state.listens).toBe(1);
+    expect(warn).not.toHaveBeenCalled();
+    // No cooldown: the next report goes straight over the stream.
+    expect(await ensureStream(sdk)).toBe(true);
+  });
+
+  it('a turn is sent on the stream while it reconnects, not over REST', async () => {
+    vi.useFakeTimers();
+    const { sdk, dropFor } = clientSdk();
+    const rest: unknown[] = [];
+    (sdk as unknown as { conversation: unknown }).conversation = {
+      record_message: async (o: unknown) => { rest.push(o); },
+    };
+    const sent: unknown[] = [];
+    sdk.instance.send_message = async (o?: unknown) => { sent.push(o); };
+    await opened(sdk);
+    dropFor(400);
+    const turn = recordTurn(sdk, { role: 'user', content: 'hi', userId: 'u1', conversationId: 'c1' });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(await turn).toBe(true);
+    expect(sent).toHaveLength(1);
+    expect(rest).toEqual([]);
+  });
+
+  it('gives up on a stream that never comes back, after three seconds', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { sdk, dropFor } = clientSdk();
+    await opened(sdk);
+    dropFor(60_000);
+    const pending = ensureStream(sdk);
+    await vi.advanceTimersByTimeAsync(3_100);
+    expect(await pending).toBe(false);
+  });
+
+  it('an error that is not already-active is a failure at once', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { sdk, state } = clientSdk({ failFirst: 1 });
+    expect(await ensureStream(sdk)).toBe(false);
+    expect(state.listens).toBe(1);
+  });
+});
+
+describe('the first failed open is retried quickly, later ones cool down', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('retries once after three seconds and the stream comes up', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { sdk, state } = clientSdk({ failFirst: 1 });
+    const first = ensureStream(sdk);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(await first).toBe(false);
+    // Inside three seconds: REST, no new listen().
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(await ensureStream(sdk)).toBe(false);
+    expect(state.listens).toBe(1);
+    await vi.advanceTimersByTimeAsync(1_100);
+    const retry = ensureStream(sdk);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await retry).toBe(true);
+    expect(state.listens).toBe(2);
+  });
+
+  it('a second failure waits out the full minute', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { sdk, state } = clientSdk({ failFirst: 3 });
+    for (const advance of [50, 3_100]) {
+      const p = ensureStream(sdk);
+      await vi.advanceTimersByTimeAsync(advance);
+      expect(await p).toBe(false);
+      if (advance === 50) await vi.advanceTimersByTimeAsync(3_100);
+    }
+    expect(state.listens).toBe(2);
+    // Three and then twenty seconds after the second failure: still cooling down.
+    await vi.advanceTimersByTimeAsync(3_100);
+    expect(await ensureStream(sdk)).toBe(false);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(await ensureStream(sdk)).toBe(false);
+    expect(state.listens).toBe(2);
+    await vi.advanceTimersByTimeAsync(40_000);
+    const third = ensureStream(sdk);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(await third).toBe(false);
+    expect(state.listens).toBe(3);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('a listen() that timed out is not repeated once it has finished', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // connect takes twelve seconds: past the ten-second give-up.
+    const { sdk, state } = clientSdk({ connectMs: 12_000 });
+    const first = ensureStream(sdk);
+    await vi.advanceTimersByTimeAsync(10_100);
+    expect(await first).toBe(false);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(await ensureStream(sdk)).toBe(true);
+    expect(state.listens).toBe(1);
+  });
+
+  it('a retry while that listen() is still running does not start a second stream', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { sdk, state } = clientSdk({ connectMs: 30_000 });
+    const first = ensureStream(sdk);
+    await vi.advanceTimersByTimeAsync(10_100);
+    expect(await first).toBe(false);
+    await vi.advanceTimersByTimeAsync(3_000);
+    const retry = ensureStream(sdk);
+    await vi.advanceTimersByTimeAsync(10_100);
+    expect(await retry).toBe(false);
+    expect(state.listens).toBe(1);
+  });
+});
+
+describe('recordTurn: stream first, REST second, never both', () => {
+  it('opens the stream and does not write REST', async () => {
+    const { sdk, calls, rest } = lazySdk();
+    expect(await recordTurn(sdk, {
+      role: 'assistant', content: 'yes', conversationId: 'c1', userId: 'u1',
+    })).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(opts(calls)).toMatchObject({ event_type: 'assistant_message' });
+    expect(rest).toEqual([]);
+  });
+
+  it('falls back to REST when the stream cannot open', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { sdk, calls, rest } = lazySdk({ listenFails: true });
+    expect(await recordTurn(sdk, {
+      role: 'user', content: 'hi', conversationId: 'c1', userId: 'u1', customerId: '',
+    })).toBe(true);
+    expect(calls).toEqual([]);
+    expect(rest).toEqual([{ conversation_id: 'c1', role: 'user', content: 'hi', user_id: 'u1' }]);
+  });
+
+  it('sends a customer_id on REST only when there is one', async () => {
+    const { sdk, rest } = lazySdk({ neverOpens: true });
+    await recordTurn(sdk, { role: 'user', content: 'hi', conversationId: 'c1', userId: 'u1', customerId: 'cu' });
+    expect(rest[0]).toMatchObject({ customer_id: 'cu' });
+  });
+
+  it('is false, and writes nothing, for empty text', async () => {
+    const { sdk, calls, rest, state } = lazySdk();
+    expect(await recordTurn(sdk, { role: 'user', content: '  ', conversationId: 'c1' })).toBe(false);
+    expect(state.listens).toBe(0);
+    expect(calls).toEqual([]);
+    expect(rest).toEqual([]);
+  });
+
+  it('is false with no stream and no conversation id (REST needs one)', async () => {
+    const { sdk, rest } = lazySdk({ neverOpens: true });
+    expect(await recordTurn(sdk, { role: 'user', content: 'hi' })).toBe(false);
+    expect(rest).toEqual([]);
+  });
+
+  it('swallows a failing REST write', async () => {
+    const { sdk } = lazySdk({ neverOpens: true, restThrows: true });
+    expect(await recordTurn(sdk, { role: 'user', content: 'hi', conversationId: 'c1' })).toBe(false);
+  });
+
+  it('is false when the SDK has neither a stream nor REST', async () => {
+    expect(await recordTurn({}, { role: 'user', content: 'hi', conversationId: 'c1' })).toBe(false);
+  });
+});
+
+// ------------------------------------------------------ Synap's history
+
+function historySdk(response: unknown) {
+  return {
+    conversation: {
+      context: { get_context_for_prompt: vi.fn(async () => response) },
+    },
+  };
+}
+
+describe('fetchCompactedHistory', () => {
+  it('wraps the compaction block and keeps the turns after it', async () => {
+    const sdk = historySdk({
+      context_block: '## Conversation so far (compacted at 5)\nthey like tea',
+      history_block: 'earlier: asked about kettles',
+      recent_messages: [
+        { role: 'user', content: 'and coffee?' },
+        { role: 'assistant', content: 'also fine' },
+        { role: 'system', content: 'dropped' },
+        { role: 'user', content: '   ' },
+      ],
+      compaction_id: 'cmp-1',
+    });
+    const h = await fetchCompactedHistory(sdk, 'c1');
+    expect(h?.preamble).toBe(
+      '<synap_conversation_history>\n## Conversation so far (compacted at 5)\nthey like tea\n\n'
+      + 'earlier: asked about kettles\n</synap_conversation_history>',
+    );
+    expect(h?.turns).toEqual([['user', 'and coffee?'], ['assistant', 'also fine']]);
+    expect(h?.compactionId).toBe('cmp-1');
+    expect(sdk.conversation.context.get_context_for_prompt)
+      .toHaveBeenCalledWith({ conversation_id: 'c1' });
+  });
+
+  it('is null when no compaction exists yet', async () => {
+    expect(await fetchCompactedHistory(historySdk({ context_block: null, recent_messages: [] }), 'c1'))
+      .toBeNull();
+    expect(await fetchCompactedHistory(historySdk({ context_block: '  ' }), 'c1')).toBeNull();
+  });
+
+  it('is null on an SDK without the method, with no conversation, and on error', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(await fetchCompactedHistory({}, 'c1')).toBeNull();
+    expect(await fetchCompactedHistory(historySdk({ context_block: 'x' }), '')).toBeNull();
+    const failing = { conversation: { context: { get_context_for_prompt: async () => { throw new Error('500'); } } } };
+    expect(await fetchCompactedHistory(failing, 'c1')).toBeNull();
+  });
+});
+
+describe('isSynapHistory', () => {
+  it('recognises the preamble and the SDK compaction block, nothing else', () => {
+    expect(isSynapHistory('<synap_conversation_history>\nx')).toBe(true);
+    expect(isSynapHistory('  \n## Conversation so far (compacted at 3)')).toBe(true);
+    expect(isSynapHistory('hello')).toBe(false);
+    expect(isSynapHistory(42)).toBe(false);
+  });
+});
+
+describe('spliceHistory', () => {
+  type Msg = { role: string; text: string };
+  const fns = {
+    roleOf: (m: Msg) => m.role,
+    textOf: (m: Msg) => m.text,
+    makeMessage: (role: string, text: string): Msg => ({ role, text }),
+  };
+  const history = {
+    preamble: '<synap_conversation_history>\nsummary\n</synap_conversation_history>',
+    turns: [['user', 'q5'], ['assistant', 'a5']] as const,
+  };
+
+  it('replaces every earlier turn with the preamble and Synap\'s turns', () => {
+    const out = spliceHistory<Msg>([
+      { role: 'system', text: 'be nice' },
+      { role: 'user', text: 'q1' }, { role: 'assistant', text: 'a1' },
+      { role: 'user', text: 'q5' }, { role: 'assistant', text: 'a5' },
+      { role: 'user', text: 'q6' },
+    ], history, fns);
+    expect(out).toEqual([
+      { role: 'system', text: 'be nice' },
+      { role: 'system', text: history.preamble },
+      { role: 'user', text: 'q5' }, { role: 'assistant', text: 'a5' },
+      { role: 'user', text: 'q6' },
+    ]);
+  });
+
+  it('keeps the current turn whole, tool messages included', () => {
+    const out = spliceHistory<Msg>([
+      { role: 'user', text: 'old' }, { role: 'tool', text: 'old result' },
+      { role: 'user', text: 'now' }, { role: 'assistant', text: 'calling' }, { role: 'tool', text: 'result' },
+    ], history, fns);
+    expect(out.slice(-3)).toEqual([
+      { role: 'user', text: 'now' }, { role: 'assistant', text: 'calling' }, { role: 'tool', text: 'result' },
+    ]);
+    expect(out.some((m) => m.text === 'old result')).toBe(false);
+  });
+
+  it('drops a Synap copy of the current user message, and what followed it', () => {
+    const out = spliceHistory<Msg>(
+      [{ role: 'user', text: 'q5' }, { role: 'assistant', text: 'a5' }, { role: 'user', text: 'q6' }],
+      { preamble: 'P', turns: [['user', 'q5'], ['assistant', 'a5'], ['user', 'q6']] },
+      fns,
+    );
+    expect(out.filter((m) => m.text === 'q6')).toHaveLength(1);
+  });
+
+  it('keeps framework turns Synap has not recorded yet', () => {
+    const out = spliceHistory<Msg>([
+      { role: 'user', text: 'q5' }, { role: 'assistant', text: 'a5' },
+      { role: 'user', text: 'q5b' }, { role: 'assistant', text: 'a5b' },
+      { role: 'user', text: 'q6' },
+    ], history, fns);
+    expect(out.map((m) => m.text)).toEqual([history.preamble, 'q5', 'a5', 'q5b', 'a5b', 'q6']);
+  });
+
+  it('does not keep a previous splice\'s preamble as a system message', () => {
+    const out = spliceHistory<Msg>([
+      { role: 'system', text: history.preamble },
+      { role: 'user', text: 'q6' },
+    ], history, fns);
+    expect(out.filter((m) => m.text === history.preamble)).toHaveLength(1);
   });
 });

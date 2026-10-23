@@ -42,18 +42,35 @@ user's actual question as the search query, which ``MemoryMiddleware`` cannot do
         middleware=[SynapMemoryMiddleware(sdk=sdk, user_id="alice")],
     )
 
-:class:`SynapShortTermMiddleware` does the same for compacted conversation
-history, refreshed each turn.
+Give it a ``conversation_id`` as well and it also records the conversation on
+Synap's gRPC stream (the first turn opens it; no ``listen()`` call is needed,
+and ``SYNAP_AUTO_LISTEN=false`` turns that off) and, once Synap has compacted the
+conversation, sends the model that compaction in place of the turns before the
+current one::
+
+    agent = create_deep_agent(
+        model="anthropic:claude-sonnet-5",
+        middleware=[SynapMemoryMiddleware(
+            sdk=sdk, user_id="alice", conversation_id="conv-123",
+        )],
+    )
+
+:class:`SynapShortTermMiddleware` does only the second half: the compaction in
+place of the turns it covers, read on every model call. deepagents' own
+summarizer stays installed as the fallback; it runs ahead of caller middleware,
+so on a long history it may still spend a model call that the splice then makes
+moot.
 
 **3. Tools.** :class:`SynapSearchTool` and :class:`SynapStoreTool` are ordinary
 LangChain tools, for when you want the model to reach for memory deliberately
 rather than have it arrive automatically.
 
-**4. A stream.** Everything above reads. :class:`SynapStreamMiddleware` writes:
-it reports the question, the reasoning, each tool call, each tool result and the
-answer on the gRPC stream ``sdk.instance.listen()`` opened, which is what the
-anticipation agent watches. It is silent when no stream is running, so adding it
-costs nothing until you open one::
+**4. A stream.** :class:`SynapStreamMiddleware` is the conversation half of
+``SynapMemoryMiddleware(conversation_id=...)`` on its own: it reports the
+question, the reasoning, each tool call, each tool result and the answer on the
+gRPC stream (opened by the first of them), which is what the anticipation agent
+watches, and splices Synap's compaction in as above. Use one or the other, not
+both::
 
     agent = create_deep_agent(
         model="anthropic:claude-sonnet-5",

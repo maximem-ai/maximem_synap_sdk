@@ -1,8 +1,7 @@
 from google.protobuf.internal import containers as _containers
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from collections.abc import Iterable as _Iterable, Mapping as _Mapping
-from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
+from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Mapping, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
@@ -21,7 +20,7 @@ class StreamEvent(_message.Message):
     def __init__(self, conversation_event: _Optional[_Union[ConversationEvent, _Mapping]] = ..., heartbeat_ping: _Optional[_Union[HeartbeatPing, _Mapping]] = ..., session_control: _Optional[_Union[SessionControl, _Mapping]] = ..., context_used: _Optional[_Union[ContextUsedEvent, _Mapping]] = ..., context_assembled: _Optional[_Union[ContextAssembledEvent, _Mapping]] = ...) -> None: ...
 
 class ContextUsedEvent(_message.Message):
-    __slots__ = ("bundle_id", "conversation_id", "user_id", "customer_id", "served_item_ids", "timestamp_ms", "scope", "source_bundle_ids")
+    __slots__ = ("bundle_id", "conversation_id", "user_id", "customer_id", "served_item_ids", "timestamp_ms", "scope", "source_bundle_ids", "query_count")
     BUNDLE_ID_FIELD_NUMBER: _ClassVar[int]
     CONVERSATION_ID_FIELD_NUMBER: _ClassVar[int]
     USER_ID_FIELD_NUMBER: _ClassVar[int]
@@ -30,6 +29,7 @@ class ContextUsedEvent(_message.Message):
     TIMESTAMP_MS_FIELD_NUMBER: _ClassVar[int]
     SCOPE_FIELD_NUMBER: _ClassVar[int]
     SOURCE_BUNDLE_IDS_FIELD_NUMBER: _ClassVar[int]
+    QUERY_COUNT_FIELD_NUMBER: _ClassVar[int]
     bundle_id: str
     conversation_id: str
     user_id: str
@@ -38,7 +38,8 @@ class ContextUsedEvent(_message.Message):
     timestamp_ms: int
     scope: str
     source_bundle_ids: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, bundle_id: _Optional[str] = ..., conversation_id: _Optional[str] = ..., user_id: _Optional[str] = ..., customer_id: _Optional[str] = ..., served_item_ids: _Optional[_Iterable[str]] = ..., timestamp_ms: _Optional[int] = ..., scope: _Optional[str] = ..., source_bundle_ids: _Optional[_Iterable[str]] = ...) -> None: ...
+    query_count: int
+    def __init__(self, bundle_id: _Optional[str] = ..., conversation_id: _Optional[str] = ..., user_id: _Optional[str] = ..., customer_id: _Optional[str] = ..., served_item_ids: _Optional[_Iterable[str]] = ..., timestamp_ms: _Optional[int] = ..., scope: _Optional[str] = ..., source_bundle_ids: _Optional[_Iterable[str]] = ..., query_count: _Optional[int] = ...) -> None: ...
 
 class ContextAssembledEvent(_message.Message):
     __slots__ = ("correlation_id", "conversation_id", "user_id", "customer_id", "final_item_ids", "final_total_tokens", "compaction_id", "recent_turn_count", "compaction_end_timestamp", "assembly_source", "assembly_duration_ms", "cache_hit", "timestamp_ms", "sdk_version")
@@ -147,16 +148,26 @@ class SessionControl(_message.Message):
     def __init__(self, action: _Optional[str] = ..., session_id: _Optional[str] = ..., conversation_id: _Optional[str] = ..., user_id: _Optional[str] = ..., customer_id: _Optional[str] = ...) -> None: ...
 
 class StreamResponse(_message.Message):
-    __slots__ = ("context_bundle", "heartbeat_pong", "signal", "event_ack")
+    __slots__ = ("context_bundle", "heartbeat_pong", "signal", "event_ack", "conversation_state")
     CONTEXT_BUNDLE_FIELD_NUMBER: _ClassVar[int]
     HEARTBEAT_PONG_FIELD_NUMBER: _ClassVar[int]
     SIGNAL_FIELD_NUMBER: _ClassVar[int]
     EVENT_ACK_FIELD_NUMBER: _ClassVar[int]
+    CONVERSATION_STATE_FIELD_NUMBER: _ClassVar[int]
     context_bundle: ContextBundleProto
     heartbeat_pong: HeartbeatPong
     signal: StreamSignal
     event_ack: EventAck
-    def __init__(self, context_bundle: _Optional[_Union[ContextBundleProto, _Mapping]] = ..., heartbeat_pong: _Optional[_Union[HeartbeatPong, _Mapping]] = ..., signal: _Optional[_Union[StreamSignal, _Mapping]] = ..., event_ack: _Optional[_Union[EventAck, _Mapping]] = ...) -> None: ...
+    conversation_state: ConversationState
+    def __init__(self, context_bundle: _Optional[_Union[ContextBundleProto, _Mapping]] = ..., heartbeat_pong: _Optional[_Union[HeartbeatPong, _Mapping]] = ..., signal: _Optional[_Union[StreamSignal, _Mapping]] = ..., event_ack: _Optional[_Union[EventAck, _Mapping]] = ..., conversation_state: _Optional[_Union[ConversationState, _Mapping]] = ...) -> None: ...
+
+class ConversationState(_message.Message):
+    __slots__ = ("conversation_id", "message_count")
+    CONVERSATION_ID_FIELD_NUMBER: _ClassVar[int]
+    MESSAGE_COUNT_FIELD_NUMBER: _ClassVar[int]
+    conversation_id: str
+    message_count: int
+    def __init__(self, conversation_id: _Optional[str] = ..., message_count: _Optional[int] = ...) -> None: ...
 
 class EventAck(_message.Message):
     __slots__ = ("event_ids", "timestamp_ms")
@@ -249,7 +260,7 @@ class ContextBundleProto(_message.Message):
     def __init__(self, bundle_id: _Optional[str] = ..., decision_id: _Optional[str] = ..., items_by_type: _Optional[_Mapping[str, ContextItemList]] = ..., total_tokens: _Optional[int] = ..., token_budget: _Optional[int] = ..., budget_exceeded: bool = ..., retrieval_mode: _Optional[str] = ..., sources_queried: _Optional[_Iterable[str]] = ..., degradation_level: _Optional[str] = ..., warnings: _Optional[_Iterable[str]] = ..., created_at: _Optional[str] = ..., retrieval_time_ms: _Optional[int] = ..., cache_hit: bool = ..., search_queries: _Optional[_Iterable[str]] = ..., anticipation_user_id: _Optional[str] = ..., anticipation_customer_id: _Optional[str] = ..., anticipation_conversation_id: _Optional[str] = ..., search_keywords: _Optional[_Iterable[str]] = ..., bundle_type: _Optional[str] = ..., conversation_context: _Optional[_Union[ConversationContextProto, _Mapping]] = ..., bundle_confidence: _Optional[float] = ..., origin_pattern_id: _Optional[str] = ..., ttl_hint_seconds: _Optional[int] = ..., anticipation_scope_rung: _Optional[str] = ...) -> None: ...
 
 class ConversationContextProto(_message.Message):
-    __slots__ = ("summary", "current_state_json", "key_extractions_json", "recent_turns", "compaction_id", "compacted_at", "conversation_id")
+    __slots__ = ("summary", "current_state_json", "key_extractions_json", "recent_turns", "compaction_id", "compacted_at", "conversation_id", "compacted_message_count", "total_message_count", "context_block")
     SUMMARY_FIELD_NUMBER: _ClassVar[int]
     CURRENT_STATE_JSON_FIELD_NUMBER: _ClassVar[int]
     KEY_EXTRACTIONS_JSON_FIELD_NUMBER: _ClassVar[int]
@@ -257,6 +268,9 @@ class ConversationContextProto(_message.Message):
     COMPACTION_ID_FIELD_NUMBER: _ClassVar[int]
     COMPACTED_AT_FIELD_NUMBER: _ClassVar[int]
     CONVERSATION_ID_FIELD_NUMBER: _ClassVar[int]
+    COMPACTED_MESSAGE_COUNT_FIELD_NUMBER: _ClassVar[int]
+    TOTAL_MESSAGE_COUNT_FIELD_NUMBER: _ClassVar[int]
+    CONTEXT_BLOCK_FIELD_NUMBER: _ClassVar[int]
     summary: str
     current_state_json: str
     key_extractions_json: str
@@ -264,7 +278,10 @@ class ConversationContextProto(_message.Message):
     compaction_id: str
     compacted_at: str
     conversation_id: str
-    def __init__(self, summary: _Optional[str] = ..., current_state_json: _Optional[str] = ..., key_extractions_json: _Optional[str] = ..., recent_turns: _Optional[_Iterable[_Union[RecentTurnProto, _Mapping]]] = ..., compaction_id: _Optional[str] = ..., compacted_at: _Optional[str] = ..., conversation_id: _Optional[str] = ...) -> None: ...
+    compacted_message_count: int
+    total_message_count: int
+    context_block: str
+    def __init__(self, summary: _Optional[str] = ..., current_state_json: _Optional[str] = ..., key_extractions_json: _Optional[str] = ..., recent_turns: _Optional[_Iterable[_Union[RecentTurnProto, _Mapping]]] = ..., compaction_id: _Optional[str] = ..., compacted_at: _Optional[str] = ..., conversation_id: _Optional[str] = ..., compacted_message_count: _Optional[int] = ..., total_message_count: _Optional[int] = ..., context_block: _Optional[str] = ...) -> None: ...
 
 class RecentTurnProto(_message.Message):
     __slots__ = ("role", "content", "timestamp")
@@ -283,7 +300,7 @@ class ContextItemList(_message.Message):
     def __init__(self, items: _Optional[_Iterable[_Union[ContextItemProto, _Mapping]]] = ...) -> None: ...
 
 class ContextItemProto(_message.Message):
-    __slots__ = ("item_id", "content", "context_type", "source", "similarity_score", "relevance_score", "confidence", "scope", "entity_id", "created_at", "event_date", "valid_until", "temporal_category", "temporal_confidence")
+    __slots__ = ("item_id", "content", "context_type", "source", "similarity_score", "relevance_score", "confidence", "scope", "entity_id", "created_at", "event_date", "valid_until", "temporal_category", "temporal_confidence", "said_at", "rank_score", "questions")
     ITEM_ID_FIELD_NUMBER: _ClassVar[int]
     CONTENT_FIELD_NUMBER: _ClassVar[int]
     CONTEXT_TYPE_FIELD_NUMBER: _ClassVar[int]
@@ -298,6 +315,9 @@ class ContextItemProto(_message.Message):
     VALID_UNTIL_FIELD_NUMBER: _ClassVar[int]
     TEMPORAL_CATEGORY_FIELD_NUMBER: _ClassVar[int]
     TEMPORAL_CONFIDENCE_FIELD_NUMBER: _ClassVar[int]
+    SAID_AT_FIELD_NUMBER: _ClassVar[int]
+    RANK_SCORE_FIELD_NUMBER: _ClassVar[int]
+    QUESTIONS_FIELD_NUMBER: _ClassVar[int]
     item_id: str
     content: str
     context_type: str
@@ -312,7 +332,10 @@ class ContextItemProto(_message.Message):
     valid_until: str
     temporal_category: str
     temporal_confidence: float
-    def __init__(self, item_id: _Optional[str] = ..., content: _Optional[str] = ..., context_type: _Optional[str] = ..., source: _Optional[str] = ..., similarity_score: _Optional[float] = ..., relevance_score: _Optional[float] = ..., confidence: _Optional[float] = ..., scope: _Optional[str] = ..., entity_id: _Optional[str] = ..., created_at: _Optional[str] = ..., event_date: _Optional[str] = ..., valid_until: _Optional[str] = ..., temporal_category: _Optional[str] = ..., temporal_confidence: _Optional[float] = ...) -> None: ...
+    said_at: str
+    rank_score: float
+    questions: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, item_id: _Optional[str] = ..., content: _Optional[str] = ..., context_type: _Optional[str] = ..., source: _Optional[str] = ..., similarity_score: _Optional[float] = ..., relevance_score: _Optional[float] = ..., confidence: _Optional[float] = ..., scope: _Optional[str] = ..., entity_id: _Optional[str] = ..., created_at: _Optional[str] = ..., event_date: _Optional[str] = ..., valid_until: _Optional[str] = ..., temporal_category: _Optional[str] = ..., temporal_confidence: _Optional[float] = ..., said_at: _Optional[str] = ..., rank_score: _Optional[float] = ..., questions: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class TelemetryEvent(_message.Message):
     __slots__ = ("event_type", "instance_id", "client_id", "correlation_id", "timestamp_ms", "latency_ms", "status", "error_code", "scope", "cache_status", "attempt", "http_method", "http_path", "http_status_code", "metadata", "sdk_version", "batch_id")

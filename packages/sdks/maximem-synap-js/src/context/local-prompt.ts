@@ -12,6 +12,7 @@
  * changes what its model sees.
  */
 
+import { CONTEXT_BLOCK_PREFIX } from '../cache/short-term-store.js';
 import type { ShortTermEntry, ShortTermTurn } from '../cache/short-term-store.js';
 import type { Json } from './types.js';
 
@@ -39,6 +40,13 @@ export interface LocalPromptResponse {
   recent_message_count: number;
   compacted_message_count: number;
   total_message_count: number;
+  /**
+   * The framed compaction block alone (also inside formatted_context), for a
+   * framework that keeps its own message list: a system message ahead of
+   * recent_messages, in place of the turns it covers.
+   */
+  context_block: string | null;
+  compaction_id: string | null;
   [key: string]: unknown;
 }
 
@@ -77,7 +85,7 @@ function buildRecentMessages(turns: readonly ShortTermTurn[]): LocalRecentMessag
     role: t.role || 'user',
     content: t.content ?? '',
     timestamp: t.timestamp,
-    message_id: `local-${idx}`,
+    message_id: t.message_id || `local-${idx}`,
   }));
 }
 
@@ -90,8 +98,24 @@ function compactedMessageCount(_entry: ShortTermEntry): number {
   return 0;
 }
 
+/** The v3 block, which is printed as received, once, under its own header. */
+function blockOf(entry: ShortTermEntry): string | null {
+  if (entry.contextBlock) return entry.contextBlock.trim();
+  if (entry.summary && entry.summary.startsWith(CONTEXT_BLOCK_PREFIX)) return entry.summary.trim();
+  return null;
+}
+
 function formatStructured(entry: ShortTermEntry, recent: LocalRecentMessage[]): string {
   const parts: string[] = [];
+  const block = blockOf(entry);
+  if (block) {
+    parts.push(block);
+    if (recent.length > 0) {
+      parts.push(`## Recent Turns (${recent.length})`);
+      for (const m of recent) parts.push(`**${m.role}**: ${m.content}`);
+    }
+    return parts.filter(Boolean).join('\n\n').trim();
+  }
   if (entry.summary) { parts.push('## Summary'); parts.push(entry.summary.trim()); }
   if (entry.factualParagraph) { parts.push('## Facts'); parts.push(entry.factualParagraph.trim()); }
   if (entry.conversationalParagraph) {
@@ -124,9 +148,11 @@ function formatStructured(entry: ShortTermEntry, recent: LocalRecentMessage[]): 
 
 function formatNarrative(entry: ShortTermEntry, recent: LocalRecentMessage[]): string {
   const parts: string[] = [];
-  if (entry.summary) parts.push(entry.summary.trim());
-  if (entry.conversationalParagraph) parts.push(entry.conversationalParagraph.trim());
-  else if (entry.factualParagraph) parts.push(entry.factualParagraph.trim());
+  const block = blockOf(entry);
+  if (block) parts.push(block);
+  else if (entry.summary) parts.push(entry.summary.trim());
+  if (!block && entry.conversationalParagraph) parts.push(entry.conversationalParagraph.trim());
+  else if (!block && entry.factualParagraph) parts.push(entry.factualParagraph.trim());
 
   if (recent.length > 0) {
     const tail = recent.map((m) => `${m.role}: ${m.content}`).join('\n');
@@ -137,6 +163,11 @@ function formatNarrative(entry: ShortTermEntry, recent: LocalRecentMessage[]): s
 
 function formatBullets(entry: ShortTermEntry, recent: LocalRecentMessage[]): string {
   const parts: string[] = [];
+  const block = blockOf(entry);
+  if (block) {
+    // The block is structured text already; bulleting it would mangle it.
+    return [block, ...recent.map((m) => `- ${m.role}: ${m.content}`)].join('\n').trim();
+  }
   if (entry.summary) parts.push(`- Summary: ${entry.summary.trim()}`);
 
   for (const [k, v] of Object.entries(entry.currentState ?? {})) {
@@ -189,6 +220,8 @@ export function renderForPrompt(
     recent_message_count: recent.length,
     compacted_message_count: compacted,
     total_message_count: recent.length + compacted,
+    context_block: blockOf(entry),
+    compaction_id: entry.compactionId,
   };
 }
 

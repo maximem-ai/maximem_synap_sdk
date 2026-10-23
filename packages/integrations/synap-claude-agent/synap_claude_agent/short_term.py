@@ -1,33 +1,34 @@
 """Synap short-term context for Anthropic's Claude Agent SDK.
 
-Mirrors the LangGraph template: a thin wrapper around
-``sdk.conversation.context.get_context_for_prompt`` that exposes Synap
-short-term context to the agent via a ``UserPromptSubmit`` hook.
+A thin wrapper around ``sdk.conversation.context.get_context_for_prompt`` that
+exposes Synap's view of the conversation to the agent through a
+``UserPromptSubmit`` hook, as ``hookSpecificOutput.additionalContext``.
 
-Claude Agent's ``UserPromptSubmit`` hook lets us return
-``hookSpecificOutput.additionalContext`` — a string the agent SDK
-splices into the model's input as supplementary context. We use it to
-deliver Synap's compacted summary + recent turns at every turn.
+What that context holds depends on who has the turns. Claude Code keeps its own
+transcript and resumes from it, so when the transcript already holds earlier
+turns the hook adds only Synap's compaction (and the earlier turns history
+search matched), and only when the transcript does not already contain it:
+``formatted_context`` ends with the recent turns, which Claude Code would
+otherwise see twice. When the transcript is empty (a fresh ``query()`` per turn,
+which is how many apps use the SDK) Synap is the only record, and the hook adds
+``formatted_context`` whole, recent turns included.
 
 This module **composes** with :func:`create_synap_hooks` from
-``synap_claude_agent.hooks`` rather than replacing it: that one injects
-**long-term** context (semantic memory via ``sdk.fetch``), this one
-injects **short-term** context (per-conversation compacted history). A
-user wanting both stacks them under the ``UserPromptSubmit`` key.
-
-Quality contract identical to the LangGraph adapter:
+``synap_claude_agent.hooks``: that one injects **long-term** context (semantic
+memory via ``sdk.fetch``) and, through the same helper, this short-term context;
+this one is the short-term context alone.
 
 - ``conversation_id`` required + explicit
-- Hook NEVER raises — failure surfaces as an empty additionalContext
-  (or the bare user system text)
+- Hook NEVER raises: failure surfaces as an empty additionalContext
 - Empty ST is a no-op, never wipes the user's system framing
 - ``on_error="raise"`` available for tests/strict environments
 """
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Tuple
 
 from claude_agent_sdk import HookMatcher
 from claude_agent_sdk.types import HookContext, UserPromptSubmitHookInput
@@ -68,13 +69,13 @@ def _validate_args(
         )
 
 
-async def _fetch_st_block(
+async def _fetch_response(
     sdk: MaximemSynapSDK,
     conversation_id: str,
     style: str,
     on_error: _OnError,
     site: str,
-) -> str:
+) -> Any:
     try:
         async with wrap_sdk_errors_async(
             site,
@@ -89,11 +90,71 @@ async def _fetch_st_block(
     except SynapIntegrationError:
         if on_error == "raise":
             raise
+        return None
+    return response if getattr(response, "available", False) else None
+
+
+def _compaction_block(response: Any) -> str:
+    """The compaction and the earlier turns history search matched: no recent turns."""
+    parts = [getattr(response, "context_block", None), getattr(response, "history_block", None)]
+    return "\n\n".join(p.strip() for p in parts if isinstance(p, str) and p.strip())
+
+
+def _scan_transcript(path: Any, probe: str) -> Tuple[bool, bool]:
+    """``(has_turns, has_block)`` for Claude Code's transcript at ``path``.
+
+    ``has_turns``: an earlier user entry is there. ``has_block``: ``probe`` is
+    there after the last compaction Claude Code made (what it compacted left the
+    model's context, so a block from before it is gone). An unreadable or
+    missing transcript is ``(False, False)``.
+    """
+    if not isinstance(path, str) or not path:
+        return False, False
+    needle = json.dumps(probe, ensure_ascii=False)[1:-1] if probe else None
+    has_turns = has_block = False
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"compact_boundary"' in line and _entry_subtype(line) == "compact_boundary":
+                    has_block = False
+                    continue
+                if needle and needle in line:
+                    has_block = True
+                if not has_turns and '"type":"user"' in line:
+                    has_turns = True
+    except OSError:
+        return False, False
+    return has_turns, has_block
+
+
+def _entry_subtype(line: str) -> Optional[str]:
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        return None
+    return entry.get("subtype") if isinstance(entry, dict) else None
+
+
+async def history_context(
+    sdk: MaximemSynapSDK,
+    conversation_id: str,
+    input_data: Any,
+    *,
+    style: str = "narrative",
+    on_error: _OnError = "fallback",
+    site: str = "synap_claude_agent.history_context",
+) -> str:
+    """What to add to this prompt so the model has the conversation, or ``""``."""
+    response = await _fetch_response(sdk, conversation_id, style, on_error, site)
+    if response is None:
         return ""
-    if not getattr(response, "available", False):
-        return ""
-    formatted = getattr(response, "formatted_context", None)
-    return (formatted or "").strip()
+    block = _compaction_block(response)
+    path = input_data.get("transcript_path") if isinstance(input_data, dict) else getattr(
+        input_data, "transcript_path", None)
+    has_turns, has_block = _scan_transcript(path, block[:300])
+    if has_turns:
+        return "" if has_block else block
+    return (getattr(response, "formatted_context", None) or "").strip()
 
 
 def _wrap(
@@ -163,11 +224,12 @@ def create_synap_st_hook(
         # caller bound it explicitly. Different from the LT hook because
         # ST is per-conversation, not per-prompt-session.
         try:
-            st_block = await _fetch_st_block(
+            st_block = await history_context(
                 sdk,
                 conversation_id,
-                style,
-                on_error,
+                input_data,
+                style=style,
+                on_error=on_error,
                 site="synap_claude_agent.create_synap_st_hook",
             )
         except SynapIntegrationError:

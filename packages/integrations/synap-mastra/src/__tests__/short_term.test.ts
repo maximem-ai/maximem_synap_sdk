@@ -59,15 +59,20 @@ describe('fetchSynapShortTerm validation', () => {
 // ── fetchSynapShortTerm — happy paths ────────────────────────────────────────
 
 describe('fetchSynapShortTerm happy-path', () => {
-  it('returns available=true and formatted context when server returns content', async () => {
-    const ctx = promptContext(false, true);
-    ctx.formatted_context = 'User prefers dark mode.';
+  it('returns available=true and the compaction when the conversation has one', async () => {
+    const ctx = promptContext(true, true);
+    ctx.context_block = '## Conversation so far (compacted at 5)\nUser prefers dark mode.';
     const sdk = makeSdk({ promptCtx: ctx });
 
     const result = await fetchSynapShortTerm({ sdk, conversationId: 'conv-abc' });
 
     expect(result.available).toBe(true);
-    expect(result.formattedContext).toBe('User prefers dark mode.');
+    expect(result.formattedContext).toBe(
+      '<synap_conversation_history>\n## Conversation so far (compacted at 5)\nUser prefers dark mode.\n</synap_conversation_history>',
+    );
+    // The recent turns are the Agent's own history; they are not repeated here.
+    expect(result.formattedContext).not.toContain('Can you remind me when my trial expires?');
+    expect(result.formattedContext).not.toContain(ctx.formatted_context);
     expect(sdk.conversation.context.get_context_for_prompt).toHaveBeenCalledOnce();
     const callArg = (sdk.conversation.context.get_context_for_prompt as ReturnType<typeof vi.fn>).mock
       .calls[0][0];
@@ -118,13 +123,24 @@ describe('fetchSynapShortTerm happy-path', () => {
     expect(result.formattedContext).toBe('');
   });
 
-  it('trims whitespace from formatted_context', async () => {
+  it('trims the compaction block', async () => {
     const ctx = promptContext(false, true);
-    ctx.formatted_context = '   trimmed content   ';
+    ctx.context_block = '   trimmed content   ';
     const sdk = makeSdk({ promptCtx: ctx });
 
     const result = await fetchSynapShortTerm({ sdk, conversationId: 'c-1' });
-    expect(result.formattedContext).toBe('trimmed content');
+    expect(result.formattedContext).toBe(
+      '<synap_conversation_history>\ntrimmed content\n</synap_conversation_history>',
+    );
+  });
+
+  it('is empty before the first compaction, however much formatted_context there is', async () => {
+    // formatted_context is just the recent turns until a compaction exists.
+    const ctx = promptContext(true, true);
+    const sdk = makeSdk({ promptCtx: ctx });
+
+    const result = await fetchSynapShortTerm({ sdk, conversationId: 'c-1' });
+    expect(result.formattedContext).toBe('');
   });
 });
 
@@ -256,7 +272,7 @@ describe('buildSynapShortTermSystem', () => {
 describe('synapShortTermInstructions', () => {
   it('returns combined system string on success', async () => {
     const ctx = promptContext(false, true);
-    ctx.formatted_context = 'Prior context.';
+    ctx.context_block = 'Prior context.';
     const sdk = makeSdk({ promptCtx: ctx });
 
     const instructions = await synapShortTermInstructions({
@@ -339,7 +355,7 @@ describe('synapShortTermInstructions', () => {
 
   it('uses custom preamble tags when provided', async () => {
     const ctx = promptContext(false, true);
-    ctx.formatted_context = 'body';
+    ctx.context_block = 'body';
     const sdk = makeSdk({ promptCtx: ctx });
 
     const instructions = await synapShortTermInstructions({
@@ -355,7 +371,7 @@ describe('synapShortTermInstructions', () => {
 
   it('passes null preamble options through to buildSynapShortTermSystem', async () => {
     const ctx = promptContext(false, true);
-    ctx.formatted_context = 'raw body';
+    ctx.context_block = 'raw body';
     const sdk = makeSdk({ promptCtx: ctx });
 
     const instructions = await synapShortTermInstructions({
@@ -365,7 +381,9 @@ describe('synapShortTermInstructions', () => {
       preambleClose: null,
     });
 
-    expect(instructions).toBe('raw body');
+    expect(instructions).toBe(
+      '<synap_conversation_history>\nraw body\n</synap_conversation_history>',
+    );
     expect(instructions).not.toContain('<synap_short_term_context>');
   });
 });
