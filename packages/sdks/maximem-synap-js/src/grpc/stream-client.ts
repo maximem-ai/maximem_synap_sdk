@@ -81,6 +81,11 @@ export interface StreamClientOptions {
   /** Fires only for `compaction_update` bundles. Backs the compaction subscriptions. */
   onCompactionUpdate?: (conversationId: string, bundle: Record<string, unknown>) => void;
   /**
+   * The server's message count for a conversation, sent after it has written a
+   * streamed message. See `ConversationState` in the proto.
+   */
+  onConversationState?: (conversationId: string, messageCount: number) => void;
+  /**
    * Where the outbox journal lives, so buffered events survive a restart.
    * Defaults to `~/.synap`, the same root Python uses. `''` turns it off, and
    * it is off anyway wherever there is no filesystem.
@@ -220,6 +225,8 @@ export interface ConversationEventInput {
   tool_call_id?: string;
   search_queries?: string[];
   context_types?: string[];
+  /** proto: ConversationEvent.scope. The conversation's rung. */
+  scope?: Record<string, string>;
   /**
    * proto: ConversationEvent.event_id. Minted here when absent, and the SAME
    * id travels on every replay — that is what the server's dedupe matches, so
@@ -669,9 +676,25 @@ export class GrpcStreamClient {
       this.#missedHeartbeats = 0;
       return;
     }
-    const signal = msg['signal'] as { signal_type?: string } | undefined;
+    const state = msg['conversation_state'] as
+      | { conversation_id?: string; message_count?: number | string }
+      | undefined;
+    if (state) {
+      // int64 arrives as a string or a number depending on the loader options.
+      const count = Number(state.message_count ?? 0);
+      if (state.conversation_id && Number.isFinite(count)) {
+        this.#options.onConversationState?.(state.conversation_id, count);
+      }
+      return;
+    }
+    const signal = msg['signal'] as { signal_type?: string; reason?: string } | undefined;
     if (signal?.signal_type === 'closing') {
       void this.#handleDisconnect('server_signal_closing');
+    } else if (signal?.signal_type === 'error') {
+      // Logged, as Python logs it, and not fatal: the server sends it for one
+      // refused event or session_start and keeps the stream open. Until 0.5.18
+      // it was dropped here without a word.
+      console.warn(`[synap] server error signal (stream stays open): ${signal.reason ?? ''}`);
     }
   }
 

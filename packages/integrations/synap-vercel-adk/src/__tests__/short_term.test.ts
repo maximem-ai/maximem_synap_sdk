@@ -201,4 +201,52 @@ describe('injectShortTermIntoPrompt', () => {
     });
     expect(out).toEqual(withSystem);
   });
+
+  // The caller sends the whole message list, and formatted_context carries the
+  // recent turns, so adding it above that list sent them twice.
+  describe('never repeats turns the prompt already carries', () => {
+    const turn = (role: 'user' | 'assistant', text: string) =>
+      ({ role, content: [{ type: 'text' as const, text }] });
+    const longPrompt: LanguageModelV1Prompt = [
+      { role: 'system', content: 'You are helpful.' },
+      turn('user', 'old q1'), turn('assistant', 'old a1'),
+      turn('user', 'old q2'), turn('assistant', 'old a2'),
+      turn('user', 'now'),
+    ];
+    const render = (p: LanguageModelV1Prompt) => p.map((m) =>
+      m.role === 'system' ? `system:${m.content}`
+        : `${m.role}:${(m.content as Array<{ text?: string }>).map((x) => x.text).join('')}`);
+
+    it('compacted: splices Synap\'s compaction over the earlier turns', () => {
+      const out = injectShortTermIntoPrompt(longPrompt, {
+        formattedContext: 'formatted incl. recent turns',
+        available: true,
+        raw: {
+          context_block: '## Conversation so far (compacted)\nSUMMARY',
+          recent_messages: [{ role: 'user', content: 'old q2' }, { role: 'assistant', content: 'old a2' }],
+        },
+      });
+      const lines = render(out);
+      expect(lines.join('\n')).toContain('SUMMARY');
+      expect(lines).not.toContain('user:old q1');
+      expect(lines.filter((l) => l === 'user:old q2')).toHaveLength(1);
+      expect(lines[lines.length - 1]).toBe('user:now');
+      // The formatted block (which repeats the recent turns) is not added.
+      expect(lines.join('\n')).not.toContain('formatted incl. recent turns');
+    });
+
+    it('not compacted: a prompt with earlier turns is returned unchanged', () => {
+      const out = injectShortTermIntoPrompt(longPrompt, {
+        formattedContext: 'formatted incl. recent turns', available: true,
+        raw: { recent_messages: [{ role: 'user', content: 'old q2' }] },
+      });
+      expect(out).toBe(longPrompt);
+    });
+
+    it('not compacted: a prompt that is only the current message still gets the block', () => {
+      const only: LanguageModelV1Prompt = [turn('user', 'now')];
+      const out = injectShortTermIntoPrompt(only, { formattedContext: 'ST!', available: true, raw: {} });
+      expect(out[0]).toEqual({ role: 'system', content: '<synap_short_term_context>\nST!\n</synap_short_term_context>' });
+    });
+  });
 });

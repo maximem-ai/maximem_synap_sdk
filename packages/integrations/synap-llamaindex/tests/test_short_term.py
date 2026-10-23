@@ -24,9 +24,14 @@ from synap_integrations_common import SynapIntegrationError
 
 
 def _make_response(formatted: str | None, available: bool):
+    """`formatted` is the compaction. `formatted_context` is what the server sends
+    beside it: the compaction AND the recent turns, which the chat history already
+    holds, so it must never reach the prompt."""
     resp = MagicMock()
     resp.available = available
-    resp.formatted_context = formatted
+    resp.context_block = formatted
+    resp.history_block = None
+    resp.formatted_context = f"{formatted}\nRECENT-TURNS-DUPLICATE" if formatted else None
     return resp
 
 
@@ -36,6 +41,27 @@ def _fake_sdk(formatted: str | None = "User likes brevity.", available: bool = T
         return_value=_make_response(formatted, available)
     )
     return sdk
+
+
+# ---------------------------------------------------------------------------
+# The block is the compaction, never the recent turns
+# ---------------------------------------------------------------------------
+
+
+class TestNoDuplicatedTurns:
+    @pytest.mark.asyncio
+    async def test_the_message_has_the_compaction_and_not_the_recent_turns(self):
+        sdk = _fake_sdk(formatted="## Conversation so far (compacted 1x)\nThey asked about refunds.")
+        msg = await synap_st_chat_message(sdk, "conv_abc", system="Be brief.")()
+        assert "They asked about refunds." in msg.content
+        assert "RECENT-TURNS-DUPLICATE" not in msg.content
+
+    @pytest.mark.asyncio
+    async def test_no_compaction_yet_leaves_only_the_system_text(self):
+        sdk = _fake_sdk(formatted=None, available=True)
+        sdk.conversation.context.get_context_for_prompt.return_value.formatted_context = "recent turns"
+        msg = await synap_st_chat_message(sdk, "conv_abc", system="Be brief.")()
+        assert msg.content == "Be brief."
 
 
 # ---------------------------------------------------------------------------

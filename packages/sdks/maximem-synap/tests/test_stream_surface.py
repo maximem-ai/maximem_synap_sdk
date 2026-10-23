@@ -24,6 +24,8 @@ import asyncio
 
 import pytest
 
+from maximem_synap import InvalidInputError
+
 from maximem_synap import sdk as sdk_module
 from maximem_synap.sdk import KNOWN_EVENT_TYPES, InstanceInterface
 
@@ -58,6 +60,7 @@ def make_instance() -> InstanceInterface:
     inst._sdk = type("FakeSDK", (), {
         "_check_customer_id": lambda *a, **k: None,
         "_st_store_active": lambda self=None: False,
+        "_invalidate_prompt_cache": lambda *a, **k: None,
         "_grpc_transport": None,
     })()
     inst._controller = FakeController()
@@ -229,7 +232,9 @@ class TestAnUnknownEventTypeIsRefused:
     @pytest.mark.asyncio
     async def test_a_typo_raises_rather_than_travelling(self):
         inst = make_instance()
-        with pytest.raises(ValueError) as excinfo:
+        # InvalidInputError since 0.5.20, as every other refused input is and
+        # as the JS SDK raises it. It was a plain ValueError.
+        with pytest.raises(InvalidInputError) as excinfo:
             await inst.send_message("x", event_type="tool_reslt", conversation_id="c1")
         assert "tool_reslt" in str(excinfo.value)
         assert "tool_result" in str(excinfo.value), "the message should list the real ones"

@@ -31,6 +31,18 @@ def _fake_sdk(formatted: str | None = "Customer is on Pro plan.", available: boo
     return sdk
 
 
+async def _run_test(*args, **kwargs):
+    """pipecat's harness, with ``start_timeout`` only where it exists (1.13
+    has it; 1.7 rejects the keyword)."""
+    import inspect
+
+    from pipecat.tests.utils import run_test
+
+    if "start_timeout" in inspect.signature(run_test).parameters:
+        kwargs.setdefault("start_timeout", 10.0)
+    return await run_test(*args, **kwargs)
+
+
 def _transcription(text: str) -> TranscriptionFrame:
     return TranscriptionFrame(text=text, user_id="u1", timestamp="2026-05-27T00:00:00")
 
@@ -79,13 +91,10 @@ class TestProcessing:
         # processor, does the start/stop properly, and sends the frames. Now a
         # real TranscriptionFrame goes in, and the frame is asserted to pass
         # through unchanged as the module docstring promises.
-        from pipecat.tests.utils import run_test
-
-        received_down, _ = await run_test(
+        received_down, _ = await _run_test(
             proc,
             frames_to_send=[_transcription("hello")],
             expected_down_frames=[TranscriptionFrame],
-            start_timeout=10.0,
         )
         assert received_down[0].text == "hello"
 
@@ -162,3 +171,97 @@ def test_public_surface_exports():
     import synap_pipecat
     assert hasattr(synap_pipecat, "SynapShortTermProcessor")
     assert "SynapShortTermProcessor" in synap_pipecat.__all__
+
+
+# ---------------------------------------------------------------------------
+# The block goes at the head, and never repeats a turn the context holds
+# ---------------------------------------------------------------------------
+
+
+def _st_sdk(recent, *, compaction="", formatted=None):
+    from types import SimpleNamespace
+
+    sdk = MagicMock()
+    sdk.conversation.context.get_context_for_prompt = AsyncMock(
+        return_value=SimpleNamespace(
+            available=True,
+            formatted_context=formatted
+            or "\n".join(f"{r}: {t}" for r, t in recent),
+            context_block=compaction,
+            history_block="",
+            recent_messages=[SimpleNamespace(role=r, content=t) for r, t in recent],
+            compaction_id="c1" if compaction else None,
+        )
+    )
+    return sdk
+
+
+def _live_ctx() -> LLMContext:
+    return LLMContext(messages=[
+        {"role": "system", "content": "be nice"},
+        {"role": "user", "content": "turn-1"},
+        {"role": "assistant", "content": "reply-1"},
+        {"role": "user", "content": "now"},
+    ])
+
+
+class TestPlacementAndDuplication:
+    @pytest.mark.asyncio
+    async def test_the_first_insert_lands_at_the_head_not_after_the_history(self):
+        """`add_message` appends, which put the block after every turn."""
+        sdk = _st_sdk([("user", "last week we talked about refunds")])
+        ctx = _live_ctx()
+        await SynapShortTermProcessor(sdk, conversation_id="c1", context=ctx)._refresh_st()
+        contents = [m["content"] for m in ctx.get_messages()]
+        assert contents[0] == "be nice"
+        assert contents[1].startswith(_ST_MARKER)
+        assert contents[2:] == ["turn-1", "reply-1", "now"]
+
+    @pytest.mark.asyncio
+    async def test_a_block_that_would_only_repeat_the_context_is_not_added(self):
+        sdk = _st_sdk([("user", "turn-1"), ("assistant", "reply-1"), ("user", "now")])
+        ctx = _live_ctx()
+        await SynapShortTermProcessor(sdk, conversation_id="c1", context=ctx)._refresh_st()
+        assert _system_st_messages(ctx) == []
+        assert len(ctx.get_messages()) == 4
+
+    @pytest.mark.asyncio
+    async def test_only_the_turns_the_context_lacks_go_in_the_block(self):
+        sdk = _st_sdk([("user", "from last week"), ("user", "turn-1"), ("assistant", "reply-1")])
+        ctx = _live_ctx()
+        await SynapShortTermProcessor(sdk, conversation_id="c1", context=ctx)._refresh_st()
+        (block,) = _system_st_messages(ctx)
+        assert "from last week" in block["content"]
+        assert "reply-1" not in block["content"]
+
+    @pytest.mark.asyncio
+    async def test_a_resumed_conversation_gets_the_whole_block(self):
+        sdk = _st_sdk([("user", "a"), ("assistant", "b")])
+        ctx = LLMContext(messages=[{"role": "system", "content": "be nice"}])
+        await SynapShortTermProcessor(sdk, conversation_id="c1", context=ctx)._refresh_st()
+        (block,) = _system_st_messages(ctx)
+        assert "user: a" in block["content"] and "assistant: b" in block["content"]
+
+    @pytest.mark.asyncio
+    async def test_once_compacted_the_earlier_turns_are_replaced_in_one_read(self):
+        sdk = _st_sdk([("user", "turn-7")], compaction="SUMMARY: refund")
+        ctx = _live_ctx()
+        await SynapShortTermProcessor(sdk, conversation_id="c1", context=ctx)._refresh_st()
+        contents = [m["content"] for m in ctx.get_messages()]
+        assert contents[0] == "be nice"
+        assert contents[1].startswith("<synap_conversation_history>")
+        assert "turn-1" not in contents and "reply-1" not in contents
+        assert contents[-1] == "now"
+        assert _system_st_messages(ctx) == []
+        assert sdk.conversation.context.get_context_for_prompt.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_compaction_drops_a_block_left_from_before(self):
+        ctx = LLMContext(messages=[{"role": "system", "content": "be nice"}])
+        proc = SynapShortTermProcessor(_st_sdk([("user", "old")]), conversation_id="c1", context=ctx)
+        await proc._refresh_st()
+        assert len(_system_st_messages(ctx)) == 1
+        ctx.add_message({"role": "user", "content": "now"})
+        proc.sdk = _st_sdk([("user", "turn-7")], compaction="SUMMARY: x")
+        await proc._refresh_st()
+        assert _system_st_messages(ctx) == []

@@ -7,6 +7,15 @@ from synap_camel_ai import synap_st_system_message
 from synap_integrations_common import SynapIntegrationError
 
 
+def _compacted(mock_sdk, block="## Conversation so far (compacted)\nPlanning Lisbon."):
+    resp = MagicMock()
+    resp.available = True
+    resp.formatted_context = "## Conversation so far\n\nRECENT-TURN-TEXT"
+    resp.context_block = block
+    mock_sdk.conversation.context.get_context_for_prompt = AsyncMock(return_value=resp)
+    return mock_sdk
+
+
 def _unavailable(mock_sdk):
     resp = MagicMock()
     resp.available = False
@@ -41,23 +50,35 @@ def test_rejects_bad_on_error(mock_sdk):
 # ── composition ──────────────────────────────────────────────────────────────
 
 
-def test_prepends_context_above_system_message(mock_sdk):
+def test_prepends_the_compaction_above_system_message(mock_sdk):
     out = synap_st_system_message(
-        mock_sdk, "conv", system_message="You are a support agent."
+        _compacted(mock_sdk), "conv", system_message="You are a support agent."
     )
-    assert "Recent conversation summary" in out
+    assert "Planning Lisbon" in out
     assert "You are a support agent." in out
-    assert out.index("Recent conversation summary") < out.index("You are a support agent.")
+    assert out.index("Planning Lisbon") < out.index("You are a support agent.")
     assert "<synap_short_term_context>" in out
+
+
+def test_recent_turns_are_not_in_the_system_message(mock_sdk):
+    """ChatAgent sends its own history every step; formatted_context carries
+    the same turns, so only the compaction block may go in."""
+    out = synap_st_system_message(_compacted(mock_sdk), "conv", system_message="BASE")
+    assert "RECENT-TURN-TEXT" not in out
+
+
+def test_no_compaction_yet_adds_nothing(mock_sdk):
+    out = synap_st_system_message(mock_sdk, "conv", system_message="BASE")
+    assert out == "BASE"
 
 
 def test_tags_dropped_when_preamble_none(mock_sdk):
     out = synap_st_system_message(
-        mock_sdk, "conv", system_message="BASE",
+        _compacted(mock_sdk), "conv", system_message="BASE",
         preamble_open=None, preamble_close=None,
     )
     assert "<synap_short_term_context>" not in out
-    assert "Recent conversation summary" in out
+    assert "Planning Lisbon" in out
     assert "BASE" in out
 
 

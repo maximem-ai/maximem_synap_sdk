@@ -37,6 +37,7 @@ class TestPublicSurface:
             "SynapContextProvider",
             "SynapHistoryProvider",
             "SynapShortTermContextProvider",
+            "SynapCompactionMiddleware",
             # Harness surfaces — resolved lazily, need agent-framework>=1.13
             "SynapMemoryStore",
             "SynapMemoryContextProvider",

@@ -1,5 +1,6 @@
 """Tests for :mod:`synap_deepagents.middleware`."""
 
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -281,64 +282,123 @@ def test_custom_system_prompt_template(mock_sdk):
 
 
 # ---------------------------------------------------------------------------
-# SynapShortTermMiddleware
+# SynapShortTermMiddleware: the compaction replaces the turns it covers
 # ---------------------------------------------------------------------------
 
+from langchain_core.messages import ToolMessage
+from maximem_synap.models.context import ContextForPromptResponse, RecentMessage
 
-async def test_short_term_middleware_fetches_block(mock_sdk):
-    mw = SynapShortTermMiddleware(sdk=mock_sdk, conversation_id="conv-1")
-    update = await mw.abefore_agent({"messages": []}, None, None)
-    assert update["synap_short_term"] == "Recent conversation summary"
-
-
-async def test_short_term_middleware_falls_back_on_failure(failing_sdk):
-    mw = SynapShortTermMiddleware(sdk=failing_sdk, conversation_id="conv-1")
-    update = await mw.abefore_agent({"messages": []}, None, None)
-    assert update["synap_short_term"] == ""
+COMPACTION = "## Conversation so far (compacted 1x)\nThey planned a Lisbon trip."
 
 
-async def test_short_term_middleware_can_raise(failing_sdk):
-    mw = SynapShortTermMiddleware(
-        sdk=failing_sdk, conversation_id="conv-1", on_error="raise"
+def compacted_sdk(mock_sdk, turns=()):
+    mock_sdk.conversation.context.get_context_for_prompt.return_value = ContextForPromptResponse(
+        formatted_context=f"{COMPACTION}\nRECENT-TURNS-DUPLICATE", context_block=COMPACTION,
+        available=True, recent_messages=[RecentMessage(role=r, content=c, timestamp=datetime.now(timezone.utc), message_id=f"m{i}")
+                         for i, (r, c) in enumerate(turns)],
     )
-    with pytest.raises(SynapIntegrationError):
-        await mw.abefore_agent({"messages": []}, None, None)
+    return mock_sdk
 
 
-def test_short_term_middleware_injects_block(mock_sdk):
-    mw = SynapShortTermMiddleware(sdk=mock_sdk, conversation_id="conv-1")
-    request = make_request({"messages": [], "synap_short_term": "earlier turns"})
-    text = mw.modify_request(request).system_message.text
-    assert "<synap_short_term_context>" in text
-    assert "earlier turns" in text
+OLD = [HumanMessage("old q1"), AIMessage("old a1"), HumanMessage("old q2"), AIMessage("old a2")]
 
 
-def test_short_term_middleware_noop_when_empty(mock_sdk):
-    mw = SynapShortTermMiddleware(sdk=mock_sdk, conversation_id="conv-1")
-    request = make_request({"messages": [], "synap_short_term": ""})
-    assert mw.modify_request(request) is request
-
-
-def test_short_term_middleware_sync_before_agent(mock_sdk):
-    mw = SynapShortTermMiddleware(sdk=mock_sdk, conversation_id="conv-1")
-    update = mw.before_agent({"messages": []}, None, None)
-    assert update["synap_short_term"] == "Recent conversation summary"
-
-
-def test_short_term_middleware_wrap_model_call(mock_sdk):
-    mw = SynapShortTermMiddleware(sdk=mock_sdk, conversation_id="conv-1")
-    request = make_request({"messages": [], "synap_short_term": "earlier"})
-    assert mw.wrap_model_call(request, lambda r: "ok") == "ok"
-
-
-async def test_short_term_middleware_awrap_model_call(mock_sdk):
-    mw = SynapShortTermMiddleware(sdk=mock_sdk, conversation_id="conv-1")
-    request = make_request({"messages": [], "synap_short_term": "earlier"})
+async def spliced(mw, messages, system_message=None):
+    seen = {}
 
     async def handler(req):
+        seen["req"] = req
         return "ok"
 
+    request = make_request({"messages": messages}, system_message=system_message)
     assert await mw.awrap_model_call(request, handler) == "ok"
+    return seen["req"]
+
+
+async def test_short_term_replaces_earlier_turns_with_the_compaction(mock_sdk):
+    compacted_sdk(mock_sdk, turns=[("user", "kept q"), ("assistant", "kept a")])
+    mw = SynapShortTermMiddleware(sdk=mock_sdk, conversation_id="conv-1")
+    req = await spliced(mw, [*OLD, HumanMessage("now?")], SystemMessage("Be brief."))
+    assert [m.content for m in req.messages] == ["kept q", "kept a", "now?"]
+    text = req.system_message.text
+    assert text.startswith("Be brief.")
+    assert "<synap_short_term_context>" in text and "Lisbon trip" in text
+    assert "RECENT-TURNS-DUPLICATE" not in text
+
+
+async def test_short_term_is_asked_on_every_model_call(mock_sdk):
+    """Not once per invocation: a long tool loop can cross the compaction."""
+    compacted_sdk(mock_sdk)
+    mw = SynapShortTermMiddleware(sdk=mock_sdk, conversation_id="conv-1")
+    for _ in range(3):
+        await spliced(mw, [HumanMessage("q")])
+    assert mock_sdk.conversation.context.get_context_for_prompt.await_count == 3
+
+
+async def test_short_term_keeps_the_current_tool_loop_paired(mock_sdk):
+    compacted_sdk(mock_sdk)
+    mw = SynapShortTermMiddleware(sdk=mock_sdk, conversation_id="conv-1")
+    call = AIMessage("", tool_calls=[{"name": "t", "args": {}, "id": "c1"}])
+    req = await spliced(mw, [*OLD, HumanMessage("now?"), call, ToolMessage("r", tool_call_id="c1")])
+    assert req.messages[-2:] == [call, ToolMessage("r", tool_call_id="c1")] or \
+        [type(m) for m in req.messages[-2:]] == [AIMessage, ToolMessage]
+    assert not any("old q" in str(m.content) for m in req.messages)
+
+
+async def test_short_term_is_untouched_before_the_first_compaction(mock_sdk):
+    mock_sdk.conversation.context.get_context_for_prompt.return_value = ContextForPromptResponse(
+        formatted_context="recent turns", available=True)
+    mw = SynapShortTermMiddleware(sdk=mock_sdk, conversation_id="conv-1")
+    request = make_request({"messages": [*OLD, HumanMessage("now?")]})
+
+    async def handler(req):
+        return req
+
+    assert await mw.awrap_model_call(request, handler) is request
+
+
+async def test_short_term_falls_back_on_failure(failing_sdk):
+    mw = SynapShortTermMiddleware(sdk=failing_sdk, conversation_id="conv-1")
+    request = make_request({"messages": [HumanMessage("q")]})
+
+    async def handler(req):
+        return req
+
+    assert await mw.awrap_model_call(request, handler) is request
+
+
+async def test_short_term_can_raise(failing_sdk):
+    mw = SynapShortTermMiddleware(sdk=failing_sdk, conversation_id="conv-1", on_error="raise")
+    request = make_request({"messages": [HumanMessage("q")]})
+
+    async def handler(req):
+        return req
+
+    with pytest.raises(SynapIntegrationError):
+        await mw.awrap_model_call(request, handler)
+
+
+def test_short_term_sync_path_splices_too(mock_sdk):
+    compacted_sdk(mock_sdk)
+    mw = SynapShortTermMiddleware(sdk=mock_sdk, conversation_id="conv-1")
+    seen = {}
+    mw.wrap_model_call(make_request({"messages": [*OLD, HumanMessage("now?")]}),
+                       lambda r: seen.setdefault("req", r))
+    assert [m.content for m in seen["req"].messages] == ["now?"]
+
+
+async def test_a_layer_that_already_spliced_is_not_asked_again(mock_sdk):
+    compacted_sdk(mock_sdk)
+    mw = SynapShortTermMiddleware(sdk=mock_sdk, conversation_id="conv-1")
+    first = await spliced(mw, [*OLD, HumanMessage("now?")])
+    mock_sdk.conversation.context.get_context_for_prompt.reset_mock()
+
+    async def handler(req):
+        return req
+
+    request = make_request({"messages": first.messages}, system_message=first.system_message)
+    assert await mw.awrap_model_call(request, handler) is request
+    mock_sdk.conversation.context.get_context_for_prompt.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -349,11 +409,6 @@ async def test_short_term_middleware_awrap_model_call(mock_sdk):
 def test_memory_middleware_state_schema(mock_sdk):
     mw = SynapMemoryMiddleware(sdk=mock_sdk, user_id="alice")
     assert "synap_memory" in mw.state_schema.__annotations__
-
-
-def test_short_term_middleware_state_schema(mock_sdk):
-    mw = SynapShortTermMiddleware(sdk=mock_sdk, conversation_id="conv-1")
-    assert "synap_short_term" in mw.state_schema.__annotations__
 
 
 @pytest.mark.parametrize(
@@ -402,7 +457,6 @@ def _node_config():
     ("cls", "kwargs"),
     [
         (SynapMemoryMiddleware, {"user_id": "alice"}),
-        (SynapShortTermMiddleware, {"conversation_id": "conv-1"}),
     ],
 )
 def test_before_agent_runs_as_a_graph_node(mock_sdk, cls, kwargs):
@@ -414,7 +468,6 @@ def test_before_agent_runs_as_a_graph_node(mock_sdk, cls, kwargs):
     ("cls", "kwargs"),
     [
         (SynapMemoryMiddleware, {"user_id": "alice"}),
-        (SynapShortTermMiddleware, {"conversation_id": "conv-1"}),
     ],
 )
 def test_before_agent_is_offered_its_config(mock_sdk, cls, kwargs):

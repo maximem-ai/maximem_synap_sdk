@@ -225,13 +225,13 @@ describe('the rung reaches the cache from a fetch', () => {
     }
   });
 
-  it('is honoured by tryServeFromCache', () => {
+  it('is honoured by tryServeFromCache', async () => {
     const cache = seeded(PAYMENTS);
     expect(
-      tryServeFromCache(cache, 'user', { searchQuery: QUERY, entityId: 'dana', scopeRung: SECURITY }, 10).response,
+      (await tryServeFromCache(cache, 'user', { searchQuery: QUERY, entityId: 'dana', scopeRung: SECURITY }, 10)).response,
     ).toBeNull();
     expect(
-      tryServeFromCache(cache, 'user', { searchQuery: QUERY, entityId: 'dana', scopeRung: PAYMENTS }, 10).response,
+      (await tryServeFromCache(cache, 'user', { searchQuery: QUERY, entityId: 'dana', scopeRung: PAYMENTS }, 10)).response,
     ).not.toBeNull();
   });
 
@@ -308,7 +308,7 @@ describe('the rung reaches the cache from a fetch', () => {
         status: 200, headers: { 'content-type': 'application/json' },
       }));
     const client = new SynapClient({
-      apiKey: 'k', _force_new: true, clientId: 'cli', fetchImpl: fetchImpl as never,
+      apiKey: 'k', _force_new: true, clientId: 'cli', instanceId: 'inst_0123456789abcdef', fetchImpl: fetchImpl as never,
     });
 
     await client.instance.listen({ host: '127.0.0.1', port: server.port, use_tls: false });
