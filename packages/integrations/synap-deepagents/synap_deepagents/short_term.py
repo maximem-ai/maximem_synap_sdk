@@ -1,8 +1,9 @@
 """Synap short-term context for deepagents.
 
-Short-term context is the compacted history of the *current* conversation —
+Short-term context is Synap's compaction of the *current* conversation —
 distinct from the long-term memory :class:`~synap_deepagents.backend.SynapBackend`
-serves. It comes from ``sdk.conversation.context.get_context_for_prompt``.
+serves. It comes from ``sdk.conversation.context.get_context_for_prompt``. It is
+the compaction only: the turns after it are the ones the agent already sends.
 
 ``create_deep_agent`` takes a static ``system_prompt``, so this module gives you
 the string to build it from::
@@ -15,9 +16,10 @@ the string to build it from::
     )
     agent = create_deep_agent(model=..., system_prompt=system_prompt)
 
-That snapshot is taken once, at construction. For a long-running agent that
-should see the context refresh each turn, use
-:class:`~synap_deepagents.middleware.SynapShortTermMiddleware` instead.
+That snapshot is taken once, at construction, and sits beside the agent's full
+history. For a long-running agent, use
+:class:`~synap_deepagents.middleware.SynapShortTermMiddleware` instead: it reads
+the compaction on every model call and replaces the turns it covers.
 
 Failures never crash the agent by default (``on_error="fallback"``): the SDK
 error is logged and an empty short-term block is used, so you are left with
@@ -31,10 +33,8 @@ import logging
 from typing import Literal, Optional
 
 from maximem_synap import MaximemSynapSDK
-from synap_integrations_common import (
-    SynapIntegrationError,
-    wrap_sdk_errors_async,
-)
+
+from synap_deepagents.history import fetch_history, inner
 
 logger = logging.getLogger(__name__)
 
@@ -78,31 +78,21 @@ async def fetch_st_block(
     on_error: _OnError = "fallback",
     site: str = "synap_deepagents.fetch_st_block",
 ) -> str:
-    """Return the short-term context string, or ``""`` when unavailable.
+    """Return Synap's compaction of the conversation, or ``""`` when unavailable.
+
+    Never the recent turns: the run sends those itself, and Synap's
+    ``formatted_context`` carries them too, so a block built from it showed each
+    one twice. ``style`` shaped that formatted context and no longer changes
+    what comes back; the argument stays for compatibility.
 
     Shared by :func:`synap_st_instructions` and the middleware so both behave
     identically on failure.
     """
     _validate_args(sdk, conversation_id, style, on_error, site)
-    try:
-        async with wrap_sdk_errors_async(
-            site,
-            logger,
-            conversation_id=conversation_id,
-            style=style,
-        ):
-            response = await sdk.conversation.context.get_context_for_prompt(
-                conversation_id=conversation_id,
-                style=style,
-            )
-    except SynapIntegrationError:
-        if on_error == "raise":
-            raise
-        return ""
-
-    if not getattr(response, "available", False):
-        return ""
-    return (getattr(response, "formatted_context", None) or "").strip()
+    history = await fetch_history(
+        sdk, conversation_id, style=style, on_error=on_error, site=site,
+    )
+    return inner(history.preamble) if history is not None else ""
 
 
 def compose_system_prompt(

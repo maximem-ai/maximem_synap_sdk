@@ -20,6 +20,7 @@ from .models.context import (
     Fact,
     Preference,
     ProfileAttributeModel,
+    RankedItem,
     ResponseMetadata,
     TemporalEvent,
     UnifiedContextResponse,
@@ -52,8 +53,11 @@ from .models.errors import (
     SynapPermanentError,
     SynapTransientError,
     TranscriptConflictError,
+    InstanceBuildFailedError,
+    InstanceNotReadyError,
     TransientError,
 )
+from .scoping import CustomerIdNotAcceptedError
 from .memories.models import (
     BatchCreateRequest,
     BatchCreateResponse,
@@ -64,6 +68,10 @@ from .memories.models import (
     IngestStatus,
     Memory,
     MemoryStatusResponse,
+    ForgetMode,
+    ForgetStatus,
+    ForgetCandidate,
+    ForgetResponse,
     MergeStrategy,
     UpdateMemoryRequest,
 )
@@ -82,6 +90,7 @@ __all__ = [
     # Response models
     "ContextResponse",
     "UnifiedContextResponse",
+    "RankedItem",
     "CompactionResponse",
     "CompactionTriggerResponse",
     "CompactionStatusResponse",
@@ -126,10 +135,13 @@ __all__ = [
     "InvalidInputError",
     "InvalidInstanceIdError",
     "InvalidConversationIdError",
+    "CustomerIdNotAcceptedError",
     "AuthenticationError",
     "ContextNotFoundError",
     "ConflictError",
     "TranscriptConflictError",
+    "InstanceBuildFailedError",
+    "InstanceNotReadyError",
     "SessionExpiredError",
     "ListeningAlreadyActiveError",
     "ListeningNotActiveError",
@@ -147,5 +159,9 @@ __all__ = [
     "BatchCreateRequest",
     "BatchCreateResponse",
     "MemoryStatusResponse",
+    "ForgetMode",
+    "ForgetStatus",
+    "ForgetCandidate",
+    "ForgetResponse",
     "UpdateMemoryRequest",
 ]

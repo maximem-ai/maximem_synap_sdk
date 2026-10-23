@@ -5,15 +5,21 @@ context is injected via a :class:`~strands.hooks.HookProvider` on
 ``BeforeInvocationEvent`` — the one before-event whose ``.messages`` list is
 writable (``BeforeModelCallEvent`` only permits cancelling).
 
-**On persistence.** Strands has no ephemeral per-call injection hook for user
-code (only ``MemoryManager`` uses ``strands.injection`` internally). Whatever
-you put in ``event.messages`` is appended to the agent's durable history. To
-avoid accumulating throwaway context turns, this hook **folds the short-term
-block into the current turn's first user message** rather than adding a
-separate turn — each user turn simply carries its contemporaneous context, and
-there is an idempotency guard so a re-entered invocation never double-folds.
-Folding (vs. a standalone ``user`` turn) also avoids consecutive same-role
-messages, which some model providers reject.
+**What it does, and what it does not.** Strands keeps the conversation in
+``agent.messages`` and sends all of it, so Synap's recent-turns block next to it
+would send the same turns twice. The hook therefore does two different things:
+
+- On every invocation it installs the model-call middleware that puts Synap's
+  compaction in place of the turns before the current one, once Synap has
+  compacted the conversation (see :mod:`synap_strands_agents.history`). That is
+  per model call; ``agent.messages`` is not rewritten.
+- On the *first* invocation of an agent whose history is empty (a restarted
+  process, say) and where Synap has no compaction yet, it folds Synap's block
+  into the first user message, so the model still knows what came before. That
+  is the one case where the framework sends nothing. Strands has no ephemeral
+  per-call injection hook for user code, so the block stays in that message; the
+  stream hook does not record it as something the user said. With the history
+  not empty, or a compaction present, nothing is folded.
 
 Wraps ``sdk.conversation.context.get_context_for_prompt`` (cache-first behind
 ``SYNAP_SDK_ST_AUTHORITATIVE``). Quality contract, identical to the LangGraph /
@@ -28,12 +34,14 @@ Agno adapters:
 from __future__ import annotations
 
 import logging
-from typing import Any, List, Literal, Optional
+from typing import Any, List, Literal, Optional, Tuple
 
 from strands.hooks import BeforeInvocationEvent, HookProvider, HookRegistry
 
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import SynapIntegrationError, wrap_sdk_errors_async
+
+from synap_strands_agents.history import install_synap_history
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +80,8 @@ async def _fetch_st_block(
     style: str,
     on_error: _OnError,
     site: str,
-) -> str:
+) -> Tuple[str, bool]:
+    """The ST block, and whether Synap has compacted the conversation."""
     try:
         async with wrap_sdk_errors_async(
             site,
@@ -87,15 +96,16 @@ async def _fetch_st_block(
     except SynapIntegrationError:
         if on_error == "raise":
             raise
-        return ""
+        return "", False
     if not getattr(response, "available", False):
-        return ""
+        return "", False
     formatted = getattr(response, "formatted_context", None)
-    return (formatted or "").strip()
+    block = getattr(response, "context_block", None)
+    return (formatted or "").strip(), isinstance(block, str) and bool(block.strip())
 
 
 class SynapShortTermHook(HookProvider):
-    """Inject Synap short-term context before each Strands invocation.
+    """Put Synap's conversation context in front of each Strands model call.
 
     Args:
         sdk: Initialised :class:`MaximemSynapSDK`.
@@ -143,15 +153,18 @@ class SynapShortTermHook(HookProvider):
         registry.add_callback(BeforeInvocationEvent, self._inject)
 
     async def _inject(self, event: BeforeInvocationEvent) -> None:
-        st_block = await _fetch_st_block(
+        install_synap_history(event.agent, self._sdk, self._conversation_id)
+        if getattr(event.agent, "messages", None):
+            return  # the framework sends the conversation; the middleware swaps in Synap's
+        st_block, compacted = await _fetch_st_block(
             self._sdk,
             self._conversation_id,
             self._style,
             self._on_error,
             "synap_strands_agents.SynapShortTermHook",
         )
-        if not st_block:
-            return  # no short-term context -> never touch the input
+        if not st_block or compacted:
+            return  # nothing to say, or the middleware sends the compaction
         messages = event.messages
         if not messages:
             return  # nothing to fold into (e.g. the structured_output path)

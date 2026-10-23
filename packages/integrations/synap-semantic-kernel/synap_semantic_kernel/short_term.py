@@ -18,6 +18,12 @@ Quality contract identical to the LangGraph adapter:
 - Empty ST is a no-op — never wipes the user's system text.
 - Returns ``None`` when both ST and ``system`` are empty so callers can
   skip the system message cleanly.
+
+The ST block carries the recent turns. It is for a call that sends the model
+no history of its own; next to one, those turns would go out twice. Pass the
+history you are sending to the factory and the block is left out when it holds
+any turns. A :class:`SynapAgentThread` already sends Synap's compaction in
+place of the earlier turns, so it needs neither.
 """
 
 from __future__ import annotations
@@ -25,7 +31,7 @@ from __future__ import annotations
 import logging
 from typing import Awaitable, Callable, Literal, Optional
 
-from semantic_kernel.contents import AuthorRole, ChatMessageContent
+from semantic_kernel.contents import AuthorRole, ChatHistory, ChatMessageContent
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
     SynapIntegrationError,
@@ -119,13 +125,17 @@ def synap_st_chat_message(
     preamble_open: Optional[str] = _DEFAULT_OPEN,
     preamble_close: Optional[str] = _DEFAULT_CLOSE,
     on_error: _OnError = "fallback",
-) -> Callable[[], Awaitable[Optional[ChatMessageContent]]]:
+) -> Callable[..., Awaitable[Optional[ChatMessageContent]]]:
     """Return an async factory producing a combined system ``ChatMessageContent``.
 
     Call the returned coroutine to get a
     ``ChatMessageContent(role=AuthorRole.SYSTEM, content=...)``. Content
     is ``<ST block in preamble tags>\\n\\n<system>``. Returns ``None``
     when both inputs are empty.
+
+    The coroutine takes an optional ``chat_history``: the history you are about
+    to send. When it holds user or assistant turns the ST block (which carries
+    the recent turns) is left out and only ``system`` is returned.
 
     Args:
         sdk: Initialised :class:`MaximemSynapSDK`.
@@ -161,8 +171,13 @@ def synap_st_chat_message(
         sdk, conversation_id, style, on_error, "synap_st_chat_message"
     )
 
-    async def _factory() -> Optional[ChatMessageContent]:
-        st_block = await _fetch_st_block(
+    async def _factory(
+        chat_history: Optional[ChatHistory] = None,
+    ) -> Optional[ChatMessageContent]:
+        sends_turns = chat_history is not None and any(
+            m.role in (AuthorRole.USER, AuthorRole.ASSISTANT) for m in chat_history.messages
+        )
+        st_block = "" if sends_turns else await _fetch_st_block(
             sdk,
             conversation_id,
             style,
