@@ -2,7 +2,12 @@
 
 Mirrors the LangGraph template, adapted to LlamaIndex's ``ChatMessage``
 list shape. Wraps ``sdk.conversation.context.get_context_for_prompt``
-(cache-first behind ``SYNAP_SDK_ST_AUTHORITATIVE``).
+(cache-first behind ``SYNAP_SDK_ST_AUTHORITATIVE``). The block is Synap's
+compaction of the conversation and nothing else: the turns after it are the ones
+the chat history already holds, and Synap's ``formatted_context`` carries them
+too, so a block built from it showed each recent turn twice. Before the first
+compaction the block is empty. (``SynapChatMemory`` does this swap for you on an
+agent; this is for a chat engine you assemble by hand.)
 
 LlamaIndex's chat engines take a message list (``chat_history``) and a
 static ``system_prompt`` string. There's no per-step prompt-prep
@@ -17,7 +22,7 @@ Quality contract identical to the LangGraph adapter:
 - SDK failures never crash the chain by default
   (``on_error="fallback"``): logs via :class:`SynapIntegrationError`,
   returns the bare user system content (or ``None`` if both empty).
-- Empty ST is a no-op — never wipes the user's system text.
+- No compaction yet is a no-op — never wipes the user's system text.
 - ``on_error="raise"`` available for strict environments.
 """
 
@@ -86,10 +91,19 @@ async def _fetch_st_block(
         if on_error == "raise":
             raise
         return ""
-    if not getattr(response, "available", False):
+    if getattr(response, "available", True) is False:
         return ""
-    formatted = getattr(response, "formatted_context", None)
-    return (formatted or "").strip()
+    # Synap's compaction (and the earlier turns history search found), never
+    # the recent turns: the chat engine sends those, and `formatted_context`
+    # carries them too, so a block built from it showed each one twice.
+    compaction = getattr(response, "context_block", None)
+    if not isinstance(compaction, str) or not compaction.strip():
+        return ""  # not compacted yet: the chat history is the record
+    parts = [compaction.strip()]
+    found = getattr(response, "history_block", None)
+    if isinstance(found, str) and found.strip():
+        parts.append(found.strip())
+    return "\n\n".join(parts)
 
 
 def _compose(

@@ -14,21 +14,29 @@ nothing to work with, so every fetch stayed a cold retrieval.
     )
     agent.run("Where is my order?", user_id="alice")
 
-Two rules hold throughout.
+Three rules hold throughout.
 
-*Silent without a stream.* Everything here needs an active
-``sdk.instance.listen()``. Without one every hook is a no-op, so adding them
-changes nothing for someone who has not opted into streaming. Nothing here
-writes over REST either: this package has never recorded conversation turns, and
-a hook that quietly started doing so would double-extract against the stream and
-bill for turns the caller never asked to store.
+*Synap's compaction replaces Agno's history.* The pre-hook asks Synap for the
+conversation and, once it has compacted it, makes the session Agno is about to
+read return Synap's view instead of the earlier turns (see
+:mod:`synap_agno.history`). With no compaction yet, Agno's history is untouched.
+
+*Turns are always written; the rest needs a stream.* The user and assistant
+turns go through ``record_turn``: on the stream, which the first call opens
+(``SYNAP_AUTO_LISTEN=false`` stops that), otherwise over REST
+(``conversation.record_message``), never both.
+A turn is the conversation itself, and without it Synap has nothing to compact
+and the SDK nothing to search. The REST write needs a conversation id, which is
+Agno's ``session_id`` unless ``conversation_id=`` overrides it; a run with
+neither writes no turn without a stream. Tool calls, tool results and reasoning
+are stream-only: when the stream cannot be used they are not sent.
 
 *Never raises.* Agno logs and continues when a hook raises, but a hook that
 throws inside a guardrail chain is still a hazard, and telemetry has no business
 interrupting a run. ``stream_events`` swallows everything by design and the
 bridge around it is wrapped too.
 
-## What goes on the stream
+## What is reported
 
 ===================  ==========================================================
 Event                Where it comes from
@@ -80,11 +88,13 @@ from typing import Any, Callable, Dict, List, Optional
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import run_async
 from synap_integrations_common.stream_events import (
+    record_turn,
     report_reasoning,
     report_tool_call,
     report_tool_result,
-    report_turn,
 )
+
+from synap_agno.history import prepare_history, remove_history
 
 logger = logging.getLogger(__name__)
 
@@ -139,9 +149,7 @@ def _ids(
     }
 
 
-async def _report_input(
-    sdk: Any, run_input: Any, ids: Dict[str, str]
-) -> None:
+def _input_text(run_input: Any) -> str:
     content = ""
     if run_input is not None:
         as_string = getattr(run_input, "input_content_string", None)
@@ -152,8 +160,19 @@ async def _report_input(
                 content = ""
         if not content:
             content = _text(getattr(run_input, "input_content", None))
+    return content
+
+
+async def _report_input(
+    sdk: Any, run_input: Any, ids: Dict[str, str], session: Any = None, run_context: Any = None
+) -> None:
+    content = _input_text(run_input)
+    # Before the turn is recorded, so Synap's history is read as it stood when
+    # the run began; the splice drops this turn from it either way.
+    if ids["conversation_id"]:
+        await prepare_history(sdk, session, run_context, ids["conversation_id"], content)
     if content:
-        await report_turn(sdk, role="user", content=content, **ids)
+        await record_turn(sdk, role="user", content=content, **ids)
 
 
 async def _report_output(
@@ -202,7 +221,7 @@ async def _report_output(
     # reads it as the cue to predict the next one.
     content = _text(getattr(run_output, "content", None))
     if content:
-        await report_turn(sdk, role="assistant", content=content, **ids)
+        await record_turn(sdk, role="assistant", content=content, **ids)
 
 
 def _validate(sdk: Any, site: str) -> None:
@@ -225,8 +244,8 @@ def create_synap_async_hooks(
     ``arun()``.
 
     Args:
-        sdk: A configured SDK. Without an active ``listen()`` stream every hook
-            is a no-op.
+        sdk: A configured SDK. Without an active ``listen()`` stream the user
+            and assistant turns are written over REST and nothing else is sent.
         customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
             B2C instance (user_context_isolation=equals_customer): the server
             rejects a call carrying one with HTTP 400. Leave it unset there.
@@ -247,16 +266,19 @@ def create_synap_async_hooks(
     async def synap_pre_hook(
         run_input: Any = None,
         run_context: Any = None,
+        session: Any = None,
         user_id: Optional[str] = None,  # noqa: A002: Agno matches hook args by name
     ) -> None:
         ids = _ids(run_context, user_id, conversation_id, default_user_id, customer_id)
-        await _report_input(sdk, run_input, ids)
+        await _report_input(sdk, run_input, ids, session, run_context)
 
     async def synap_post_hook(
         run_output: Any = None,
         run_context: Any = None,
+        session: Any = None,
         user_id: Optional[str] = None,  # noqa: A002: Agno matches hook args by name
     ) -> None:
+        remove_history(session)
         ids = _ids(run_context, user_id, conversation_id, default_user_id, customer_id)
         await _report_output(
             sdk, run_output, ids, report_tool_results=report_tool_results
@@ -296,16 +318,19 @@ def create_synap_hooks(
     def synap_pre_hook(
         run_input: Any = None,
         run_context: Any = None,
+        session: Any = None,
         user_id: Optional[str] = None,  # noqa: A002: Agno matches hook args by name
     ) -> None:
         ids = _ids(run_context, user_id, conversation_id, default_user_id, customer_id)
-        _bridge(_report_input(sdk, run_input, ids), "pre_hook")
+        _bridge(_report_input(sdk, run_input, ids, session, run_context), "pre_hook")
 
     def synap_post_hook(
         run_output: Any = None,
         run_context: Any = None,
+        session: Any = None,
         user_id: Optional[str] = None,  # noqa: A002: Agno matches hook args by name
     ) -> None:
+        remove_history(session)
         ids = _ids(run_context, user_id, conversation_id, default_user_id, customer_id)
         _bridge(
             _report_output(

@@ -48,6 +48,41 @@ def _load_guard():
 
 guard = _load_guard()
 
+_COMMON = "maximem-synap-integrations-common"
+
+
+def _highest_common_floor() -> str:
+    """The newest `integrations-common` any package in this checkout asks for.
+
+    The fake PyPI below is frozen on one day, but the floors it is checked against
+    are read from the working tree, so they move. They moved on 2026-10-21 (0.2.1
+    to 0.2.2, in #1379) and three tests failed on a frozen "0.2.0" that no longer
+    sat one bump below the floor. The snapshot is derived from the tree instead,
+    so a floor raise cannot rot it again.
+    """
+    floors = [
+        guard.parse_version(r.floor)
+        for folder in guard.SELECTION_ENV.values()
+        for r in guard.requirements_of(folder)
+        if r.name == _COMMON
+    ]
+    return ".".join(str(n) for n in max(floors))
+
+
+def _common_one_bump_below_its_floor() -> str:
+    """The release PyPI served the day before the highest floor shipped.
+
+    A patch bump of this lands exactly on the floor, which is the case the guard
+    must let through when common is published together with the packages that need it.
+    """
+    major, minor, patch = guard.parse_version(_highest_common_floor())
+    if patch == 0:
+        pytest.skip(
+            "the highest common floor is a x.y.0 release; there is no earlier "
+            "patch to stand on, so this scenario cannot be built from the tree"
+        )
+    return f"{major}.{minor}.{patch - 1}"
+
 
 def _workflow_text() -> str:
     if not _WORKFLOW.exists():
@@ -137,14 +172,14 @@ class TestTheCaseTheGuardWasWrittenFor:
     """2026-09-28: twenty packages about to ship against a stale sibling."""
 
     # Twenty integrations now import `synap_integrations_common.stream_events`,
-    # so they declare a floor on the release that first carries it.
-    FLOOR = "0.2.1"
+    # so they declare a floor on the release that first carries it. The floor is
+    # whatever the tree declares today; see `_highest_common_floor`.
 
     def _pypi_on_the_day(self, name: str) -> str | None:
         return {
             "maximem-synap": "0.5.3",
-            "maximem-synap-integrations-common": "0.2.0",
-            "maximem-synap-langchain": "0.3.1",
+            _COMMON: _common_one_bump_below_its_floor(),
+            "maximem-synap-langchain": "0.3.2",
         }.get(name)
 
     def _exists_on_the_day(self, name: str, version: str) -> bool:
@@ -177,7 +212,7 @@ class TestTheCaseTheGuardWasWrittenFor:
         )
 
     def test_publishing_it_together_with_the_common_package_is_allowed(self):
-        # The bump takes PyPI's 0.2.0 to 0.2.1, which is exactly the floor.
+        # The patch bump takes PyPI's version to exactly the floor.
         problems = guard.check(
             ["synap-agno", "synap-integrations-common"],
             "patch",
@@ -239,8 +274,8 @@ class TestPypiSummaryEndpointLag:
     def _stale_summary(self, name: str) -> str | None:
         return {
             "maximem-synap": "0.5.2",  # actually 0.5.3, the cache has not caught up
-            "maximem-synap-integrations-common": "0.2.1",
-            "maximem-synap-langchain": "0.3.1",
+            _COMMON: _highest_common_floor(),  # common's own floor is met
+            "maximem-synap-langchain": "0.3.2",
         }.get(name)
 
     def test_a_stale_summary_does_not_refuse_a_release_that_is_actually_fine(self):

@@ -211,6 +211,35 @@ describe('SynapMemory.recall', () => {
   });
 });
 
+// ── compaction: the block stands in for the turns it covers ─────────────────
+
+describe('SynapMemory.recall with a compaction', () => {
+  const BLOCK = '## Conversation so far (compacted: turns 1-40)\n[CONTEXT COMPACTION, REFERENCE ONLY]\n\n### Where things stand\n- x';
+
+  it('puts the compaction first as a system message', async () => {
+    const ctx = { ...promptContext(true, true), context_block: BLOCK, history_block: '### From the earlier turns\n- turn 3, user: "x"' };
+    const mem = new SynapMemory({ sdk: makeSdk({ promptCtx: ctx }), userId: 'alice' });
+    const out = await mem.recall({ threadId: 't-1' });
+    expect(out.messages).toHaveLength(DIALOGUE.length + 1);
+    expect(out.messages[0].role).toBe('system');
+    expect(out.messages[0].content.parts[0].text).toBe(BLOCK + '\n\n### From the earlier turns\n- turn 3, user: "x"');
+    expect(out.messages[0].createdAt.getTime()).toBeLessThan(out.messages[1].createdAt.getTime());
+  });
+
+  it('never writes the compaction back as a turn', async () => {
+    const sdk = makeSdk();
+    const mem = new SynapMemory({ sdk, userId: 'alice' });
+    await mem.saveMessages({
+      messages: [
+        { id: 'synap-compaction-t-1', role: 'system', threadId: 't-1', content: { format: 2, parts: [{ type: 'text', text: BLOCK }] } },
+        { id: 'u-1', role: 'user', threadId: 't-1', content: { format: 2, parts: [{ type: 'text', text: 'hi' }] } },
+      ],
+    });
+    const calls = (sdk.conversation.record_message as unknown as { mock: { calls: Array<[{ content: string }]> } }).mock.calls;
+    expect(calls.map((c) => c[0].content)).toEqual(['hi']);
+  });
+});
+
 // ── saveMessages ──────────────────────────────────────────────────────────────
 
 describe('SynapMemory.saveMessages', () => {
@@ -276,12 +305,16 @@ describe('SynapMemory.saveMessages', () => {
     expect(arg.content).toBe('plain text');
   });
 
-  it('throws when sdk.record_message rejects (write-side surfaces errors)', async () => {
+  it('does not throw when sdk.record_message rejects, and does not claim the message was recorded', async () => {
+    // A turn write that throws inside the Agent's save path ends the run. It is
+    // logged instead, and the message is left out of what saveMessages returns.
     const sdk = makeFailingSdk();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const mem = new SynapMemory({ sdk, userId: 'alice' });
-    await expect(
-      mem.saveMessages({ messages: [msg('user', 'x', 't-1')] }),
-    ).rejects.toThrow('simulated-sdk-failure');
+    const result = await mem.saveMessages({ messages: [msg('user', 'x', 't-1')] });
+    expect(result.messages).toEqual([]);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it('returns messages that were actually recorded', async () => {

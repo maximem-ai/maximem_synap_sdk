@@ -32,12 +32,24 @@ The turn reports in two halves, in the order the turn happened:
   agent has it before the tool calls it caused;
 - the agent's **reasoning**, then the **answer**, in ``after_run``.
 
-Anything the stream did not take is written over REST in ``after_run``
-exactly as it always was, so a caller who never starts a stream sees no
-change at all.
+Anything the stream did not take is written over REST in ``after_run``.
+The first report opens the stream if the caller has not
+(``SYNAP_AUTO_LISTEN=false`` stops that and everything goes over REST).
 
 Tool calls and their results come from a function middleware added to the
 invocation in ``before_run``; see ``stream.SynapToolReporter``.
+
+Synap's history
+---------------
+
+``before_run`` also adds :class:`~synap_microsoft_agent.compaction.SynapCompactionMiddleware`
+to the invocation, so once Synap has compacted the conversation the model sees
+Synap's compaction instead of the earlier turns the agent's history provider
+holds. When the agent's history provider is itself a Synap one
+(:class:`~synap_microsoft_agent.history_provider.SynapHistoryProvider`, the
+harness memory provider) the history already comes from Synap and the turns are
+written by that provider: this provider then neither adds the middleware nor
+writes the same turns a second time.
 """
 
 from __future__ import annotations
@@ -48,6 +60,7 @@ from typing import Any, ClassVar, Optional
 from agent_framework import ContextProvider
 from maximem_synap import MaximemSynapSDK
 
+from synap_microsoft_agent.compaction import SynapCompactionMiddleware
 from synap_microsoft_agent.stream import (
     already_reported,
     install_tool_reporter,
@@ -121,6 +134,20 @@ class SynapContextProvider(ContextProvider):
             user_id=self.user_id,
             customer_id=self.customer_id,
         )
+        synap_history = _synap_history_providers(agent)
+        extend = getattr(context, "extend_middleware", None)
+        if callable(extend) and not any(p.SYNAP_LOADS_HISTORY for p in synap_history):
+            try:
+                extend(
+                    self.source_id,
+                    SynapCompactionMiddleware(
+                        self.sdk, lambda: self._resolve_conversation_id(context)),
+                )
+            except Exception:  # noqa: BLE001 — a hook must never break the agent run
+                logger.warning("synap: could not add the compaction middleware, so the "
+                               "model keeps the history provider's own turns", exc_info=True)
+        # On the stream before the fetch, whoever writes the turn afterwards: a
+        # Synap history provider skips what is already marked reported.
         await self._report_input_turns(context, conv_id)
 
         input_text = self._concat_text(context.input_messages)
@@ -178,7 +205,13 @@ class SynapContextProvider(ContextProvider):
             # Without a conversation id we can't attribute the turn — skip.
             return
 
-        for message in context.input_messages or []:
+        # A Synap history provider on the agent writes the same turns in its own
+        # `after_run`: writing them here as well stores each one twice.
+        synap_history = _synap_history_providers(agent)
+        write_inputs = not any(p.store_inputs for p in synap_history)
+        write_outputs = not any(p.store_outputs for p in synap_history)
+
+        for message in (context.input_messages or []) if write_inputs else []:
             # `before_run` puts the question on the stream. Recording it again
             # here is the exact double-write the stream-first rule exists to
             # prevent, so only what the stream refused reaches this path.
@@ -203,7 +236,7 @@ class SynapContextProvider(ContextProvider):
                 first_step=step,
             )
             role, text = self._message_to_role_text(message)
-            if role and text:
+            if role and text and write_outputs:
                 await self._record(conv_id, role, text)
 
     async def _record(self, conv_id: str, role: str, text: str) -> None:
@@ -289,9 +322,20 @@ class SynapContextProvider(ContextProvider):
         if role_raw is None:
             return None, ""
         role = role_raw.value if hasattr(role_raw, "value") else str(role_raw)
-        if role not in {"user", "assistant", "system"}:
+        # `record_message` takes "user" or "assistant" only: a system message
+        # raises ValueError in the SDK and would be dropped with an error.
+        if role not in {"user", "assistant"}:
             return None, ""
         text = getattr(message, "text", "") or ""
         if not text.strip():
             return None, ""
         return role, text
+
+
+def _synap_history_providers(agent: Any) -> list:
+    """The providers on ``agent`` that keep the conversation in Synap."""
+    try:
+        providers = list(getattr(agent, "context_providers", None) or [])
+    except TypeError:
+        return []
+    return [p for p in providers if getattr(p, "SYNAP_HISTORY", False) is True]

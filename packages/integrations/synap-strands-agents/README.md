@@ -10,9 +10,9 @@ pip install maximem-synap-strands-agents
 | Surface | Class / function | Strands extension point | What it does |
 |---|---|---|---|
 | Long-term memory | `SynapMemoryStore` | `MemoryStore` → `MemoryManager` | Synap as the agent's memory backend: recall, prompt injection, server-side extraction |
-| Short-term context | `SynapShortTermHook` | `HookProvider` (`BeforeInvocationEvent`) | Injects Synap's working-memory summary before each turn |
+| Short-term context | `SynapShortTermHook` | `HookProvider` + model-call middleware | Sends the model Synap's compaction in place of the earlier turns once Synap has compacted the conversation |
 | Explicit tools | `create_synap_tools` | `@tool` | `search_memory` / `store_memory` for agents not using `MemoryManager` |
-| Anticipation feed | `SynapStreamHook` | `HookProvider` (message + tool-call events) | Feeds turns and tool intent onto Synap's gRPC Listen stream |
+| Turns and anticipation | `SynapStreamHook` | `HookProvider` (message + tool-call events) | Writes turns, tool calls and results on Synap's gRPC stream (opened on first use) |
 
 All four take an already-constructed `MaximemSynapSDK` — the app owns the SDK, its
 credentials, and (for streaming) its connection lifecycle.
@@ -36,15 +36,21 @@ agent = Agent(memory_manager=MemoryManager(stores=[store]))
 
 `search` reads Synap's long-term layer (`sdk.fetch`) and returns structured `MemoryEntry`
 objects. Writes go through `sdk.memories.create`: `add` for single facts, and `add_messages`
-for conversation batches — the latter ingests the assembled transcript under a **stable
-`document_id`** so `MemoryManager`'s periodic extraction updates one document instead of
-duplicating. (Recorded conversation messages, by contrast, feed only short-term compaction — so
-they are deliberately *not* the write path here.)
+for conversation batches. `add_messages` records the batch as conversation turns, not as a
+transcript through `memories.create`: Synap extracts from the conversation it keeps, so a
+transcript on top of the turns `SynapStreamHook` already wrote would be extracted twice. Turns the
+hook wrote are skipped one for one, so the two compose; without the hook, this is what gets the
+conversation to Synap. Pass the hook's `conversation_id` as the store's so both write to one
+conversation.
 
 ## Short-term context — `SynapShortTermHook`
 
-Strands' `system_prompt` is static, so working-memory context is injected via a hook. It folds
-Synap's short-term summary into the current turn's first user message.
+Strands keeps the conversation in `agent.messages` and sends all of it. The hook installs
+model-call middleware (`InvokeModelStage`) that, once Synap has compacted the conversation, sends
+the model Synap's compaction block and the turns after it **in place of the turns before the
+current one**. That is per model call: `agent.messages` is not rewritten, Strands' own conversation
+manager stays installed (it sees a short history and does not fire), and it is what the model is
+sent whenever Synap has nothing.
 
 ```python
 from synap_strands_agents import SynapShortTermHook
@@ -55,12 +61,15 @@ agent = Agent(
 )
 ```
 
-`conversation_id` is required and explicit. Empty context is a no-op; SDK failures are swallowed
-by default (`on_error="fallback"`), or set `on_error="raise"` for strict environments.
+`conversation_id` is required and explicit. SDK failures are swallowed by default
+(`on_error="fallback"`), or set `on_error="raise"` for strict environments.
 
-> **Note.** Strands exposes no ephemeral per-call injection hook to user code, so the injected
-> context becomes part of the conversation the agent persists. The hook folds one context block
-> into each turn's user message (with an idempotency guard) rather than adding throwaway turns.
+> **Note.** Where the framework sends no history (an agent in a restarted process) and Synap has
+> no compaction yet, the hook folds Synap's recent-conversation block into the first user message,
+> so the model still knows what came before. Strands has no ephemeral per-call injection hook for
+> user code, so that block stays in the message; the stream hook never records it as something the
+> user said. With a history, or a compaction, nothing is folded. `SynapStreamHook` installs the same
+> middleware, so either hook is enough.
 
 ## Explicit tools — `create_synap_tools`
 
@@ -77,25 +86,25 @@ agent = Agent(
 
 Adds `search_memory(query)` and `store_memory(content)`.
 
-## Anticipation feed — `SynapStreamHook`
+## Turns and anticipation: `SynapStreamHook`
 
-Makes the agent a participant in Synap's real-time anticipation pipeline by feeding its turns and
-tool-call intent onto the gRPC Listen stream. The **app owns the stream lifecycle**; the hook only
-feeds an already-open stream and no-ops when none is active.
+Writes the agent's turns, tool calls and tool results to Synap. Nothing to set up: the **first turn
+opens the gRPC stream** (`sdk.instance.listen()`), and everything after goes on it. If the stream
+cannot open, the turns are written over REST (`conversation.record_message`) instead, never both;
+tool events are stream-only. `SYNAP_AUTO_LISTEN=false` (or `set_auto_listen(sdk, False)`) stays on
+REST and never opens a stream; a stream you opened yourself is used as is.
 
 ```python
 from synap_strands_agents import SynapStreamHook
 
-await sdk.instance.listen()                      # app opens the stream
 hook = SynapStreamHook(sdk, conversation_id="conv_abc", user_id="alice")
 agent = Agent(hooks=[hook, SynapShortTermHook(sdk, conversation_id="conv_abc")])
-# ... run the agent ...
-await sdk.instance.stop_listening()              # app closes it on shutdown
 ```
 
-> **Run on one event loop.** The stream's background tasks bind to the loop `listen()` ran on;
-> construct the SDK, call `listen()`, and run the agent on that same asyncio loop. The hook feeds
-> real-time *signal* — it does not durably store memories (that's `SynapMemoryStore` / the tools).
+> **Run on one event loop.** The stream's background tasks bind to the loop that opened it; run the
+> agent on one asyncio loop (a caller that wraps each turn in its own `asyncio.run()` stays on REST).
+> Beyond the turns, the hook feeds real-time *signal*; it does not store long-term memories
+> (that's `SynapMemoryStore` / the tools).
 
 ## Error policy
 

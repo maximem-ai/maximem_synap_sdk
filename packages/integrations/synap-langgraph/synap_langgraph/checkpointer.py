@@ -1,12 +1,20 @@
-"""SynapCheckpointSaver — best-effort fuzzy ``BaseCheckpointSaver``.
+"""SynapCheckpointSaver — DEPRECATED: it cannot restore what it saves.
 
-Synap's retrieval is semantic-search shaped, not exact key-value. This saver
-trades off checkpoint fidelity for the benefits of storing thread state in
-Synap: observability, audit, and cross-thread memory sitting next to the
-execution history.
+**Do not use this as a checkpointer.** ``aput`` sends the checkpoint through
+``sdk.memories.create``, which runs the document through Synap's extraction
+pipeline; what ``fetch`` returns afterwards is the facts extracted from it, not
+the document. ``aget_tuple`` then tries to ``json.loads`` a fact's ``content``
+as the checkpoint envelope, which an extracted fact is not, so every read finds
+nothing (or logs a decode failure) and a thread resumes from scratch. Writing a
+base64 checkpoint blob into memory extraction also puts garbage in the user's
+memory. Synap has no exact key-value store to put a checkpoint in.
 
-For production durability, pair with a proper KV-backed saver
-(``SqliteSaver`` / ``PostgresSaver`` in a subgraph or a composite saver).
+Use LangGraph's ``SqliteSaver`` / ``PostgresSaver`` (or ``InMemorySaver`` in
+tests) for checkpoints and :class:`~synap_langgraph.SynapStore` for long-term
+memory. Constructing this class warns for that reason, and a read that finds
+nothing for a thread this process has written logs an error saying so.
+
+The rest of this docstring describes what the code does, for anyone reading it.
 
 Storage strategy:
 
@@ -30,6 +38,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import warnings
 from typing import Any, AsyncIterator, Iterator, Optional, Sequence
 
 from langchain_core.runnables import RunnableConfig
@@ -69,11 +78,21 @@ class SynapCheckpointSaver(BaseCheckpointSaver):
         if not user_id:
             raise ValueError("SynapCheckpointSaver requires a non-empty user_id")
         super().__init__()
+        warnings.warn(
+            "SynapCheckpointSaver is deprecated and cannot restore checkpoints: "
+            "Synap extracts facts from what it is given and returns those, not the "
+            "checkpoint, so every thread resumes from scratch. Use SqliteSaver or "
+            "PostgresSaver for checkpoints and SynapStore for long-term memory.",
+            FutureWarning,
+            stacklevel=2,
+        )
         self.sdk = sdk
         self.user_id = user_id
         self.customer_id = customer_id
         self.mode = mode
         self._delete_warned = False
+        self._written_threads: set = set()
+        self._unreadable_warned: set = set()
 
     # ── put ─────────────────────────────────────────────────────────────────
 
@@ -113,6 +132,7 @@ class SynapCheckpointSaver(BaseCheckpointSaver):
                 customer_id=self.customer_id or None,
                 metadata=meta,
             )
+        self._written_threads.add(thread_id)
 
         return {
             "configurable": {
@@ -210,6 +230,14 @@ class SynapCheckpointSaver(BaseCheckpointSaver):
             limit=10,
         )
         if not tuples:
+            if thread_id in self._written_threads and thread_id not in self._unreadable_warned:
+                self._unreadable_warned.add(thread_id)
+                logger.error(
+                    "SynapCheckpointSaver: wrote a checkpoint for thread_id=%s and "
+                    "cannot read one back; Synap returns extracted facts, not the "
+                    "checkpoint. This thread resumes from scratch. Use SqliteSaver "
+                    "or PostgresSaver.", thread_id,
+                )
             return None
         return tuples[0]
 
