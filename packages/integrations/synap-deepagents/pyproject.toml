@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maximem-synap-deepagents"
-version = "0.1.2"
+version = "0.1.4"
 description = "Synap memory integration for deepagents — a memory backend, retrieval middleware, and tools"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,7 +16,7 @@ keywords = ["synap", "memory", "deepagents", "langchain", "langgraph", "ai", "ag
 
 dependencies = [
     "maximem-synap>=0.5.3",
-    "maximem-synap-integrations-common>=0.2.1",
+    "maximem-synap-integrations-common>=0.2.3",
     "deepagents>=0.7.4",
 ]
 

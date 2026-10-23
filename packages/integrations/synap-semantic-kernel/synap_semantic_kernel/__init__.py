@@ -8,11 +8,18 @@ Three plug-in points:
    message that carries Synap's recent-conversation block.
 3. **Report the turn** — :class:`SynapAgentThread` reports user and
    assistant turns, and :func:`attach_synap_filters` reports the tool call
-   and its result. Turns go out on the Synap stream when one is open and
-   fall back to ``sdk.conversation.record_message`` when it is not; never
-   both.
+   and its result. The first turn opens the Synap gRPC stream, and turns go
+   out on it; they fall back to ``sdk.conversation.record_message`` only if
+   the stream cannot open, never both. ``SYNAP_AUTO_LISTEN=false`` keeps
+   everything on REST.
+
+:class:`SynapAgentThread` also sends the model Synap's compaction in place of
+the earlier turns once Synap has compacted the conversation
+(:class:`SynapChatHistoryReducer`). Semantic Kernel's own reducers stay in
+place and are the fallback when Synap has nothing.
 """
 
+from synap_semantic_kernel.history import SynapChatHistoryReducer
 from synap_semantic_kernel.plugin import SynapPlugin
 from synap_semantic_kernel.short_term import synap_st_chat_message
 from synap_semantic_kernel.stream import (
@@ -25,6 +32,7 @@ __all__ = [
     "SynapPlugin",
     "synap_st_chat_message",
     "SynapAgentThread",
+    "SynapChatHistoryReducer",
     "attach_synap_filters",
     "synap_auto_function_filter",
 ]

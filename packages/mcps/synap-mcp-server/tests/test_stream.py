@@ -469,3 +469,44 @@ class TestTheClientCall:
         with pytest.raises(SynapAPIError) as exc:
             await client.send_events([{"event_type": "user_message"}])
         assert exc.value.status == 429
+
+
+class TestTheFallbackDedupeKeyIsStableAcrossProcesses:
+    """Without an ingestion id the key came from Python's hash(), which is
+    salted per process (PYTHONHASHSEED), so a restart or a second worker minted
+    a new key for the same exchange and the server counted the replay as a new
+    turn."""
+
+    @staticmethod
+    def _key_in_a_fresh_process(seed: str) -> str:
+        import os
+        import subprocess
+        import sys
+
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "from synap_mcp_server.stream import _exchange_key;"
+             "print(_exchange_key('conv-1', 'where is my order', 'it ships tomorrow'))"],
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            capture_output=True, text=True, check=True,
+            cwd=os.path.dirname(os.path.dirname(__file__)),
+        )
+        return out.stdout.strip()
+
+    async def test_two_processes_agree(self):
+        assert self._key_in_a_fresh_process("1") == self._key_in_a_fresh_process("2")
+
+    async def test_it_tells_exchanges_apart(self):
+        from synap_mcp_server.stream import _exchange_key
+
+        assert _exchange_key("c", "ab", "c") != _exchange_key("c", "a", "bc")
+        assert _exchange_key("c", "a", "b") != _exchange_key("d", "a", "b")
+
+    @respx.mock
+    async def test_a_replay_without_an_ingestion_id_reuses_its_ids(self, with_token, reporting_on):
+        route = respx.post(EVENTS_URL).mock(return_value=_accepted())
+        await _report(ingestion_id=None)
+        first = [e["event_id"] for e in _sent(route)]
+        await _report(ingestion_id=None)
+        assert [e["event_id"] for e in _sent(route)] == first
+        assert first[0] != first[1]

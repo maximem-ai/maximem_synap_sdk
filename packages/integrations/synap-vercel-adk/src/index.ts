@@ -5,7 +5,15 @@ export { createSynap, SynapProvider } from './provider.js';
 export { createSynapMiddleware } from './middleware.js';
 export { AnticipationCache } from './context/anticipation-cache.js';
 export { fetchContext } from './context/http-fetcher.js';
-export { writeMemory } from './memory/writer.js';
+export { recordTurn } from './memory/turns.js';
+export {
+  fetchCompactedHistory,
+  spliceHistory,
+  compactedHistoryFromResponse,
+  isSynapHistory,
+} from './history.js';
+export type { CompactedHistory } from './history.js';
+export { StreamManager } from './stream.js';
 export { CredentialManager } from './auth/credential-manager.js';
 export {
   buildContextSystemBlock,

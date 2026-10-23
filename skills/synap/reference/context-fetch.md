@@ -71,6 +71,32 @@ types=["all"]                    # explicit equivalent of omitting
 
 Valid: `"facts"`, `"preferences"`, `"episodes"`, `"emotions"`, `"temporal"`, `"all"`.
 
+## Ranked results
+
+Pass `response_shape="ranked"` and read `context.items`: one list, most relevant
+memory first across every type, ready to hand to the model in that order.
+
+```python
+context = await sdk.user.context.fetch(
+    user_id=user_id,
+    search_query=["refund for a cancelled ride"],
+    response_shape="ranked",
+)
+for item in context.items:
+    item.rank         # 1 is the most relevant
+    item.category     # "facts" | "preferences" | "episodes" | "emotions" | "temporal_events" | "excerpts"
+    item.content
+    item.rank_score   # higher is better; the order is already sorted on it
+```
+
+`"excerpts"` are quotes from the source conversations and documents, placed by
+their own score. The typed lists below are still filled, as views of the same
+items, except that excerpts are not in `facts`. When the token budget is exceeded the
+cut keeps whole memory types in a fixed order, so the list is in rank order but may
+not keep the best items overall. Without `response_shape` you get the typed lists only, which lose the
+order across types. Needs an SDK release that has `response_shape`; older SDKs
+reject the argument.
+
 ## Response structure
 
 ```python

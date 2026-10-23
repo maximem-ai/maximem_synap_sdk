@@ -13,6 +13,10 @@ from .models import (
     MemoryStatusResponse,
     UpdateMemoryRequest,
     Memory,
+    ForgetMode,
+    ForgetStatus,
+    ForgetCandidate,
+    ForgetResponse,
 )
 
 __all__ = [
@@ -28,4 +32,8 @@ __all__ = [
     "MemoryStatusResponse",
     "UpdateMemoryRequest",
     "Memory",
+    "ForgetMode",
+    "ForgetStatus",
+    "ForgetCandidate",
+    "ForgetResponse",
 ]

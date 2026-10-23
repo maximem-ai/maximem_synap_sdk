@@ -1,10 +1,16 @@
 """Synap short-term context for Microsoft Agent Framework (MAF).
 
 Adds :class:`SynapShortTermContextProvider`, a MAF ``ContextProvider``
-that injects Synap **short-term** context (compacted summary + recent
-turns, per conversation) on every ``before_run``. Composes alongside
+that injects Synap's **compaction** of the conversation (and the earlier turns
+history search matched) on every ``before_run``. Composes alongside
 the existing :class:`SynapContextProvider` (long-term semantic memory)
 — register both providers on the agent to get both kinds of context.
+
+It does not add the recent turns: the agent's history provider already sends
+them, and ``formatted_context`` (which ends with them) would send them twice.
+To replace the history provider's earlier turns with Synap's, as well, use
+:class:`~synap_microsoft_agent.compaction.SynapCompactionMiddleware`, which
+:class:`SynapContextProvider` adds by default.
 
 Wraps ``sdk.conversation.context.get_context_for_prompt`` (cache-first
 behind ``SYNAP_SDK_ST_AUTHORITATIVE``).
@@ -104,7 +110,10 @@ class SynapShortTermContextProvider(ContextProvider):
                     style=self.style,
                 )
             if getattr(response, "available", False):
-                st_block = (getattr(response, "formatted_context", None) or "").strip()
+                st_block = "\n\n".join(
+                    part.strip() for part in (getattr(response, "context_block", None),
+                                              getattr(response, "history_block", None))
+                    if isinstance(part, str) and part.strip())
         except SynapIntegrationError:
             if self.on_error == "raise":
                 raise

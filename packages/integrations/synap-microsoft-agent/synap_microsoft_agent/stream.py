@@ -368,6 +368,15 @@ def already_reported(context: Any, source_id: str, message: Any) -> bool:
         return False
 
 
+def reported_ids(context: Any) -> set:
+    """``id()`` of every input message any Synap provider put on the stream this invocation."""
+    try:
+        store = context.metadata.get(_REPORTED_INPUTS) or {}
+        return set().union(*store.values()) if store else set()
+    except Exception:  # noqa: BLE001
+        return set()
+
+
 __all__ = [
     "STREAMABLE_ROLES",
     "SynapToolReporter",
@@ -376,6 +385,7 @@ __all__ = [
     "mark_reported",
     "report_message_reasoning",
     "report_message_turn",
+    "reported_ids",
     "tool_arguments",
     "tool_result_payload",
 ]
