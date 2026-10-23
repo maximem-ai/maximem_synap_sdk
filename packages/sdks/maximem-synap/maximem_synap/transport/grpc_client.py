@@ -1142,7 +1142,12 @@ class GRPCTransport:
         )
         event = synap_service_pb2.StreamEvent(context_assembled=assembled)
         try:
-            await self._stream.write(event)
+            # Same lock as every other writer. This one is scheduled with
+            # ensure_future right after each fetch, so it runs concurrently
+            # with conversation events and heartbeats; unlocked it produced
+            # GRPC_CALL_ERROR_TOO_MANY_OPERATIONS and tore the stream down.
+            async with self._write_lock:
+                await self._stream.write(event)
         except Exception as e:
             # Never raise on telemetry emit — the fetch already succeeded
             # and the watcher will backfill if necessary.

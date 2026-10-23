@@ -33,7 +33,7 @@ answers it. Exit codes: 0 ok, 1 generic, 2 usage, 3 auth, 4 not found, 5 permiss
 
 ## Things to surface to the human
 
-- **B2C vs B2B is chosen once, at create time, and cannot be changed.** It changes how you call the SDK:
+- **B2C vs B2B is chosen when the instance is created; once created, a change also goes through a request by email to gaurav@maximem.ai.** It changes how you call the SDK:
   - **B2C** (`user_context_isolation = "equals_customer"`): memory is per end-user. Send `user_id` and nothing
     else, on every call, including the turn-by-turn `record_message`. A `customer_id` is rejected with HTTP 400,
     and the Python SDK from 0.4.7 raises before the request leaves the process. Never pass the user id as a
@@ -45,8 +45,8 @@ answers it. Exit codes: 0 ok, 1 generic, 2 usage, 3 auth, 4 not found, 5 permiss
 - **Roles:** Owner and Admin can create instances and keys; Member is read-only.
 - **The instance is resolved from the API key.** You do not pass an instance ID on each call. Set
   `SYNAP_INSTANCE_ID` as an env var if you want to pin it; never as an `instance_id=` constructor argument.
-- **One key = one instance.** Use separate instances (and keys) for staging and production.
-- **Staging vs production hosts.** The SDK talks to production unless you also set `SYNAP_BASE_URL`,
+- **One key = one instance.** Use a separate instance (and key) for each agent and for each deployment of the customer's own (dev, test, live). With more than one instance, the variables are named per instance (`sdk-setup.md`, "Several instances").
+- **Connection settings.** The SDK talks to Synap's default servers unless you also set `SYNAP_BASE_URL`,
   `SYNAP_GRPC_HOST`, `SYNAP_GRPC_PORT` and `SYNAP_GRPC_USE_TLS` (see `sdk-setup.md`). Set the key and the four
   host variables from the same deployment, always.
 
