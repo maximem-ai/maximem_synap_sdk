@@ -17,6 +17,7 @@ never compared with it.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -50,10 +51,21 @@ REQUIRES = {"onnx": "onnxruntime", "fastembed": "fastembed", "model2vec": "model
 MODELS_DIR = Path.home() / ".synap" / "models"
 
 
+def models_dir() -> Path:
+    """Where models are downloaded: SYNAP_MODELS_DIR, else ~/.synap/models.
+
+    Read at call time, as the JS SDK does, so an air-gapped or read-only-home
+    deployment can point it at a prepared folder.
+    """
+    override = os.environ.get("SYNAP_MODELS_DIR", "").strip()
+    return Path(override) if override else MODELS_DIR
+
+
 class Model2VecEncoder:
     """A static embedding model: a lookup table, sub-millisecond on CPU."""
 
-    def __init__(self, model_id: str, cache_dir: Path = MODELS_DIR):
+    def __init__(self, model_id: str, cache_dir: Optional[Path] = None):
+        cache_dir = cache_dir or models_dir()
         from huggingface_hub import snapshot_download
         from model2vec import StaticModel
 
@@ -71,7 +83,8 @@ class FastEmbedEncoder:
     # e5 models are trained with these prefixes.
     _PREFIXES = {"e5": ("query: ", "passage: ")}
 
-    def __init__(self, model_id: str, cache_dir: Path = MODELS_DIR):
+    def __init__(self, model_id: str, cache_dir: Optional[Path] = None):
+        cache_dir = cache_dir or models_dir()
         from fastembed import TextEmbedding
 
         self.model = f"fastembed:{model_id}"
@@ -98,7 +111,8 @@ class OnnxEncoder:
 
     MAX_TOKENS = 128  # the model's max_seq_length
 
-    def __init__(self, model_id: str, cache_dir: Path = MODELS_DIR):
+    def __init__(self, model_id: str, cache_dir: Optional[Path] = None):
+        cache_dir = cache_dir or models_dir()
         import numpy as np
         import onnxruntime as ort
         from huggingface_hub import hf_hub_download
@@ -164,11 +178,12 @@ class OnnxEncoder:
         return out
 
 
-def load_encoder(name: str, cache_dir: Path = MODELS_DIR):
+def load_encoder(name: str, cache_dir: Optional[Path] = None):
     """``"model2vec:<hf id>"``, ``"fastembed:<model name>"`` or
     ``"onnx:<hf repo>@<revision>/<onnx file>"``; None when the extra is not
     installed or the model cannot be loaded."""
     kind, _, model_id = name.partition(":")
+    cache_dir = cache_dir or models_dir()
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)
         if kind == "model2vec":
@@ -185,7 +200,7 @@ def load_encoder(name: str, cache_dir: Path = MODELS_DIR):
     return None
 
 
-def load_in_background(name: str, ready: Callable[[object], None], cache_dir: Path = MODELS_DIR) -> threading.Thread:
+def load_in_background(name: str, ready: Callable[[object], None], cache_dir: Optional[Path] = None) -> threading.Thread:
     """Load ``name`` off the prompt path and hand it to ``ready`` (not called
     when it cannot be loaded)."""
     def run():

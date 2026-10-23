@@ -1274,7 +1274,9 @@ function resolveBaseUrl(options: SynapClientOptions): string | undefined {
 
 function resolveCredentials(options: SynapClientOptions): Credentials {
   // Read at call time, not module load, so a late process.env mutation works.
-  const apiKey = options.apiKey ?? getEnv('SYNAP_API_KEY');
+  // `||`, not `??`: an empty apiKey falls back to the environment, as
+  // Python's `api_key or os.environ.get(...)` does.
+  const apiKey = options.apiKey || getEnv('SYNAP_API_KEY');
   // An AuthenticationError, as Python raises it (auth/manager.py), so one
   // `catch` handles "no usable key" in both SDKs. Until 0.5.13 this was an
   // InvalidInputError.
