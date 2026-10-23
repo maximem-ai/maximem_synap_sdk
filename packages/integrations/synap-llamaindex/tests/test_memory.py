@@ -15,7 +15,7 @@ import pytest
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 
 from synap_llamaindex.memory import SynapChatMemory
-from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common import SynapIntegrationError, set_auto_listen
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +34,9 @@ def mock_sdk():
         "message_id": "msg-001", "conversation_id": "conv-1",
     })
     sdk.cache = MagicMock()
+    # These tests mean "no stream": switch the auto-open off rather than let a
+    # MagicMock `listen()` decide.
+    set_auto_listen(sdk, False)
     return sdk
 
 
@@ -171,8 +174,9 @@ async def test_aget_no_input_skips_fetch(memory, mock_sdk):
 
 
 @pytest.mark.asyncio
-async def test_aget_formatted_context_becomes_system_message(memory, mock_sdk):
-    """A non-empty formatted_context is wrapped in a SYSTEM ChatMessage."""
+async def test_aget_never_returns_the_formatted_context(memory, mock_sdk):
+    """formatted_context already contains the recent turns; returning it beside
+    them showed each turn twice."""
     mock_sdk.conversation.context.get_context_for_prompt.return_value = MagicMock(
         recent_messages=[],
         formatted_context="Conversation history text",
@@ -181,9 +185,7 @@ async def test_aget_formatted_context_becomes_system_message(memory, mock_sdk):
 
     msgs = await memory.aget()
 
-    system_msgs = [m for m in msgs if m.role == MessageRole.SYSTEM]
-    assert len(system_msgs) >= 1
-    assert any("Conversation history" in str(m.content) for m in system_msgs)
+    assert not any("Conversation history" in str(m.content) for m in msgs)
 
 
 @pytest.mark.asyncio
@@ -369,15 +371,15 @@ async def test_aput_raises_synap_integration_error_on_sdk_failure(memory, mock_s
 
 
 @pytest.mark.asyncio
-async def test_aput_error_preserves_original_cause(memory, mock_sdk):
-    """SynapIntegrationError must chain the original SDK exception as __cause__."""
-    original = RuntimeError("original error")
-    mock_sdk.conversation.record_message.side_effect = original
+async def test_aput_error_names_the_lost_turn(memory, mock_sdk):
+    """record_turn logs the SDK exception itself; the raised error says which
+    turn was lost."""
+    mock_sdk.conversation.record_message.side_effect = RuntimeError("original error")
 
     with pytest.raises(SynapIntegrationError) as exc_info:
         await memory.aput(ChatMessage(role=MessageRole.USER, content="hi"))
 
-    assert exc_info.value.__cause__ is original
+    assert exc_info.value.context == {"role": "user", "conversation_id": "conv-1"}
 
 
 # ---------------------------------------------------------------------------

@@ -49,6 +49,13 @@ export interface SynapShortTermResponseLike {
   formatted_context?: string | null;
   /** Whether the server reported any short-term content. */
   available?: boolean;
+  /** The framed compaction block; absent before the first compaction and on older SDKs. */
+  context_block?: string | null;
+  /** Earlier turns the SDK found for the latest message, rendered. */
+  history_block?: string | null;
+  /** The turns after the compaction. */
+  recent_messages?: Array<{ role: string; content: string }>;
+  compaction_id?: string | null;
 }
 
 export interface SynapSdkLike {

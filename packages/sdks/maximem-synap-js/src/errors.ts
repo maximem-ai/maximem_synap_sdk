@@ -34,10 +34,13 @@ export type SynapErrorCode =
   | 'invalid_input'
   | 'invalid_instance_id'
   | 'invalid_conversation_id'
+  | 'customer_id_not_accepted'
   | 'authentication'
   | 'context_not_found'
   | 'conflict'
   | 'transcript_conflict'
+  | 'instance_not_ready'
+  | 'instance_build_failed'
   | 'session_expired'
   | 'listening_already_active'
   | 'listening_not_active'
@@ -234,6 +237,31 @@ export class InvalidConversationIdError extends InvalidInputError {
   static override readonly errorCode: SynapErrorCode = 'invalid_conversation_id';
 }
 
+/**
+ * A customer_id passed on a B2C instance, refused before any request.
+ * Python raises the same class (`maximem_synap.CustomerIdNotAcceptedError`),
+ * also a subclass of InvalidInputError, with the same three fields.
+ */
+export class CustomerIdNotAcceptedError extends InvalidInputError {
+  static override readonly errorCode: SynapErrorCode = 'customer_id_not_accepted';
+  readonly where: string;
+  readonly customerId: string;
+  readonly instanceId: string | null;
+
+  constructor(where: string, customerId: string, instanceId?: string | null) {
+    super(
+      `${where}: customer_id is not accepted on this instance` +
+        `${instanceId ? ` (${instanceId})` : ''}, which is B2C ` +
+        `(user_context_isolation='equals_customer'). Send user_id only; it is the ` +
+        `whole identity, and the server files and reads your data under it. ` +
+        `Received customer_id=${JSON.stringify(customerId)}.`,
+    );
+    this.where = where;
+    this.customerId = customerId;
+    this.instanceId = instanceId ?? null;
+  }
+}
+
 export class AuthenticationError extends SynapPermanentError {
   static override readonly errorCode: SynapErrorCode = 'authentication';
 }
@@ -248,6 +276,85 @@ export class ConflictError extends SynapPermanentError {
 
 export class TranscriptConflictError extends ConflictError {
   static override readonly errorCode: SynapErrorCode = 'transcript_conflict';
+}
+
+/**
+ * The instance's memory architecture is still being built (HTTP 409).
+ *
+ * A new instance usually spends 15 to 20 minutes building. Until that finishes the
+ * server refuses memory writes and reads with
+ * `409 {"error": "instance_not_ready", ...}` plus a `Retry-After` header.
+ * Nothing was recorded; the same call works once the build is done.
+ *
+ * Extends `ConflictError`, so existing `catch` code that handles
+ * `ConflictError` keeps working. Thrown immediately and **never retried inside
+ * the SDK**: a wait this long must not hide inside a call. Mirrors
+ * `InstanceNotReadyError` in `maximem_synap/models/errors.py`.
+ */
+export class InstanceNotReadyError extends ConflictError {
+  static override readonly errorCode: SynapErrorCode = 'instance_not_ready';
+  /** The server's estimate of the wait. Python calls this `retry_after_seconds`. */
+  readonly retryAfterSeconds: number | null;
+  readonly instanceId: string | null;
+  /** Build state reported by the server (`'building'`). */
+  readonly state: string | null;
+  /**
+   * `true` when the SDK threw this itself, without a network call, because an
+   * earlier call to the same instance was refused and the server's wait has not
+   * elapsed. Then `retryAfterSeconds` is the REMAINING wait (rounded up, at
+   * least 1). `false` when the server sent this refusal just now. Python:
+   * `from_cooldown`.
+   */
+  readonly fromCooldown: boolean;
+
+  constructor(
+    message = "This instance's memory architecture is still being built.",
+    options: SynapErrorOptions & {
+      retryAfterSeconds?: number | null;
+      instanceId?: string | null;
+      state?: string | null;
+      fromCooldown?: boolean;
+    } = {},
+  ) {
+    super(message, options);
+    this.retryAfterSeconds = options.retryAfterSeconds ?? null;
+    this.instanceId = options.instanceId ?? null;
+    this.state = options.state === undefined ? 'building' : options.state;
+    this.fromCooldown = options.fromCooldown ?? false;
+  }
+}
+
+/**
+ * The instance's memory architecture build failed for good (HTTP 409
+ * `{"error": "instance_build_failed", ...}`).
+ *
+ * The server tried the build several times and gave up. Waiting does not help:
+ * a person has to start a rebuild (see `hint`, e.g.
+ * `maximem-synap instances rebuild <instance_id>`). Extends `ConflictError`.
+ * Thrown immediately, **never retried** and sets **no cooldown**: it is not time
+ * based. Mirrors `InstanceBuildFailedError` in `maximem_synap/models/errors.py`.
+ */
+export class InstanceBuildFailedError extends ConflictError {
+  static override readonly errorCode: SynapErrorCode = 'instance_build_failed';
+  readonly instanceId: string | null;
+  /** How many build attempts the server made. Python: `attempts`. */
+  readonly attempts: number | null;
+  /** The server's instruction for recovering. */
+  readonly hint: string | null;
+
+  constructor(
+    message = "This instance's memory architecture build failed.",
+    options: SynapErrorOptions & {
+      instanceId?: string | null;
+      attempts?: number | null;
+      hint?: string | null;
+    } = {},
+  ) {
+    super(message, options);
+    this.instanceId = options.instanceId ?? null;
+    this.attempts = options.attempts ?? null;
+    this.hint = options.hint ?? null;
+  }
 }
 
 export class SessionExpiredError extends SynapPermanentError {
@@ -275,10 +382,13 @@ const PARENT: Partial<Record<SynapErrorCode, SynapErrorCode>> = {
   invalid_input: 'permanent',
   invalid_instance_id: 'invalid_input',
   invalid_conversation_id: 'invalid_input',
+  customer_id_not_accepted: 'invalid_input',
   authentication: 'permanent',
   context_not_found: 'permanent',
   conflict: 'permanent',
   transcript_conflict: 'conflict',
+  instance_not_ready: 'conflict',
+  instance_build_failed: 'conflict',
   session_expired: 'permanent',
   listening_already_active: 'permanent',
   listening_not_active: 'permanent',

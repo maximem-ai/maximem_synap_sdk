@@ -9,6 +9,7 @@ from typing import IO, Dict, List, Optional, Union
 from uuid import UUID
 
 from ..utils.correlation import generate_correlation_id
+from ..models.errors import InvalidInputError
 from ..telemetry.collector import emit_memory_event
 from ..telemetry.models import TelemetryEventType
 from .models import (
@@ -23,6 +24,8 @@ from .models import (
     DocumentType,
     IngestMode,
     MergeStrategy,
+    ForgetMode,
+    ForgetResponse,
 )
 
 
@@ -61,6 +64,13 @@ class MemoriesInterface:
 
         # Delete memory
         await sdk.memories.delete(memory_id)
+
+        # Forget by description (preview first, a person approves it)
+        result = await sdk.memories.forget(
+            "my old home address",
+            user_id="user-123",
+            customer_id="customer-456",
+        )
     """
 
     def __init__(self, sdk: "MaximemSynapSDK"):
@@ -487,6 +497,7 @@ class MemoriesInterface:
         document_type: Optional[str] = None,
         mode: str = "long-range",
         metadata: Optional[dict] = None,
+        scope: Optional[Dict[str, str]] = None,
     ) -> CreateMemoryResponse:
         """
         Ingest a file or raw text into the memory pipeline.
@@ -504,12 +515,39 @@ class MemoriesInterface:
             document_type: Override detected document type
             mode: "fast" or "long-range" (default "long-range")
             metadata: Additional metadata dict (serialized to JSON)
+            scope: The level this memory belongs to, named in full, one entry
+                per level down to it, for example
+                {"customer": "acme", "team": "payments", "user": "dana"}.
+                Only needed if your scope ladder has a level between customer
+                and user: two ids cannot say which one a write belongs to, and
+                the server refuses rather than guessing. Omit it otherwise.
+                Sent as a JSON string, because the upload route is multipart.
 
         Returns:
             CreateMemoryResponse with ingestion_id and status
         """
+        if scope is not None and (
+            not isinstance(scope, dict)
+            or not all(isinstance(k, str) and isinstance(v, str) for k, v in scope.items())
+        ):
+            raise InvalidInputError(
+                "scope must be a flat dict of level key to id, both strings."
+            )
         self._sdk._check_customer_id(customer_id, where="memories.create_from_file")
         self._sdk._ensure_initialized()
+        # Refused here with InvalidInputError, before anything is read or
+        # sent, as the JS SDK refuses them. Until 0.5.22 an empty user_id was
+        # posted, several sources were accepted with the first silently
+        # winning, and no source was a plain ValueError.
+        if not user_id:
+            raise InvalidInputError("user_id is required")
+        sources = [s for s in (file_path, file, text) if s is not None]
+        if not sources:
+            raise InvalidInputError("One of file_path, file, or text must be provided.")
+        if len(sources) > 1:
+            raise InvalidInputError(
+                "Provide exactly one of file_path, file, or text, not several."
+            )
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = time.time()
 
@@ -526,10 +564,14 @@ class MemoriesInterface:
             # Build form data fields
             form_data: dict = {
                 "user_id": user_id,
-                "customer_id": customer_id,
                 "relationship_type": relationship_type,
                 "mode": mode,
             }
+            # Only when there is one; httpx would otherwise send an empty field.
+            if customer_id:
+                form_data["customer_id"] = customer_id
+            if scope:
+                form_data["scope"] = _json.dumps(scope)
             if document_type:
                 form_data["document_type"] = document_type
             if metadata:
@@ -547,8 +589,6 @@ class MemoriesInterface:
                 files["file"] = (fname, file.read())
             elif text is not None:
                 form_data["text"] = text
-            else:
-                raise ValueError("One of file_path, file, or text must be provided.")
 
             result = await self._sdk._http_transport.post_multipart(
                 path="/api/v1/memories/upload",
@@ -615,6 +655,139 @@ class MemoriesInterface:
                 "memory_id": UUID(result["memory_id"]),
                 "deleted_at": datetime.fromisoformat(result["deleted_at"]),
             }
+
+            latency_ms = int((time.time() - start_time) * 1000)
+            emit_memory_event(
+                self._sdk._telemetry_collector,
+                TelemetryEventType.MEMORY_DELETE,
+                correlation_id=correlation_id,
+                latency_ms=latency_ms,
+                status="success",
+            )
+
+            return response
+
+        except Exception as e:
+            latency_ms = int((time.time() - start_time) * 1000)
+            emit_memory_event(
+                self._sdk._telemetry_collector,
+                TelemetryEventType.MEMORY_DELETE,
+                correlation_id=correlation_id,
+                latency_ms=latency_ms,
+                status="error",
+                error_code=type(e).__name__,
+            )
+            raise
+
+    async def forget(
+        self,
+        description: str,
+        user_id: Optional[str] = None,
+        customer_id: Optional[str] = None,
+        scope: Optional[Dict[str, str]] = None,
+        mode: str = "preview",
+    ) -> ForgetResponse:
+        """
+        Forget memories by describing them in the user's own words.
+
+        Use this when you do not hold memory ids: the server finds the
+        memories the description matches. To delete one memory you already
+        have the id of, use `delete()`.
+
+        The call must be scoped to exactly one user: pass `user_id`, plus
+        `customer_id` on a B2B instance. Without it the server answers 400
+        (raised as `InvalidInputError`).
+
+        Modes:
+            "preview" (default): files a pending request that a person
+                approves in the dashboard under Deletion requests. Nothing is
+                deleted by this call. `candidates` lists what matched.
+            "direct": finds and soft-deletes in one call. Not idempotent as a
+                request: a repeat is harmless and finds nothing new, but it
+                is a new request.
+
+        Args:
+            description: What to forget, in the user's words (3 to 500
+                characters).
+            user_id: External user ID whose memories to search.
+            customer_id: External customer ID. Required on B2B, rejected on
+                B2C.
+            scope: The level to search, named in full, one entry per level
+                down to it, for example
+                {"customer": "acme", "team": "payments", "user": "dana"}.
+                Only needed if your scope ladder has a level between customer
+                and user.
+            mode: "preview" or "direct".
+
+        Returns:
+            ForgetResponse. `status` is one of "nothing_matches", "preview",
+            "deleted" or "partial". "partial" means the memories are hidden
+            but a store named in `still_present_in` may still hold the text,
+            so do not tell an end user it was removed unless
+            `status == "deleted"`. `failed_ids` lists memories that could not
+            be deleted and `may_be_incomplete` is True when the match may not
+            have covered everything.
+
+        Raises:
+            InvalidInputError: 400 (not scoped to one user) or 422
+                (validation), or a bad `description` or `mode` caught before
+                the request is sent.
+            ServiceUnavailableError: 503. The matcher was unavailable and
+                nothing was deleted, so it is safe to try again. The
+                transport applies its normal retry policy first.
+            RateLimitError: 429, as on the other routes.
+        """
+        self._sdk._check_customer_id(customer_id, where="memories.forget")
+        self._sdk._ensure_initialized()
+
+        if not isinstance(description, str) or not 3 <= len(description) <= 500:
+            raise InvalidInputError(
+                "description must be between 3 and 500 characters"
+            )
+        try:
+            forget_mode = ForgetMode(mode)
+        except ValueError:
+            raise InvalidInputError(
+                f"Invalid mode '{mode}'. Expected one of: "
+                f"{', '.join(m.value for m in ForgetMode)}"
+            ) from None
+
+        correlation_id = generate_correlation_id(self._sdk.instance_id)
+        start_time = time.time()
+
+        body = {
+            "description": description,
+            "user_id": user_id,
+            "customer_id": customer_id,
+            "scope": scope,
+            "mode": forget_mode.value,
+        }
+
+        emit_memory_event(
+            self._sdk._telemetry_collector,
+            TelemetryEventType.MEMORY_DELETE,
+            correlation_id=correlation_id,
+            status="started",
+        )
+
+        try:
+            auth_context = await self._sdk._get_auth_context(correlation_id)
+
+            result = await self._sdk._http_transport.post(
+                path="/api/v1/memories/forget",
+                auth_context=auth_context,
+                json=body,
+                correlation_id=correlation_id,
+            )
+
+            response = ForgetResponse(**result)
+
+            # Something was deleted on the server: stop serving it from this
+            # process's caches too. A preview deletes nothing, so it evicts nothing.
+            # A forget can remove only copies (a profile entry, a chunk) and so return
+            # no memory ids; those are served from the same caches.
+            if response.deleted_ids or response.status in ("deleted", "partial"):
+                self._sdk._evict_forgotten(user_id, customer_id)
 
             latency_ms = int((time.time() - start_time) * 1000)
             emit_memory_event(

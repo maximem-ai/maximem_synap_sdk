@@ -27,6 +27,8 @@ export interface FlatMemory {
   metadata: Json;
   context_type: 'fact' | 'preference' | 'episode' | 'emotion' | 'temporal_event';
   event_date: string | null;
+  /** See `TemporalFields.saidAt` in ./types. */
+  said_at: string | null;
   valid_until: string | null;
   temporal_category: string | null;
   temporal_confidence: number;
@@ -41,6 +43,7 @@ const dt = (v: unknown): string | null => (v ? String(v) : null);
 function temporal(item: RawContextItem) {
   return {
     event_date: dt(item['event_date']),
+    said_at: dt(item['said_at']),
     valid_until: dt(item['valid_until']),
     temporal_category: (item['temporal_category'] as string | null) ?? null,
     temporal_confidence: n(item['temporal_confidence'], 0),

@@ -2,24 +2,24 @@ import { wrapLanguageModel, type LanguageModelV1 } from 'ai';
 import { CredentialManager } from './auth/credential-manager.js';
 import { AnticipationCache } from './context/anticipation-cache.js';
 import { createSynapMiddleware } from './middleware.js';
+import { StreamManager } from './stream.js';
 import type { SynapProviderOptions, SynapModelOptions, Credentials } from './types.js';
 
-// Lazy import — only loaded in Node.js environments, never in Edge/browser
-type GrpcStreamClientModule = typeof import('./grpc/stream-client.js');
+let warnedSpec = false;
 
 export class SynapProvider {
   private readonly credManager: CredentialManager;
   private readonly cache: AnticipationCache;
   private readonly opts: SynapProviderOptions;
+  private readonly streams: StreamManager;
 
   private credentials: Credentials | null = null;
-  private grpcClient: import('./grpc/stream-client.js').GrpcStreamClient | null = null;
-  private grpcMod: GrpcStreamClientModule | null = null;
 
   constructor(opts: SynapProviderOptions) {
     this.opts = opts;
     this.credManager = new CredentialManager(undefined, opts.baseUrl);
     this.cache = new AnticipationCache();
+    this.streams = new StreamManager(() => this.credentials, this.cache, opts);
   }
 
   /**
@@ -28,6 +28,9 @@ export class SynapProvider {
    * Usage:
    *   const model = provider.wrap(anthropic('claude-sonnet-4-6'), { userId: 'u_123' });
    *   const { text } = await generateText({ model, messages });
+   *
+   * With a conversationId, once Synap has compacted that conversation the
+   * model sees Synap's compaction in place of the earlier turns in `messages`.
    */
   wrap(model: LanguageModelV1, modelOptions: SynapModelOptions = {}): LanguageModelV1 {
     const creds = this.credentials;
@@ -45,13 +48,28 @@ export class SynapProvider {
       );
     }
 
+    const spec = (model as { specificationVersion?: string }).specificationVersion;
+    if (spec && spec !== 'v1' && !warnedSpec) {
+      warnedSpec = true;
+      console.warn(
+        `[synap] this model implements specification ${spec}; the middleware is written for `
+        + 'AI SDK 3/4 (LanguageModelV1). Context is injected, but replies, tool calls and '
+        + 'reasoning are not recorded.',
+      );
+    }
+
     return wrapLanguageModel({
       model,
       middleware: createSynapMiddleware({
+        // Synap sizes compaction to the agent model's context window
+        // (COMPACTION_V3_PLAN.md §4.3); an explicit option wins.
+        agentModel: model.modelId,
         ...modelOptions,
         credentials: creds,
         anticipationCache: this.cache,
-        grpcClient: this.grpcClient,
+        // Read at call time, not now: a model wrapped before listen(), or across
+        // stopListening() + listen(), still reaches the live stream.
+        streams: this.streams,
         baseUrl: this.opts.baseUrl,
       }),
     });
@@ -69,10 +87,15 @@ export class SynapProvider {
   }
 
   /**
-   * Open the gRPC bidirectional stream for anticipation cache updates.
+   * Open the gRPC bidirectional stream now.
    *
-   * Node.js only — call this once at app startup (e.g. in Next.js instrumentation.ts).
-   * Safe to call in Edge environments — it will silently no-op.
+   * Optional: the first model call opens it on its own (set
+   * `SYNAP_AUTO_LISTEN=false` or `autoListen: false` to stop that). Call this
+   * at app startup to have it ready before the first request, e.g. in Next.js
+   * instrumentation.ts.
+   *
+   * Node.js only. Safe in Edge environments: it silently no-ops and everything
+   * goes over REST.
    */
   async listen(): Promise<void> {
     if (!this.credentials) {
@@ -84,38 +107,20 @@ export class SynapProvider {
       return;
     }
 
-    try {
-      this.grpcMod ??= await import('./grpc/stream-client.js');
-      this.grpcClient = new this.grpcMod.GrpcStreamClient(
-        this.credentials,
-        this.cache,
-        (state) => {
-          if (state === 'disconnected') {
-            // Non-fatal — HTTP context fetch fallback remains active
-          }
-        },
-        {
-          host: this.opts.grpcHost,
-          port: this.opts.grpcPort,
-          useTls: this.opts.grpcUseTls,
-        },
-      );
-      await this.grpcClient.connect();
-    } catch (err) {
-      console.warn('[synap] gRPC listen() failed — falling back to HTTP context fetch:', err);
-      this.grpcClient = null;
-    }
+    await this.streams.listen();
   }
 
-  /** Gracefully close the gRPC stream. */
+  /**
+   * Gracefully close the gRPC stream. It stays closed until listen() is
+   * called again; the first model call does not reopen it.
+   */
   async stopListening(): Promise<void> {
-    await this.grpcClient?.disconnect();
-    this.grpcClient = null;
+    await this.streams.stop();
   }
 
   /** Whether the gRPC anticipation stream is currently connected. */
   get isListening(): boolean {
-    return this.grpcClient?.isConnected ?? false;
+    return this.streams.current !== null;
   }
 
   /** Current anticipation cache size (diagnostic). */
@@ -137,7 +142,8 @@ export class SynapProvider {
  *   apiKey: process.env.SYNAP_API_KEY,
  * });
  *
- * // Start gRPC listener for anticipation cache (Node.js only, optional)
+ * // The gRPC stream opens on the first model call. To have it ready earlier
+ * // (Node.js only, optional):
  * await synap.listen();
  */
 export async function createSynap(opts: SynapProviderOptions): Promise<SynapProvider> {

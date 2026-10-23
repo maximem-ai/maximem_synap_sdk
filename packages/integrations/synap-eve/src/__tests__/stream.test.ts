@@ -13,6 +13,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createSynapStreamHooks } from "../stream.js";
 import type { SynapStreamSdkLike } from "../stream-events.js";
+import type { SynapTurnSdkLike } from "../stream.js";
 
 interface StreamCall {
   method: string;
@@ -37,7 +38,9 @@ function streamingSdk(opts: { listening?: boolean; throws?: boolean } = {}) {
     record_thinking: record("record_thinking"),
     end_session: record("end_session"),
   };
-  return { sdk: { instance } as SynapStreamSdkLike, calls, instance };
+  // The REST write a turn falls back to when no stream is open.
+  const conversation = { record_message: record("record_message") };
+  return { sdk: { instance, conversation } as SynapTurnSdkLike, calls, instance, conversation };
 }
 
 function sentTo(calls: StreamCall[], method: string): Record<string, unknown> | undefined {
@@ -173,12 +176,32 @@ describe("the hook definition", () => {
 
 // ── silent without a stream ──────────────────────────────────────────────────
 
-describe("silent for a caller who never opened a stream", () => {
-  it("reports nothing on any handler when isListening says no", async () => {
+describe("a caller who never opened a stream", () => {
+  it("writes the user and the assistant turn over REST, once each", async () => {
     const { sdk, calls } = streamingSdk({ listening: false });
     const hooks = createSynapStreamHooks({ sdk });
+    await handler(hooks, "message.received")(userMessage("where is my order"), ctx());
+    await handler(hooks, "message.completed")(assistantMessage("it ships Friday"), ctx());
+    expect(methodsIn(calls)).toEqual(["record_message", "record_message"]);
+    expect(calls.map((c) => c.options)).toEqual([
+      { conversation_id: SESSION, role: "user", content: "where is my order", user_id: "alice" },
+      { conversation_id: SESSION, role: "assistant", content: "it ships Friday", user_id: "alice" },
+    ]);
+  });
+
+  it("carries an explicit conversationId and customerId on the REST write", async () => {
+    const { sdk, calls } = streamingSdk({ listening: false });
+    const hooks = createSynapStreamHooks({ sdk, conversationId: "conv-xyz", customerId: "cust-9" });
     await handler(hooks, "message.received")(userMessage("hi"), ctx());
-    await handler(hooks, "message.completed")(assistantMessage("hello"), ctx());
+    expect(sentTo(calls, "record_message")).toMatchObject({
+      conversation_id: "conv-xyz",
+      customer_id: "cust-9",
+    });
+  });
+
+  it("sends nothing but the turns: reasoning, tools and session end are stream only", async () => {
+    const { sdk, calls } = streamingSdk({ listening: false });
+    const hooks = createSynapStreamHooks({ sdk });
     await handler(hooks, "reasoning.completed")(reasoning("thinking"), ctx());
     await handler(hooks, "actions.requested")(actionsRequested([TOOL_CALL]), ctx());
     await handler(hooks, "action.result")(actionResult(TOOL_RESULT), ctx());
@@ -186,7 +209,23 @@ describe("silent for a caller who never opened a stream", () => {
     expect(calls).toEqual([]);
   });
 
-  it("reports nothing when the sdk never started a stream at all", async () => {
+  it("de-duplicates a replayed turn on the REST path too", async () => {
+    const { sdk, calls } = streamingSdk({ listening: false });
+    const hooks = createSynapStreamHooks({ sdk });
+    await handler(hooks, "message.received")(userMessage("hi", 1), ctx());
+    await handler(hooks, "message.received")(userMessage("hi", 1), ctx());
+    expect(methodsIn(calls)).toEqual(["record_message"]);
+  });
+
+  it("a failing REST write does not reach the caller", async () => {
+    const { sdk } = streamingSdk({ listening: false, throws: true });
+    const hooks = createSynapStreamHooks({ sdk });
+    await expect(
+      handler(hooks, "message.received")(userMessage("hi"), ctx()),
+    ).resolves.toBeUndefined();
+  });
+
+  it("reports nothing when the sdk has no stream and no conversation namespace", async () => {
     // An SDK with the methods but no `listen()` running: `isListening` is
     // absent entirely, which must read as "no stream" and not as a truthy
     // function object.
@@ -207,6 +246,15 @@ describe("silent for a caller who never opened a stream", () => {
 // ── the five events ──────────────────────────────────────────────────────────
 
 describe("the turn", () => {
+  it("with a stream open, both turns go on the stream and not over REST", async () => {
+    const { sdk, calls, conversation } = streamingSdk();
+    const hooks = createSynapStreamHooks({ sdk });
+    await handler(hooks, "message.received")(userMessage("where is my order"), ctx());
+    await handler(hooks, "message.completed")(assistantMessage("it ships Friday"), ctx());
+    expect(methodsIn(calls)).toEqual(["send_message", "send_message"]);
+    expect(conversation.record_message).not.toHaveBeenCalled();
+  });
+
   it("reports message.received as user_message scoped to the eve session", async () => {
     const { sdk, calls } = streamingSdk();
     const hooks = createSynapStreamHooks({ sdk });

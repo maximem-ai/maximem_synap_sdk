@@ -188,6 +188,82 @@ class TranscriptConflictError(ConflictError):
     pass
 
 
+class InstanceNotReadyError(ConflictError):
+    """The instance's memory architecture is still being built (HTTP 409).
+
+    A new instance usually spends 15 to 20 minutes building its memory architecture.
+    Until that finishes the server refuses memory writes and reads with
+    ``409 {"error": "instance_not_ready", ...}`` and a ``Retry-After`` header.
+    Nothing was recorded; the same call works once the build is done.
+
+    Subclasses :class:`ConflictError`, so existing ``except ConflictError``
+    code keeps catching it. It is raised immediately and is **never retried
+    inside the SDK**: a wait of this length must not hide inside a call. Catch
+    it and wait ``retry_after_seconds`` yourself, or retry later.
+
+    Attributes:
+        retry_after_seconds: Server's estimate of the wait, from the body or the
+            ``Retry-After`` header. ``None`` when the server sent neither.
+        instance_id: The instance that is building.
+        state: Build state reported by the server (``"building"``).
+        from_cooldown: ``True`` when the SDK raised this itself, without a
+            network call, because an earlier call to the same instance was
+            refused and the server's wait has not elapsed yet. In that case
+            ``retry_after_seconds`` is the REMAINING wait (rounded up, at
+            least 1), not the server's original figure. ``False`` when the
+            server sent this refusal just now.
+    """
+
+    def __init__(
+        self,
+        message: str = "This instance's memory architecture is still being built.",
+        retry_after_seconds: Optional[int] = None,
+        correlation_id: Optional[str] = None,
+        *,
+        instance_id: Optional[str] = None,
+        state: Optional[str] = "building",
+        from_cooldown: bool = False,
+    ):
+        super().__init__(message, correlation_id=correlation_id)
+        self.retry_after_seconds = retry_after_seconds
+        self.instance_id = instance_id
+        self.state = state
+        self.from_cooldown = from_cooldown
+
+
+class InstanceBuildFailedError(ConflictError):
+    """The instance's memory architecture build failed for good (HTTP 409).
+
+    The server tried the build several times and gave up, so memory writes and
+    reads are refused with ``409 {"error": "instance_build_failed", ...}``.
+    Waiting does not help: a person has to start a rebuild (for example
+    ``maximem-synap instances rebuild <instance_id>``, see ``hint``).
+
+    Subclasses :class:`ConflictError`. It is raised immediately, is **never
+    retried** and sets **no cooldown**: it is not time based, so every call is
+    sent and the first one after a successful rebuild just works.
+
+    Attributes:
+        instance_id: The instance whose build failed.
+        attempts: How many build attempts the server made.
+        hint: The server's instruction for recovering, or ``None``.
+    """
+
+    def __init__(
+        self,
+        message: str = "This instance's memory architecture build failed.",
+        correlation_id: Optional[str] = None,
+        *,
+        instance_id: Optional[str] = None,
+        attempts: Optional[int] = None,
+        hint: Optional[str] = None,
+    ):
+        super().__init__(message, correlation_id=correlation_id)
+        self.instance_id = instance_id
+        self.attempts = attempts
+        self.hint = hint
+
+
 class SessionExpiredError(SynapPermanentError):
     """Session has expired and cannot be resumed."""
 

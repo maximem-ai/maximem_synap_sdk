@@ -28,12 +28,17 @@ describe('index.ts — value exports', () => {
     expect(typeof publicApi.createSynapShortTermHook).toBe('function');
   });
 
+  it('exports setAutoListen, the opt-out for the stream that opens itself', () => {
+    expect(typeof publicApi.setAutoListen).toBe('function');
+  });
+
   it('has no unexpected extra enumerable exports beyond the documented set', () => {
     const documented = new Set([
       'createSynapHooks',
       'createSynapMcpServer',
       'buildSynapTools',
       'createSynapShortTermHook',
+      'setAutoListen',
     ]);
     const actual = Object.keys(publicApi).filter((k) => !k.startsWith('__'));
     const undocumented = actual.filter((k) => !documented.has(k));

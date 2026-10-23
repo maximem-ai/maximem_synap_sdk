@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maximem-synap-claude-agent"
-version = "0.2.1"
+version = "0.2.2"
 description = "Synap memory integration for Anthropic's Claude Agent SDK"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,7 +16,7 @@ keywords = ["synap", "memory", "claude", "claude-agent-sdk", "anthropic", "ai", 
 
 dependencies = [
     "maximem-synap>=0.5.3",
-    "maximem-synap-integrations-common>=0.2.1",
+    "maximem-synap-integrations-common>=0.2.3",
     "claude-agent-sdk>=0.1",
 ]
 

@@ -8,9 +8,9 @@ maps those verbs onto memory operations by intent rather than one-to-one:
 ===================  ==========================================================
 Backend call         What it does
 ===================  ==========================================================
-``read`` of the      Calls ``sdk.fetch()`` and returns the formatted context as
-recall file          the file body. The file is synthesized per call; it is
-                     never stored anywhere.
+``read`` of the      Calls ``sdk.fetch(search_query=[recall_query])`` and returns
+recall file          the formatted context as the file body. The file is
+                     synthesized per call; it is never stored anywhere.
 ``grep``             Calls ``sdk.fetch(search_query=[pattern])``. **This is a
                      semantic search, not a regex match** — the pattern is
                      treated as a natural-language query.
@@ -97,6 +97,12 @@ DEFAULT_RECALL_FILENAME = "AGENTS.md"
 DEFAULT_CACHE_TTL_SECONDS = 300
 """How long a written entry stays readable from the local cache."""
 
+DEFAULT_RECALL_QUERY = "What do you know about this user?"
+"""Question used to build the recall file. Synap's ``fetch`` returns nothing when it
+is called without a query, so the recall file has to ask something. Retrieval is
+relevance-ranked, so this returns a best-effort sample of what Synap knows, not a full
+dump; use ``grep`` or the middleware to pull specifics."""
+
 
 def _normalize(path: str) -> str:
     """Return ``path`` as a leading-slash absolute path with no trailing slash."""
@@ -172,6 +178,12 @@ class SynapBackend(BackendProtocol):
         recall_filename: Basename that maps to the synthesized recall document.
             Defaults to ``"AGENTS.md"`` so it lines up with the path you pass to
             ``create_deep_agent(memory=[...])``.
+        recall_query: The question asked of Synap to build the recall document.
+            Synap returns nothing for a fetch with no query, so this must be
+            non-empty. Retrieval is relevance-ranked, so the recall file is a
+            best-effort sample of what Synap knows about the user, not a full
+            dump: use ``grep`` (or the middleware) to pull specifics, or set this
+            to the slice the agent should start with.
         max_results: ``max_results`` passed to ``sdk.fetch``.
         mode: ``"fast"`` (default) or ``"accurate"``. ``read`` of the recall
             file sits on the agent's startup path, so ``"fast"`` is the sane
@@ -179,9 +191,13 @@ class SynapBackend(BackendProtocol):
         grep_mode: Retrieval mode for ``grep``. Defaults to ``"accurate"``,
             because a grep is a deliberate question and worth the latency.
         precision_level: ``"high"`` (default) or ``"medium"``.
-        document_type: ``document_type`` for writes. Defaults to ``"document"``
-            because a backend write is explicit intent, not chat transcript.
-        ingest_mode: ``"fast"`` (default) or ``"long-range"``.
+        document_type: ``document_type`` for writes. Defaults to the SDK default,
+            ``"ai-chat-conversation"``. Do not use ``"document"`` for short notes:
+            on staging, text saved as ``"document"`` was never extracted into
+            retrievable memories (nothing came back after 14 minutes), while the
+            default came back in about 30 seconds.
+        ingest_mode: ``"long-range"`` (the SDK default) or ``"fast"``. Both are
+            retrievable within about 30 seconds for ``"ai-chat-conversation"``.
         include_conversation_context: Whether recall includes compacted
             conversation history. Defaults to ``False``.
         cache_ttl_seconds: Read-after-write cache lifetime. ``0`` disables it —
@@ -199,12 +215,13 @@ class SynapBackend(BackendProtocol):
         customer_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
         recall_filename: str = DEFAULT_RECALL_FILENAME,
+        recall_query: str = DEFAULT_RECALL_QUERY,
         max_results: int = 20,
         mode: str = "fast",
         grep_mode: str = "accurate",
         precision_level: str = "high",
-        document_type: str = "document",
-        ingest_mode: str = "fast",
+        document_type: str = "ai-chat-conversation",
+        ingest_mode: str = "long-range",
         include_conversation_context: bool = False,
         cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
     ) -> None:
@@ -217,12 +234,18 @@ class SynapBackend(BackendProtocol):
             )
         if not recall_filename or not recall_filename.strip():
             raise ValueError("SynapBackend requires a non-empty recall_filename")
+        if not recall_query or not recall_query.strip():
+            raise ValueError(
+                "SynapBackend requires a non-empty recall_query: Synap returns "
+                "nothing for a fetch with no query"
+            )
 
         self.sdk = sdk
         self.user_id = user_id
         self.customer_id = customer_id
         self.conversation_id = conversation_id
         self.recall_filename = recall_filename.strip()
+        self.recall_query = recall_query.strip()
         self.max_results = max_results
         self.mode = mode
         self.grep_mode = grep_mode
@@ -279,7 +302,7 @@ class SynapBackend(BackendProtocol):
         if cached is not None:
             return cached
         if self._is_recall(path):
-            return await self._fetch_text(None, mode=self.mode) or None
+            return await self._fetch_text(self.recall_query, mode=self.mode) or None
         # An arbitrary path we never wrote: treat the basename as a question.
         stem = _basename(path).rsplit(".", 1)[0].replace("-", " ").replace("_", " ")
         return await self._fetch_text(stem, mode=self.mode) or None
