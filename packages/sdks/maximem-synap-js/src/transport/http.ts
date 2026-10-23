@@ -78,7 +78,11 @@ export function isGatedPath(method: string, path: string): boolean {
 }
 
 export interface TimeoutConfig {
-  /** Seconds. Mirrors TimeoutConfig in the Python SDK. */
+  /**
+   * Seconds. Same fields as TimeoutConfig in the Python SDK, but only `read`
+   * is applied here: it limits the whole request. `connect` and `write` are
+   * accepted so a config round-trips between the SDKs, and have no effect.
+   */
   connect: number;
   read: number;
   write: number;

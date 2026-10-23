@@ -3,6 +3,7 @@
 import asyncio
 import json
 import math
+import re
 import random
 import logging
 import threading
@@ -199,6 +200,25 @@ def _instance_build_failed(error_body: Any) -> Optional[Dict[str, Any]]:
         "attempts": attempts,
         "hint": hint if isinstance(hint, str) and hint else None,
     }
+
+
+def _declared_idempotent(method: str, path: str) -> bool:
+    """Whether ``transport/endpoints.py`` declares this call idempotent.
+
+    The four context fetches are POSTs that only read, and the table says so,
+    as the JS SDK's does. The transport never read the table, so a fetch that
+    timed out after sending was tried once in Python and three times in JS.
+    """
+    from .endpoints import ENDPOINTS
+
+    bare = path.split("?", 1)[0].rstrip("/")
+    for spec in ENDPOINTS.values():
+        if spec["method"] != method.upper() or not spec.get("idempotent"):
+            continue
+        pattern = "^" + re.sub(r"\{[^/]+\}", "[^/]+", str(spec["path"])) + "$"
+        if re.match(pattern, bare):
+            return True
+    return False
 
 
 class HTTPTransport:
@@ -595,6 +615,7 @@ class HTTPTransport:
                 max_attempts,
                 method=method,
                 outcome_unknown=outcome_unknown,
+                path=path,
             ):
                 break
 
@@ -774,6 +795,7 @@ class HTTPTransport:
         max_attempts: int,
         method: str = "GET",
         outcome_unknown: bool = False,
+        path: str = "",
     ) -> bool:
         """Determine if we should retry the request.
 
@@ -810,7 +832,8 @@ class HTTPTransport:
         # NOTE: the durable fix is a server-honoured idempotency key, which would
         # let writes retry safely. Until the server supports one, declining the
         # retry is the only client-side option that cannot double-charge.
-        if outcome_unknown and method.upper() not in self._IDEMPOTENT_METHODS:
+        if (outcome_unknown and method.upper() not in self._IDEMPOTENT_METHODS
+                and not _declared_idempotent(method, path)):
             logger.warning(
                 "Not retrying %s: the outcome is unknown and the method is not "
                 "idempotent, so a retry could duplicate the request (for an ingest "

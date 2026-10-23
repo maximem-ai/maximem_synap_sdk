@@ -40,6 +40,8 @@ class SDKConfig(BaseModel):
     grpc_use_tls: Optional[bool] = None  # None=use transport default (TLS on); False=plaintext
     storage_path: Optional[str] = None  # Override default cache path (~/.synap/)
     cache_backend: Optional[str] = "sqlite"  # "sqlite" or None
+    # Accepted and range-checked so existing configs keep working, but nothing
+    # reads it: there is no session, and the API key is sent on every request.
     session_timeout_minutes: int = Field(default=30, ge=5, le=1440)
     timeouts: TimeoutConfig = Field(default_factory=TimeoutConfig)
     retry_policy: Optional[RetryPolicy] = Field(default_factory=RetryPolicy)

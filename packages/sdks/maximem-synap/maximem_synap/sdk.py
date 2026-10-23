@@ -1093,7 +1093,7 @@ class MaximemSynapSDK:
         Args:
             storage_path: Override default cache storage path
             cache_backend: "sqlite" or None
-            session_timeout_minutes: Session timeout (5-1440)
+            session_timeout_minutes: Accepted (5-1440) for compatibility; has no effect
             timeouts: TimeoutConfig or dict
             retry_policy: RetryPolicy, dict, or None to disable
             log_level: "DEBUG", "INFO", "WARNING", "ERROR"
