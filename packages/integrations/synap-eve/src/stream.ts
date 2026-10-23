@@ -31,13 +31,22 @@
 //   import { sdk } from "../lib/synap.js";
 //   export default createSynapStreamHooks({ sdk });
 //
-// ⚠ **Stream only, and that is deliberate.** Unlike the other integrations
-// there is no REST fallback here, because this package has never written
-// conversation turns: `SynapSdkLike` has no `conversation.record_message` and
-// an eve agent's turns have never reached Synap as conversation. Adding a REST
-// write would change what happens for someone who has not opted into
-// streaming, which is the one thing this work must not do. Without an active
-// `sdk.instance.listen()` every handler below is a no-op.
+// **The stream opens itself; turns are always written.** The first event opens
+// `sdk.instance.listen()`, so an agent that never heard of `listen()` still gets
+// its turns, tools and reasoning to Synap. The user and assistant turns go
+// through `recordTurn`: on the stream, and over REST through
+// `sdk.conversation.record_message` only when the stream cannot carry them,
+// never both (the server persists a streamed turn from its event, so a REST
+// write on top would store and extract it twice). A turn is the conversation
+// itself; without it Synap has nothing to compact and the SDK nothing to
+// search. Reasoning, tool calls, tool results and the session end are stream
+// only. `SYNAP_AUTO_LISTEN=false` keeps the stream closed.
+//
+// What eve gives this module is an observer: its hooks fire after eve has
+// accepted and durably recorded each event, and cannot change what the model
+// sees. Putting Synap's compaction in the model's context is
+// `createSynapInstructions` and `createSynapCompactionModel` (see
+// compaction.ts), not a hook.
 //
 // The second rule is the same one everywhere: *never throws*. A hook runs
 // inside eve's own accepted-event path, and an exception from telemetry there
@@ -47,11 +56,10 @@ import { defineHook, type HookContext, type HookEvent } from "eve/hooks";
 
 import {
   endSession,
+  recordTurn,
   reportReasoning,
   reportToolCall,
   reportToolResult,
-  reportTurn,
-  streamIsActive,
   type SynapStreamSdkLike,
 } from "./stream-events.js";
 import {
@@ -67,11 +75,13 @@ type EveActionResult = HookEvent<"action.result">["data"]["result"];
 
 export interface SynapStreamHooksOptions {
   /**
-   * Configured Synap SDK. Only its `instance` namespace is used, so the full
-   * SDK, or anything carrying that namespace, is accepted. Without an active
-   * `listen()` stream every handler is a no-op.
+   * Configured Synap SDK. Its `instance` namespace carries the stream events
+   * (opened on the first one), and `conversation.record_message` writes the
+   * user and assistant turns when the stream cannot carry them. Everything else
+   * is a no-op without a stream, and an SDK without `conversation` simply
+   * writes no turns then.
    */
-  sdk: SynapStreamSdkLike;
+  sdk: SynapTurnSdkLike;
   /**
    * Explicit Synap user scope. Required on unauthenticated channels, where
    * `ctx.session.auth.current` is `null`.
@@ -111,6 +121,64 @@ export interface SynapStreamHooksOptions {
    */
   endSessionOnComplete?: boolean;
 }
+
+/**
+ * The SDK slice this module uses: the stream namespace, plus the REST
+ * conversation write the turns fall back to. Duck-typed and optional, like
+ * everything else here.
+ */
+//
+// ⚠ Not `SynapStreamSdkLike & {...}`: that type takes `Record<string, unknown>`
+// everywhere, and a function parameter is contravariant, so the real client's
+// `send_message(options: SendMessageOptions)` (which requires `content`) is not
+// assignable to it. The four methods whose real options carry a required field
+// are typed with that field here, as type aliases so a stub taking
+// `Record<string, unknown>` is still assignable.
+type SendMessageArgs = {
+  content: string;
+  role?: string;
+  event_type?: string;
+  conversation_id?: string;
+  user_id?: string;
+  customer_id?: string;
+  metadata?: Record<string, string>;
+};
+type RecordToolResultArgs = {
+  result: unknown;
+  conversation_id?: string;
+  user_id?: string;
+  customer_id?: string;
+  tool_name?: string;
+  tool_call_id?: string;
+};
+type RecordThinkingArgs = {
+  content: string;
+  conversation_id?: string;
+  user_id?: string;
+  customer_id?: string;
+  step_index?: number;
+  thought_type?: string;
+};
+type RecordMessageArgs = {
+  role: string;
+  content: string;
+  conversation_id?: string;
+  user_id?: string;
+  customer_id?: string;
+};
+type StreamInstance = NonNullable<SynapStreamSdkLike["instance"]>;
+
+export type SynapTurnSdkLike = {
+  instance?: Omit<StreamInstance, "send_message" | "record_tool_result" | "record_thinking"> & {
+    send_message?: (options: SendMessageArgs) => Promise<unknown>;
+    record_tool_result?: (options: RecordToolResultArgs) => Promise<unknown>;
+    record_thinking?: (options: RecordThinkingArgs) => Promise<unknown>;
+  };
+  conversation?: {
+    record_message?: (options: RecordMessageArgs) => Promise<unknown>;
+    context?: NonNullable<SynapStreamSdkLike["conversation"]>["context"];
+  };
+};
 
 /**
  * How many reported events this remembers, so a replayed event is not reported
@@ -175,15 +243,14 @@ export function createSynapStreamHooks(options: SynapStreamHooksOptions) {
    * what it does, but reading the event's shape is ours, and a throw here
    * lands in eve's accepted-event path.
    *
-   * The `streamIsActive` check is first so that a caller with no stream — which
-   * is every caller who has not opted in — does no work at all.
+   * There is no "is a stream open" gate in front of it: the first report is
+   * what opens one.
    */
   async function guard(
     ctx: HookContext,
     body: (scoped: Scope) => Promise<void>,
   ): Promise<void> {
     try {
-      if (!streamIsActive(sdk)) return;
       const scoped = scope(ctx);
       if (!scoped) return;
       await body(scoped);
@@ -205,7 +272,7 @@ export function createSynapStreamHooks(options: SynapStreamHooksOptions) {
           if (!content) return;
           const key = `user:${event.data.turnId}:${event.data.sequence}`;
           if (!first(key)) return;
-          if (await reportTurn(sdk, { ...scoped, role: "user", content })) {
+          if (await recordTurn(sdk, { ...scoped, role: "user", content })) {
             sent.add(key);
           }
         }),
@@ -274,7 +341,7 @@ export function createSynapStreamHooks(options: SynapStreamHooksOptions) {
           // `assistant_message` that tells anticipation the turn has ended.
           const key = `assistant:${event.data.turnId}:${event.data.sequence}`;
           if (!first(key)) return;
-          if (await reportTurn(sdk, { ...scoped, role: "assistant", content })) {
+          if (await recordTurn(sdk, { ...scoped, role: "assistant", content })) {
             sent.add(key);
           }
         }),

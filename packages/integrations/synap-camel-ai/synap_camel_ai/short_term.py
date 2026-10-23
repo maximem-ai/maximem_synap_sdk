@@ -5,6 +5,12 @@ context is folded into the system message once, at construction, via
 ``sdk.conversation.context.get_context_for_prompt``. Returns the composed system
 message string.
 
+Only the compaction block goes in, never the recent turns: ``ChatAgent`` sends
+its own history on every step, and ``formatted_context`` carries those turns
+too, so adding it would send them twice. A conversation with no compaction yet
+adds nothing. With :class:`~synap_camel_ai.SynapAgentMemory` the live compaction
+replaces this snapshot on every step.
+
 Quality contract (mirrors the other Synap integrations):
 
 - ``conversation_id`` required + explicit.
@@ -83,9 +89,8 @@ async def _fetch_st_block(
         if on_error == "raise":
             raise
         return ""
-    if not getattr(response, "available", False):
-        return ""
-    return (getattr(response, "formatted_context", None) or "").strip()
+    block = getattr(response, "context_block", None)
+    return block.strip() if isinstance(block, str) else ""
 
 
 def _compose(

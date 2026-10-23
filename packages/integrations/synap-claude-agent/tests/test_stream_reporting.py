@@ -4,10 +4,10 @@ The hooks already fetched context and recorded the user's prompt. What they
 never did was report the run to anticipation, which is what makes the NEXT
 turn's fetch a cache hit instead of a cold retrieval.
 
-Two rules hold everywhere here. Nothing requires a stream: with no `listen()`
-running, every report is a no-op and the hooks behave exactly as before. And
-nothing raises: these run inside the agent's own loop, where a telemetry
-exception would take the run down.
+Two rules hold everywhere here. The stream is the default: with no `listen()`
+running the first report opens it, and only with auto-listen off do the turns go
+over REST and the rest become no-ops. And nothing raises: these run inside the
+agent's own loop, where a telemetry exception would take the run down.
 """
 
 from __future__ import annotations
@@ -17,11 +17,20 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from synap_claude_agent.hooks import create_synap_hooks, report_assistant_turn
+from synap_integrations_common import set_auto_listen
 
 
-def listening_sdk(mock_sdk, listening: bool = True):
+def listening_sdk(mock_sdk, listening: bool = True, auto_listen: bool = False):
+    """`listening=False` starts with no stream; `listen()` opens it when
+    `auto_listen` lets the integration call it."""
     mock_sdk.instance = MagicMock()
     mock_sdk.instance.is_listening = listening
+
+    async def listen():
+        mock_sdk.instance.is_listening = True
+
+    mock_sdk.instance.listen = AsyncMock(side_effect=listen)
+    set_auto_listen(mock_sdk, auto_listen)
     mock_sdk.instance.send_message = AsyncMock()
     mock_sdk.instance.record_tool_call = AsyncMock()
     mock_sdk.instance.record_tool_result = AsyncMock()
@@ -36,9 +45,10 @@ def hook(sdk, name: str):
 
 
 class TestTheHooksAreRegistered:
-    def test_all_four_are_there(self, mock_sdk):
+    def test_all_five_are_there(self, mock_sdk):
         hooks = create_synap_hooks(listening_sdk(mock_sdk), user_id="u1")
-        assert set(hooks) == {"UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"}
+        assert set(hooks) == {
+            "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "PreCompact"}
 
 
 class TestWhatReachesTheStream:
@@ -84,10 +94,37 @@ class TestWhatReachesTheStream:
         sdk.instance.end_session.assert_awaited_once_with("c1")
 
 
-class TestTheOneEventAHookCannotProduce:
-    """`assistant_message` is what anticipation acts on, and no hook input
-    carries the final assistant text — StopHookInput has a session id and a
-    flag. So it is a one-line call at the end of a run, deliberately."""
+class TestTheReplyComesFromTheStopHook:
+    """`assistant_message` is what anticipation acts on. The Stop hook's input
+    carries `last_assistant_message`, so the hook writes it; the helper stays for
+    a Claude Code that does not send the field."""
+
+    @pytest.mark.asyncio
+    async def test_the_stop_hook_writes_the_reply_then_closes_the_session(self, mock_sdk):
+        sdk = listening_sdk(mock_sdk)
+        await hook(sdk, "Stop")(
+            {"session_id": "c1", "last_assistant_message": "Your order shipped."},
+            None, MagicMock(),
+        )
+        kwargs = sdk.instance.send_message.await_args.kwargs
+        assert kwargs["event_type"] == "assistant_message"
+        assert kwargs["content"] == "Your order shipped."
+        assert kwargs["conversation_id"] == "c1"
+        sdk.instance.end_session.assert_awaited_once_with("c1")
+
+    @pytest.mark.asyncio
+    async def test_a_stop_without_the_field_only_closes_the_session(self, mock_sdk):
+        sdk = listening_sdk(mock_sdk)
+        await hook(sdk, "Stop")({"session_id": "c1"}, None, MagicMock())
+        sdk.instance.send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_helper_and_the_hook_write_the_reply_once(self, mock_sdk):
+        sdk = listening_sdk(mock_sdk)
+        await report_assistant_turn(sdk, "shipped", conversation_id="c1", user_id="u1")
+        await hook(sdk, "Stop")(
+            {"session_id": "c1", "last_assistant_message": "shipped"}, None, MagicMock())
+        assert sdk.instance.send_message.await_count == 1
 
     @pytest.mark.asyncio
     async def test_the_helper_reports_it(self, mock_sdk):
@@ -100,14 +137,24 @@ class TestTheOneEventAHookCannotProduce:
         assert sdk.instance.send_message.await_args.kwargs["event_type"] == "assistant_message"
 
     @pytest.mark.asyncio
-    async def test_it_says_so_when_there_is_no_stream(self, mock_sdk):
+    async def test_the_helper_opens_the_stream_when_there_is_none(self, mock_sdk):
+        sdk = listening_sdk(mock_sdk, listening=False, auto_listen=True)
+        assert await report_assistant_turn(
+            sdk, "hi", conversation_id="c1", user_id="u1",
+        ) is True
+        sdk.instance.listen.assert_awaited_once()
+        sdk.instance.send_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_with_auto_listen_off_the_helper_writes_over_rest(self, mock_sdk):
         sdk = listening_sdk(mock_sdk, listening=False)
         assert await report_assistant_turn(
             sdk, "hi", conversation_id="c1", user_id="u1",
-        ) is False
+        ) is True
+        sdk.conversation.record_message.assert_awaited_once()
 
 
-class TestWithoutAStreamNothingChanges:
+class TestWithoutAStream:
     @pytest.mark.asyncio
     async def test_no_events_are_sent(self, mock_sdk):
         sdk = listening_sdk(mock_sdk, listening=False)
@@ -122,7 +169,7 @@ class TestWithoutAStreamNothingChanges:
 
     @pytest.mark.asyncio
     async def test_the_prompt_is_still_recorded_and_context_still_injected(self, mock_sdk):
-        """The stream is additive. The behaviour that existed before it stays."""
+        """With auto-listen off the behaviour that existed before the stream stays."""
         sdk = listening_sdk(mock_sdk, listening=False)
         out = await hook(sdk, "UserPromptSubmit")(
             {"prompt": "hi", "session_id": "c1"}, None, MagicMock(),

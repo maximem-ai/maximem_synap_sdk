@@ -43,7 +43,7 @@ from langgraph.store.base import (
     SearchOp,
 )
 
-from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common import SynapIntegrationError, set_auto_listen
 from synap_langgraph.store import (
     SynapStore,
     _filter_matches,
@@ -93,6 +93,9 @@ def _make_sdk(fetch_items=None, create_raise=None, fetch_raise=None):
     sdk.instance = MagicMock()
     sdk.instance.is_listening = False
     sdk.instance.send_message = AsyncMock()
+    # The stream opens on the first turn by default; these tests mean "no
+    # stream", so switch that off rather than let a MagicMock listen() decide.
+    set_auto_listen(sdk, False)
     return sdk
 
 
@@ -100,6 +103,18 @@ def _listening_sdk():
     """An SDK with a live ``sdk.instance.listen()`` stream."""
     sdk = _make_sdk()
     sdk.instance.is_listening = True
+    return sdk
+
+
+def _opening_sdk():
+    """A fresh SDK: ``is_listening`` False until the first turn calls ``listen()``."""
+    sdk = _make_sdk()
+    set_auto_listen(sdk, True)
+
+    async def listen():
+        sdk.instance.is_listening = True
+
+    sdk.instance.listen = AsyncMock(side_effect=listen)
     return sdk
 
 
@@ -641,12 +656,11 @@ class TestRecordMessage:
         assert kw["customer_id"] == "c1"
 
     @pytest.mark.asyncio
-    async def test_arecord_message_passes_optional_session_and_metadata(self):
+    async def test_arecord_message_passes_optional_metadata(self):
         sdk = _make_sdk()
         store = SynapStore(sdk, user_id="u1", customer_id="c1")
-        await store.arecord_message("conv-1", "user", "hi", session_id="sess-1", metadata={"key": "val"})
+        await store.arecord_message("conv-1", "user", "hi", metadata={"key": "val"})
         kw = sdk.conversation.record_message.call_args.kwargs
-        assert kw["session_id"] == "sess-1"
         assert kw["metadata"] == {"key": "val"}
 
     @pytest.mark.asyncio
@@ -744,11 +758,32 @@ class TestArecordMessageStreamFirst:
         sdk.conversation.record_message.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_a_store_with_no_customer_id_reports_nothing_anywhere(self):
+    async def test_a_b2c_store_with_no_customer_id_records_the_turn(self):
+        """A B2C instance refuses a customer_id, so its store has none. It used
+        to record nothing at all, on the stream or over REST."""
         sdk = _listening_sdk()
         store = SynapStore(sdk, user_id="u1")  # no customer_id
         await store.arecord_message("conv-1", "user", "hi")
-        sdk.instance.send_message.assert_not_awaited()
+        kw = sdk.instance.send_message.await_args.kwargs
+        assert kw["user_id"] == "u1"
+        assert "customer_id" not in kw
+        sdk.conversation.record_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_b2c_store_falls_back_to_rest_without_a_customer_id(self):
+        sdk = _make_sdk()
+        store = SynapStore(sdk, user_id="u1")
+        await store.arecord_message("conv-1", "user", "hi")
+        assert "customer_id" not in sdk.conversation.record_message.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_the_first_turn_opens_the_stream_without_a_listen_call_from_the_caller(self):
+        sdk = _opening_sdk()
+        store = SynapStore(sdk, user_id="u1", customer_id="c1")
+        await store.arecord_message("conv-1", "user", "hello")
+        await store.arecord_message("conv-1", "assistant", "hi there")
+        sdk.instance.listen.assert_awaited_once()
+        assert sdk.instance.send_message.await_count == 2
         sdk.conversation.record_message.assert_not_awaited()
 
     @pytest.mark.asyncio

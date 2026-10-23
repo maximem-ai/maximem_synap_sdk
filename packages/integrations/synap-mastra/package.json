@@ -1,6 +1,6 @@
 {
   "name": "@maximem/synap-mastra",
-  "version": "0.1.1",
+  "version": "0.1.5",
   "description": "Synap memory integration for the Mastra ADK (Agent Development Kit)",
   "type": "module",
   "main": "./dist/index.js",
@@ -13,6 +13,7 @@
   },
   "files": [
     "dist",
+    "!dist/__tests__",
     "README.md"
   ],
   "scripts": {
@@ -43,6 +44,7 @@
   },
   "devDependencies": {
     "@mastra/core": "^1.26.0",
+    "@maximem/synap-js-sdk": "0.5.14",
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
