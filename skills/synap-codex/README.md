@@ -33,6 +33,14 @@ Per OpenAI's Codex docs (https://developers.openai.com/codex/skills, /codex/guid
 > The Codex skill format is newer and still moving. If discovery doesn't work, confirm the
 > current skills directory + manifest schema in the live Codex docs and adjust.
 
+## What the agent does to your repo
+
+- **It never commits.** The coding agent never runs `git commit`, `git add -A`, `git push`, `git stash` or an amend. Everything it changes stays uncommitted and every new file stays untracked, so you review the diff and commit it yourself. Its final report says "Nothing was committed" and lists the files it created and changed.
+- **Every question comes with a recommendation and a tip.** When it asks you something (which agent gets memory first, B2C or B2B, what identifies a returning person, compliance, what matters, what must never be stored), it says what it suggests and why, and how Synap will use your answer.
+- **One instance per agent, one key per instance.** If your repo has several agents it asks which one gets memory first; further agents each need their own instance later. With more than one instance, keys go in `.env` as `SYNAP_API_KEY_<INSTANCE_NAME>` and `SYNAP_INSTANCE_ID_<INSTANCE_NAME>`.
+- **Plain words.** It does not show raw status words and never talks about Synap "environments"; `reference/instances-explained.md` is its glossary.
+- **The use-case file.** Once it is sent, it can only be changed by making a request through email to gaurav@maximem.ai.
+
 ## Install
 
 ```bash

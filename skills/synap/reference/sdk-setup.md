@@ -173,6 +173,56 @@ specific one:
 export SYNAP_INSTANCE_ID="inst_a1b2c3d4e5f67890"   # optional
 ```
 
+## Several instances in one project: one key per instance, distinct names
+
+> **Read this next:** [Identifiers & Scopes, "What is an Instance?"](https://docs.maximem.ai/concepts/memory-scopes.md#what-is-an-instance); [Authentication](https://docs.maximem.ai/setup/authentication.md); [Agent topologies](https://docs.maximem.ai/concepts/agent-topologies.md).
+
+An API key belongs to exactly one instance (the instance is resolved from the key). If the project will have more
+than one Synap instance (several agents, the customer's own dev, test and live versions of the app, tenants with
+an instance each), do NOT store every key as `SYNAP_API_KEY`: `api-keys create --write-env` replaces an existing
+`SYNAP_API_KEY` line in place, so the second key would overwrite the first. Save each one under names tied to
+its instance, upper case with underscores:
+
+```
+SYNAP_API_KEY_SUPPORT_BOT=synap_...        SYNAP_INSTANCE_ID_SUPPORT_BOT=inst_...
+SYNAP_API_KEY_SALES_BOT=synap_...          SYNAP_INSTANCE_ID_SALES_BOT=inst_...
+```
+
+`api-keys create` cannot name the variables: `--write-env` always writes `SYNAP_API_KEY` and
+`SYNAP_INSTANCE_ID` (plus connection settings when the CLI was pointed at another server), and `--env-file PATH`
+only chooses the file. So write to a throwaway file outside the repo and move the two lines under the new names
+without printing them:
+
+```sh
+NAME=SUPPORT_BOT                                   # this instance, upper case
+T=$(mktemp -d)                                     # outside the repo
+<cli> api-keys create -i <inst_id> --write-env --env-file "$T/k.env"
+grep -q "^SYNAP_API_KEY_$NAME=" .env 2>/dev/null && echo "already present: stop and ask" || \
+  sed -e "s/^SYNAP_API_KEY=/SYNAP_API_KEY_$NAME=/" -e "s/^SYNAP_INSTANCE_ID=/SYNAP_INSTANCE_ID_$NAME=/" "$T/k.env" \
+  | grep -E "^SYNAP_(API_KEY|INSTANCE_ID)_$NAME=" >> .env
+rm -rf "$T"
+```
+
+If `$T/k.env` also has `SYNAP_BASE_URL`, `SYNAP_GRPC_HOST`, `SYNAP_GRPC_PORT` or `SYNAP_GRPC_USE_TLS`, append them
+to `.env` once (all four together, unnamed) if they are not there. Check `.env` is git-ignored
+(`git check-ignore .env`); never print, paste or commit a key.
+
+The app must read the right variable for the right agent and pass it explicitly, because the SDK only
+auto-reads the unnamed `SYNAP_API_KEY`:
+
+```python
+support = MaximemSynapSDK(api_key=os.environ["SYNAP_API_KEY_SUPPORT_BOT"])
+sales = MaximemSynapSDK(api_key=os.environ["SYNAP_API_KEY_SALES_BOT"])
+```
+```ts
+const support = new SynapClient({ apiKey: process.env.SYNAP_API_KEY_SUPPORT_BOT });
+```
+
+Use one key per instance per process. The startup log line names the instance, never the key. List every named
+variable in `.env.example` (empty values) and in the final report. To verify a named instance without printing
+the key: `env SYNAP_API_KEY="$(grep -m1 '^SYNAP_API_KEY_SUPPORT_BOT=' .env | cut -d= -f2-)" python scripts/verify_synap.py`.
+A single instance may keep the unnamed `SYNAP_API_KEY` and `SYNAP_INSTANCE_ID`.
+
 ## Basic init
 
 **Python:**

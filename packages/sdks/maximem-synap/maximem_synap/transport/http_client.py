@@ -3,6 +3,7 @@
 import asyncio
 import json
 import math
+import re
 import random
 import logging
 import threading
@@ -199,6 +200,25 @@ def _instance_build_failed(error_body: Any) -> Optional[Dict[str, Any]]:
         "attempts": attempts,
         "hint": hint if isinstance(hint, str) and hint else None,
     }
+
+
+def _declared_idempotent(method: str, path: str) -> bool:
+    """Whether ``transport/endpoints.py`` declares this call idempotent.
+
+    The four context fetches are POSTs that only read, and the table says so,
+    as the JS SDK's does. The transport never read the table, so a fetch that
+    timed out after sending was tried once in Python and three times in JS.
+    """
+    from .endpoints import ENDPOINTS
+
+    bare = path.split("?", 1)[0].rstrip("/")
+    for spec in ENDPOINTS.values():
+        if spec["method"] != method.upper() or not spec.get("idempotent"):
+            continue
+        pattern = "^" + re.sub(r"\{[^/]+\}", "[^/]+", str(spec["path"])) + "$"
+        if re.match(pattern, bare):
+            return True
+    return False
 
 
 class HTTPTransport:
@@ -472,7 +492,8 @@ class HTTPTransport:
         # processed the request. Gates retries of non-idempotent methods.
         outcome_unknown = False
         attempts = 0
-        max_attempts = self.retry_policy.max_attempts if self.retry_policy else 1
+        # At least one attempt: max_attempts=0 used to skip the loop and raise None.
+        max_attempts = max(1, self.retry_policy.max_attempts) if self.retry_policy else 1
 
         self._ensure_heartbeat()
 
@@ -595,6 +616,7 @@ class HTTPTransport:
                 max_attempts,
                 method=method,
                 outcome_unknown=outcome_unknown,
+                path=path,
             ):
                 break
 
@@ -774,6 +796,7 @@ class HTTPTransport:
         max_attempts: int,
         method: str = "GET",
         outcome_unknown: bool = False,
+        path: str = "",
     ) -> bool:
         """Determine if we should retry the request.
 
@@ -810,7 +833,8 @@ class HTTPTransport:
         # NOTE: the durable fix is a server-honoured idempotency key, which would
         # let writes retry safely. Until the server supports one, declining the
         # retry is the only client-side option that cannot double-charge.
-        if outcome_unknown and method.upper() not in self._IDEMPOTENT_METHODS:
+        if (outcome_unknown and method.upper() not in self._IDEMPOTENT_METHODS
+                and not _declared_idempotent(method, path)):
             logger.warning(
                 "Not retrying %s: the outcome is unknown and the method is not "
                 "idempotent, so a retry could duplicate the request (for an ingest "
@@ -840,9 +864,9 @@ class HTTPTransport:
         delay = min(delay, self.retry_policy.backoff_max)
 
         if self.retry_policy.backoff_jitter:
-            # Add up to 25% jitter
+            # Add up to 25% jitter, without going past backoff_max.
             jitter = delay * 0.25 * random.random()
-            delay += jitter
+            delay = min(delay + jitter, self.retry_policy.backoff_max)
 
         return delay
 
@@ -984,7 +1008,8 @@ class HTTPTransport:
         last_error: Optional[Exception] = None
         outcome_unknown = False
         attempts = 0
-        max_attempts = self.retry_policy.max_attempts if self.retry_policy else 1
+        # At least one attempt: max_attempts=0 used to skip the loop and raise None.
+        max_attempts = max(1, self.retry_policy.max_attempts) if self.retry_policy else 1
 
         self._ensure_heartbeat()
 
