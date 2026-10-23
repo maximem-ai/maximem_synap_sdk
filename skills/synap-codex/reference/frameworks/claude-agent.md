@@ -1,0 +1,179 @@
+# Claude Agent SDK
+
+> **Read this next:** [This integration's docs page](https://docs.maximem.ai/integrations/claude-agent.md); [memories.create](https://docs.maximem.ai/sdk-reference/memories/create.md); [context fetch](https://docs.maximem.ai/sdk-reference/context/fetch.md); [listen](https://docs.maximem.ai/sdk-reference/instance/listen.md); [Errors](https://docs.maximem.ai/sdk-reference/errors.md); [Graceful degradation](https://docs.maximem.ai/patterns/graceful-degradation.md). **Checkpoint:** open the method's page before writing each call, re-read it after and compare every parameter, scope rule and error; if the docs and this file disagree, the docs win and tell the human.
+
+Available in **Python and TypeScript**.
+
+```bash
+# Python
+pip install maximem-synap-claude-agent
+
+# TypeScript
+npm install @maximem/synap-claude-agent @anthropic-ai/claude-agent-sdk zod
+```
+
+For Anthropic's official Claude Agent SDK.
+
+| Export | Lang | Purpose |
+| --- | --- | --- |
+| `create_synap_hooks` / `createSynapHooks` | Py + TS | Hooks dict for automatic context injection + recording |
+| `create_synap_mcp_server` / `createSynapMcpServer` | Py + TS | MCP server exposing `synap_search` and `synap_remember` tools |
+| `buildSynapTools` | TS | Raw tool definitions for manual composition |
+
+## Hooks — automatic memory (zero tool calls)
+
+Synap injects context before each turn and records after. The model never sees the tools.
+
+**Python:**
+
+```python
+import asyncio
+from anthropic.claude_agent_sdk import query, ClaudeAgentOptions
+from synap_claude_agent import create_synap_hooks
+
+hooks = create_synap_hooks(
+    sdk=sdk,
+    user_id="alice",
+    customer_id="acme",          # B2B only; omit on B2C
+    conversation_id="conv-001",  # optional; auto-generated if omitted
+)
+
+async def main():
+    async for message in query(
+        prompt="What did I tell you about my trial account?",
+        options=ClaudeAgentOptions(hooks=hooks),
+    ):
+        print(message)
+
+asyncio.run(main())
+```
+
+**TypeScript:**
+
+```typescript
+import { query } from "@anthropic-ai/claude-agent-sdk";
+import { createSynapHooks } from "@maximem/synap-claude-agent";
+
+const hooks = createSynapHooks({
+  sdk,
+  userId: "alice",
+  customerId: "acme",         // B2B only; omit on B2C
+  conversationId: "conv-001",  // optional
+});
+
+for await (const message of query({
+  prompt: "What did I tell you about my trial account?",
+  options: { hooks },
+})) {
+  console.log(message);
+}
+```
+
+How hooks work: `before_query` fetches context and prepends it as a system message; `after_turn` ingests the completed user + assistant turn. Step 1 failures degrade gracefully; step 2 surfaces.
+
+**Scoping:** `customer_id` is B2B only, and required there. On a B2C instance (`user_context_isolation = "equals_customer"`) pass `user_id` alone: a `customer_id` comes back as HTTP 400. `GET /api/v1/auth/whoami` tells you which mode the instance is in.
+
+## MCP server — explicit memory tools
+
+Use when the model should decide when to search/store. Server exposes `synap_search` and `synap_remember`.
+
+**Python:**
+
+```python
+from anthropic.claude_agent_sdk import query, ClaudeAgentOptions
+from synap_claude_agent import create_synap_hooks, create_synap_mcp_server
+
+hooks = create_synap_hooks(sdk=sdk, user_id="alice")
+mcp_server = create_synap_mcp_server(sdk=sdk, user_id="alice")
+
+async for message in query(
+    prompt="Search your memory for anything about my project deadlines.",
+    options=ClaudeAgentOptions(
+        hooks=hooks,
+        mcp_servers={"synap": mcp_server},
+    ),
+):
+    print(message)
+```
+
+**TypeScript:**
+
+```typescript
+import { query } from "@anthropic-ai/claude-agent-sdk";
+import { createSynapHooks, createSynapMcpServer } from "@maximem/synap-claude-agent";
+
+const hooks = createSynapHooks({ sdk, userId: "alice" });
+const mcpServer = createSynapMcpServer({ sdk, userId: "alice" });
+
+for await (const message of query({
+  prompt: "Search your memory for anything about my project deadlines.",
+  options: {
+    hooks,
+    mcpServers: { synap: mcpServer },
+  },
+})) {
+  console.log(message);
+}
+```
+
+## Hooks vs. MCP server — which to use
+
+| | Hooks | MCP server |
+| --- | --- | --- |
+| Context injection | Automatic, every turn | On-demand via tool call |
+| Memory storage | Automatic, every turn | On-demand via tool call |
+| Model awareness | Model doesn't see tools | Model decides when to use them |
+| Best for | Production agents — memory always relevant | Research / agentic exploration where the model should reason about memory |
+
+**Use both together** for maximum coverage: hooks handle automatic ingestion, MCP tools let the model query memory explicitly when it wants more.
+
+## TypeScript: raw tools
+
+For manual composition without the full MCP server:
+
+```typescript
+import { buildSynapTools } from "@maximem/synap-claude-agent";
+
+const tools = buildSynapTools({ sdk, userId: "alice", customerId: "acme" });  // customerId: B2B only
+// [synapSearchTool, synapRememberTool] — raw Anthropic tool definitions
+```
+
+## The live stream — wire this too
+
+`create_synap_hooks` already injects context and records prompts. With a stream
+open it also reports the run to Synap, so the next turn is anticipated rather
+than fetched cold.
+
+```python
+from synap_claude_agent import create_synap_hooks, report_assistant_turn
+
+await sdk.instance.listen()                       # once, at startup
+
+options = ClaudeAgentOptions(
+    hooks=create_synap_hooks(sdk, user_id="alice", customer_id="acme",
+                             conversation_id=conv_id),
+)
+
+# ... run the agent ...
+
+# no hook carries the final assistant text, so report the reply yourself
+await report_assistant_turn(sdk, reply_text, conversation_id=conv_id,
+                            user_id="alice", customer_id="acme")
+
+await sdk.instance.stop_listening()               # once, at shutdown
+```
+
+The hooks report the user's turn (`UserPromptSubmit`), tool calls
+(`PreToolUse`), tool results (`PostToolUse`) and the session end (`Stop`). The
+reply is the one thing left to you, and it is the event anticipation runs on, so
+do not skip `report_assistant_turn`.
+
+Everything is a no-op until `listen()` is running. Full picture:
+`reference/streaming.md`.
+
+## Live doc
+
+`https://docs.maximem.ai/integrations/claude-agent`
+
+---
+*Versions: run `pip show maximem-synap` (Python) or `npm ls @maximem/synap-js-sdk` (JS) for what is installed; no version is pinned here. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
