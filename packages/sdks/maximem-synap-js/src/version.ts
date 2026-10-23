@@ -12,4 +12,4 @@
  * build when the two disagree, which is the only thing that makes a manual
  * publish safe.
  */
-export const SDK_VERSION = '0.5.2';
+export const SDK_VERSION = '0.6.0';

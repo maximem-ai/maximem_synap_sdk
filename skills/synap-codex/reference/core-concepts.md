@@ -1,5 +1,7 @@
 # Core concepts
 
+> **Read this next:** [Memory scopes](https://docs.maximem.ai/concepts/memory-scopes.md); [Scope ladder](https://docs.maximem.ai/concepts/scope-ladder.md); [Agent topologies](https://docs.maximem.ai/concepts/agent-topologies.md); [Multi-user scoping](https://docs.maximem.ai/guides/multi-user-scoping.md); [Memory model cheat sheet](https://docs.maximem.ai/concepts/memory-model-cheat-sheet.md); [Memories and context](https://docs.maximem.ai/concepts/memories-and-context.md); [Glossary](https://docs.maximem.ai/resources/glossary.md). **Checkpoint:** open the method's page before writing each call, re-read it after and compare every parameter, scope rule and error; if the docs and this file disagree, the docs win and tell the human.
+
 The minimum mental model needed to write correct Synap code. If you've already read SKILL.md, skim this for the parts you skipped.
 
 ## Hierarchy
@@ -92,15 +94,14 @@ Two orthogonal mode axes. Don't confuse them.
 
 **Ingestion mode** (depth of extraction):
 
-- `fast` — basic chunking + lightweight extraction + vector embedding. Skips graph/relationship work. Use for high-throughput logging.
-- `long-range` — full pipeline: deep entity resolution, relationship mapping, preference detection, emotional analysis, graph storage. **Default for real conversations.**
+The server accepts `fast` or `long-range` (default), but the docs say both run the same ingestion pipeline today and nothing reads the value, so it makes no difference. Leave the default and do not offer it as a decision.
 
 **Retrieval mode** (depth of search):
 
 - `fast` — vector similarity only, ~50–100ms. **Default for the agent hot path.**
 - `accurate` — vector + graph traversal + multi-signal rank, ~200–500ms. Use for relationship-heavy queries ("What did Alice say about the project Bob is leading?").
 
-Most production agents: `long-range` ingest, `fast` retrieve.
+Most production agents: default ingest, `fast` retrieve.
 
 ## Document types
 
@@ -160,16 +161,16 @@ A non-UUID will cause a `ServiceUnavailableError`.
 
 ## What MACA is (and why you can ignore it for now)
 
-Each instance has a YAML **Memory Architecture Configuration** controlling extraction strategies, ranking signals, retention, and storage layout. You configure it from the dashboard, with versioning and an approval workflow. **You don't touch MACA in code.** Mention it to the user only if they ask "how do I customize what gets extracted" — point them to the dashboard.
+Each instance has a YAML **Memory Architecture Configuration** controlling extraction strategies, ranking signals, retention, and storage layout. It is generated automatically from the approved use-case file when the instance is created (`instances create --from-file`). **You don't touch MACA in code.** Mention it to the user only if they ask "how do I customize what gets extracted": point them to `https://docs.maximem.ai/guides/configuring-memory`.
 
 ## Pointers to live docs
 
 - Memory scopes: `https://docs.maximem.ai/concepts/memory-scopes`
-- Memory types: `https://docs.maximem.ai/concepts/memory-types`
-- Customers vs users: `https://docs.maximem.ai/concepts/customers-and-users`
-- Clients vs instances: `https://docs.maximem.ai/concepts/clients-and-instances`
+- Memory types: `https://docs.maximem.ai/concepts/memories-and-context#memory-types`
+- Customers vs users: `https://docs.maximem.ai/concepts/memory-scopes#customers-and-users`
+- Clients vs instances: `https://docs.maximem.ai/concepts/memory-scopes#clients-and-instances`
 - Multi-user scoping guide: `https://docs.maximem.ai/guides/multi-user-scoping`
-- MACA: `https://docs.maximem.ai/concepts/customized-memory-architectures`
+- MACA: `https://docs.maximem.ai/concepts/memory-architecture`
 
 ---
-*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+*Versions: run `pip show maximem-synap` (Python) or `npm ls @maximem/synap-js-sdk` (JS) for what is installed; no version is pinned here. Source of truth: https://docs.maximem.ai (append `.md` to any page).*

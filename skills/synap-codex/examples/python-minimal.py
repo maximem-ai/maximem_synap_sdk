@@ -82,4 +82,4 @@ if __name__ == "__main__":
 # events per turn, stop_listening() at shutdown. Without it every fetch() is a
 # cold retrieval and no turn becomes memory on its own. See reference/streaming.md.
 #
-# Accurate as of maximem-synap 0.5.1 — verified 2026-09-25. Docs: https://docs.maximem.ai
+# Versions: run `pip show maximem-synap` (Python) or `npm ls @maximem/synap-js-sdk` (JS) for what is installed; no version is pinned here. Docs: https://docs.maximem.ai

@@ -5,7 +5,8 @@ model search and store memory, and short_term put a context block in the
 prompt, but nothing ever told Synap what was said. Anticipation saw an empty
 conversation.
 
-The rule these pin is "stream first, REST only as a fallback, never both".
+The rule these pin is "stream first (opened by the first turn), REST only as a
+fallback, never both".
 The server persists `user_message` and `assistant_message` from the stream
 itself, so a `record_message` on top of a delivered stream event writes the
 same turn twice and extracts it twice.
@@ -44,6 +45,7 @@ from semantic_kernel.functions import (
     kernel_function,
 )
 
+from synap_integrations_common import set_auto_listen
 from synap_semantic_kernel.stream import (
     SynapAgentThread,
     _tool_args,
@@ -64,6 +66,9 @@ _rebuild_auto_function_invocation_context()
 def _streaming_sdk(is_listening: bool = True):
     sdk = MagicMock()
     sdk.instance.is_listening = is_listening
+    if not is_listening:
+        # these tests are about the REST fallback; opening a stream is test_history's
+        set_auto_listen(sdk, False)
     sdk.instance.send_message = AsyncMock()
     sdk.instance.record_tool_call = AsyncMock()
     sdk.instance.record_tool_result = AsyncMock()

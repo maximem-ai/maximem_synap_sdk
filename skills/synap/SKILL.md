@@ -1,6 +1,16 @@
 ---
 name: synap
-description: Add persistent, structured long-term memory to AI agents using Maximem Synap. Use this skill whenever the user is building, debugging, or evaluating an AI agent and mentions any of: "memory", "long-term memory", "persistent memory", "agent memory", "remember across sessions", "context window", "agent forgets", "user preferences", "personalization", "RAG over conversations", "multi-tenant memory", "memory layer", "Mem0", "Zep", "Letta", "SuperMemory", "Cognee", or asks how to integrate memory into LangChain, LangGraph, LlamaIndex, OpenAI Agents SDK, Pydantic AI, CrewAI, AutoGen, Google ADK, Haystack, Agno, Semantic Kernel, Microsoft Agent Framework, NVIDIA NeMo, LiveKit, Pipecat, Claude Agent SDK, Mastra, Vercel AI SDK, or MCP (no-code). Also trigger on direct mentions of "Synap", "Maximem", "maximem-synap", or `synap-*` package names. Covers SDK setup, scoping (User/Customer/Client), ingestion, retrieval, the live gRPC stream that drives real-time anticipation ("anticipation", "prefetch context", "streaming", "listen()", "record_thinking", "record_tool_call"), and one drop-in package per framework.
+description: >-
+  Add persistent, structured long-term memory to AI agents using Maximem Synap. Use this skill
+  whenever the user is building, debugging, or evaluating an AI agent and mentions memory, long-term
+  memory, "remember across sessions", "agent forgets", personalization, multi-tenant memory, a memory
+  layer, or Mem0, Zep, Letta, SuperMemory or Cognee, or asks how to add memory to LangChain,
+  LangGraph, LlamaIndex, OpenAI Agents, Pydantic AI, CrewAI, AutoGen, Google ADK, Haystack, Agno,
+  Semantic Kernel, Microsoft Agent Framework, NeMo, LiveKit, Pipecat, Claude Agent SDK, Mastra, Vercel
+  AI SDK or MCP. Also trigger when a prompt contains a Synap one-time code (syn_ob_...) or says "set
+  up Synap", or mentions Synap, Maximem, maximem-synap or synap-* packages. Covers SDK setup, scoping
+  (User/Customer/Client), ingestion, retrieval, the live gRPC stream (listen, record_thinking,
+  record_tool_call), and one package per framework.
 allowed-tools: Read, Write, Edit, Bash
 ---
 
@@ -12,217 +22,83 @@ This skill helps you (a) decide whether Synap fits, and (b) wire it into whichev
 
 ## When this skill is relevant
 
-Trigger this skill the moment the user is doing any of:
+The user is building, debugging or evaluating an AI agent and mentions memory, personalization, "remember across sessions", an agent that forgets, a memory vendor (Mem0, Zep, Letta, SuperMemory, Cognee), a framework integration (any of the 19 in `reference/frameworks/`), or migrating off a homegrown memory hack. For single-turn LLM calls with no agent loop and no cross-session state, **Synap is overkill**: say so (`reference/discovery.md`).
 
-- Building or scaffolding an AI agent and mentions memory, personalization, or "remember across sessions"
-- Debugging an agent that forgets context, repeats questions, or treats every turn as cold start
-- Evaluating memory vendors (Mem0, Zep, Letta, SuperMemory, Cognee) — Synap is the alternative
-- Asking how to integrate memory into a specific framework (any of the 19 listed in `reference/frameworks/`)
-- Migrating off a homegrown memory hack (chat-history-in-Postgres, raw vector DB, summarization loops)
+## Procedure: onboarding a project end to end
 
-If the user is just doing single-turn LLM calls with no agent loop and no need for cross-session state, **Synap is overkill** — say so. Be honest. See `reference/discovery.md` for the decision rubric.
+**Never guess. If anything is unclear, stop and ask the human.** Exact wording, edge cases, retry rules, build states and the sign-out message: `reference/onboarding-details.md`. Questions and failure table: `reference/onboarding-ask-rules.md`. CLI reference: `reference/dashboard-setup.md`.
 
-## Procedure — the order to do this in
+**CLI.** `<cli>` means `maximem-synap` from PATH if `maximem-synap --version` reports 0.3.0 or newer, otherwise `npx @maximem/synap-cli@latest` (needs Node and Python 3.10+). **Environment:** if the prompt names one, add `--env <name>` to every CLI command (or `export SYNAP_ENV=<name>`); a one-time code only works on the server that issued it. 
 
-There is **no CLI**. Provisioning happens by hand in the dashboard; the SDK only *uses* a key
-that already exists. Follow these steps and **do not skip the PAUSE**.
+**Quick reference.** Put `--json` or `--output json` before the subcommand; use the full `inst_...` id, never a truncated table id. `api-keys create --write-env` writes `SYNAP_API_KEY` and `SYNAP_INSTANCE_ID`, and off production also `SYNAP_BASE_URL`, `SYNAP_GRPC_HOST`, `SYNAP_GRPC_PORT`, `SYNAP_GRPC_USE_TLS` (never add those by hand). Always pass `--env` when the prompt names an environment and `--agent-name` at sign-in. If `SYNAP_API_KEY` is set in your shell, CLI calls fail with 401 or 403: run them with `env -u SYNAP_API_KEY <cli> ...`.
 
-1. **Detect the stack.** Identify the user's framework (or "custom"). This selects which `reference/frameworks/<name>.md` to follow — see `reference/frameworks/_index.md`.
-2. **Provision in the dashboard (manual).** Walk the user through `reference/dashboard-setup.md`: sign up → create Client → create Instance (+ upload a use-case `.md`, see `reference/use-case-markdown.md`) → set B2C/B2B → generate an API key.
-3. **⏸ PAUSE.** Ask the user to paste their `synap_...` key (or set it themselves), then `export SYNAP_API_KEY=synap_...` and `export SYNAP_INSTANCE_ID=inst_...` (the dashboard shows both together). Do not write integration code before the key is set.
-4. **Install.** The SDK + the framework package — see `reference/sdk-setup.md` and the chosen framework file. (Sandboxed agents need network + file-write approval for this.)
-5. **Integrate.** Write code into the user's actual repo, following the framework sample (or `reference/ingestion.md` + `reference/context-fetch.md` for a custom stack).
-6. **Wire the live stream.** Read `reference/streaming.md` and do it. Unless the user's app is per-request serverless, this step is part of the integration, not an optional extra — without it there is no anticipation, every retrieval is cold, and nothing becomes memory unless the user calls `memories.create()` by hand. Do not finish at step 5.
-7. **Verify.** Run `python scripts/verify_synap.py`, and walk the checklist at the end of `reference/streaming.md`. Never report done without a green run.
+1. **Sign in.** `<cli> auth login --code <syn_ob_...> --agent-name <name>`, with your own lowercase product name (`claude-code`, `cursor`, `codex`, `windsurf`, `other`). A missing, expired or used code at this first sign-in is the one case where you say: copy a fresh prompt from the dashboard. No silent browser fallback. The key lasts 7 days; never `auth refresh` it.
+2. **State.** `<cli> onboard status`; resume from the first unfinished step. Re-running the prompt is safe, also in a new session (the profile is on disk).
 
-## Progressive disclosure — what to load when
+**Start variants (ask which applies; detail: `reference/no-code-path.md`).** One-time code: step 1. No code: a fresh dashboard prompt, or `<cli> auth login` once (the human approves in the browser). Existing instance and runtime key: skip steps 1, 5, 6, the key step and the wait; read the key from the environment or `.env`, never ask the human to paste a key into chat (name the variable and have them add it to `.env`); read the mode with whoami; still do Step 0, identity, the path choice, the read path and verify.
 
-Do **not** read every reference file. Pick what the situation requires.
+**Step 0: learn Synap first (required, after step 2 and before step 3).** Read in full, not skimmed: /getting-started/quickstart, /concepts/memory-model-cheat-sheet, /concepts/memory-scopes, /concepts/how-ingestion-works, /concepts/retrieval-modes, /concepts/real-time-anticipation (docs.maximem.ai, `.md` for clean text), and once step 3 names the framework, /integrations/<name> before step 6. Then tell the human four lines on what you understood: (1) the scoping model (`user_id` and `customer_id` by B2C or B2B), (2) the three operations (write, read, live stream), (3) why the live stream matters, (4) the build/ready rule.
 
-| Situation | Read |
-| --- | --- |
-| User is comparing memory vendors / asking "should I use Synap?" | `reference/discovery.md` |
-| User has decided on Synap and is starting fresh | `reference/sdk-setup.md` then the relevant `reference/frameworks/*.md` |
-| User is using one of the 19 supported frameworks | `reference/sdk-setup.md` + `reference/frameworks/<framework>.md` |
-| **Any agent integration in a long-lived process** (server, worker, voice) | `reference/streaming.md` — **always**, alongside whatever else you read |
-| User wants memory in an MCP client (no code) | `reference/frameworks/mcp.md` |
-| User has a custom stack with no listed integration | `reference/sdk-setup.md` + `reference/ingestion.md` + `reference/context-fetch.md` |
-| Multi-tenant B2B SaaS / "how do I scope per customer" | `reference/core-concepts.md` (scopes section) |
-| Going to production / shipping | `reference/production.md` |
-| Errors at runtime | `reference/sdk-setup.md` (error handling section) |
+3. **Read the repo.** Detect the framework (`reference/frameworks/_index.md`). Infer only what the code supports.
+4. **Ask the human, one question at a time, showing the evidence and still asking:** B2C or B2B (immutable); what identifies a returning person in this app (a stable user id; if there is none, memory can only be per session); compliance and sensitive data; what matters most to remember; what must never be stored. If the answers mean memory cannot serve the goal (a session id as the user id while the goal is remembering returning users), say so plainly before approval and ask again. For health, financial, children's or other personal data read /guides/pii-protection first. Run `onboard ask "<question>"` while waiting. Rules: `reference/onboarding-ask-rules.md`. Never use a per-chat or session id as `user_id` unless the human confirms there is no persistent identity, then say plainly that returning memory, profile and per-person erasure are lost; a shared-device id leaks between people.
+**Choose the integration path (required, after step 4, before step 5). Always use the SDK, never raw HTTP calls.** There are two SDK paths, and they differ in who does the work. On the **implicit path** (the live stream: `listen`, `send_message`, `record_*`) the app reports events and Synap works as they flow. On the **explicit path** the app calls the SDK's store and fetch methods (`record_message`, `memories.create`, `fetch`) itself. For any app that CAN run a long-lived process (server, worker, container, desktop or CLI agent, voice agent) the implicit path is the DEFAULT and brings Synap's best results; never present it as optional. Before asking, say what it gives (docs-backed only): context prepared before the user asks (a read is often a local cache hit in about a millisecond when Synap prepared it); turns recorded and compacted into memory as they flow, with no write calls; reasoning and tool use (stream only) sharpening what is prepared; delivery that survives dropped connections. Then ask as a confirmation, default yes: "I will wire the live stream so you get X, Y, Z. Tell me if you do not want it." Implement it FULLY unless the human EXPLICITLY says no ("I do not know", silence, "whatever you think" mean implement): the five events below, session end, clean shutdown, the docs checkpoint, after checking dependency conflicts (e.g. protobuf). If they say no, record it with the one-sentence consequence, build the explicit path and mention it in the final report. **Serverless, Edge or per-request hosts (Vercel, Lambda, short-lived workers):** the implicit path needs a long-lived process (`/concepts/grpc-vs-rest`), so in one plain sentence say it is not available on this host, build the explicit path with the production rules, and add one neutral sentence that if the app ever runs a long-lived process the implicit path becomes available. Do not pitch re-architecting. Report `onboard report integrating in_progress --detail "path=implicit|explicit-no|explicit-host"`. Sources: `reference/integration-depth.md`.
 
-The 19 framework files in `reference/frameworks/` are listed and one-line-described in `reference/frameworks/_index.md`. Read that first if you're not sure which file to load.
+The five events for the implicit path, every turn (calls and guides: `reference/streaming.md`):
 
-## Bare-minimum mental model
+| Event | In plain words | Lost without it |
+|---|---|---|
+| `user_message` | the user spoke | the turn is not recorded |
+| `agent_thinking` | why the agent chose it | only the edges of the turn are seen |
+| `tool_call` | which tool, which arguments | what the agent is about to need |
+| `tool_result` | what the tool returned | the strongest hint of the next question |
+| `assistant_message` | the reply | anticipation never runs |
 
-You will need this to follow any of the framework guides.
+5. **Draft the use-case** from `instances template` (`reference/use-case-markdown.md`), every unanswered field literally `not stated`. Show the EXACT file you will upload, in full, and upload exactly that file, never a longer or different one. Quote its `shasum -a 256`; if you change one character after approval, ask again. Then `onboard report use_case_drafted done` and, after an explicit yes, `use_case_approved done`.
+6. **Create** only after telling the human the build usually takes 15 to 20 minutes and getting a yes (ask before create): `instances create --name ... --relationship b2c|b2b --from-file usecase.md`. Do not wait: `onboard report integrating in_progress`, install the SDK and write the integration, but run no memory call yet.
+7. **Integrate on the chosen path.** Follow `reference/sdk-setup.md` and the framework file. **Done means** (`reference/integration-checklist.md`): the READ is wired into the model prompt (write-only is not done; say where) and memory informs while the app's own rules decide; writes init the SDK once, set `TimeoutConfig` at init (about 5 s; the SDK has no per-call timeout), enforce the total deadline in the app (`asyncio.wait_for` or a worker thread), use bounded retries, never block the user turn if avoidable, never swallow a failure silently, and state what is lost; redaction, if any, is tested against the never-store list with realistic samples; one startup log line says ON or OFF; no staging key in production; versions pinned; `.env.example` and README updated; tests cover Synap failing, the 409 path and redaction. On the implicit path wire the whole stream (`reference/streaming.md`). **Docs checkpoint:** open each call's /sdk-reference page before writing it, re-read it after, and check parameters, the scope rule (`user_id` always; `customer_id` only on B2B), mode and errors. Before step 9 print a **"Docs read"** list: every page you actually OPENED (downloaded does not count), one line each on what it changed; step 9 is gated on /guides/production-checklist, /patterns/graceful-degradation, /sdk-reference/errors and each method page used. If docs and skill disagree, the docs win; say so.
+8. **Key.** `api-keys create -i <id> --write-env`, then `onboard report env_written done`. Never print, paste or commit the key. **Protect the build window:** run the project's tests with `env -u SYNAP_API_KEY ...` (or the integration disabled) until verify has passed, and tell the human why: a memory call on a building instance is refused and may be lost.
+9. **Wait, then verify.** Run `instances wait <id>` in the BACKGROUND (output to a log file; poll the log or `onboard status`) so the human can keep talking to you. Only when it reports ready, run `python scripts/verify_synap.py > verify.out 2>&1; echo "exit=$?"` (prefix `SYNAP_VERIFY_REQUIRE_STREAM=1` on the implicit path) and paste the WHOLE of verify.out unedited, WARN lines included (explain every WARN). It ends with `RESULT: PASS` or `RESULT: FAIL <reason>`, then `EXIT CODE: <n>`. Then run `python scripts/check_integration_wiring.py <project dir>` and paste it, drive the app's own endpoint with a sentinel and recall it through the app's own read code (or say that was not done), and say whether recalled text reaches a prompt.
+10. **Announce in the session** with the filled `reference/final-report-template.md` (what is wired: write, read, stream, identity, sensitive data, tests; what was skipped and why), the verbatim verify output, every file changed. A known defect you caused is fixed first or asked about, never listed as a later decision. "Optional: view it in your dashboard" is never a step.
+11. **Sign out last, only if verify passed:** send every `onboard report` first, then `<cli> auth logout`, and say it is signed out ONLY if it exits 0 and reports revoked (exit 9 `revocation_pending`: retry, then an open item; see `reference/onboarding-details.md`). If verify failed, keep the key.
 
-**Three identifiers — copy from the user's Synap dashboard at synap.maximem.ai:**
+**Until `instances wait` reports ready, run no ingestion or retrieval at all, including `verify_synap.py`.** A refused call is HTTP 409 `instance_not_ready`. Handle BOTH forms: newer SDKs raise `InstanceNotReadyError` (`retry_after_seconds`, `from_cooldown`, `instance_id`), older SDKs (including 0.5.16) raise a `ConflictError` whose message says the memory architecture is still being built. Catch the typed class first, then the message; never loop inside the call. Tell the human their own app gets it too; reads degrade to no memory, writes retry later (`reference/sdk-setup.md`).
 
-- `instance_id` — looks like `inst_a1b2c3d4e5f67890`. One per agent deployment.
-- `api_key` — looks like `synap_...`. Generated per instance, shown once.
-- A `client_id` (`cli_...`) at the org level, but the SDK does not need it directly.
+Hard rules: the human never has to return to the dashboard; never guess; `not stated` for gaps; confirm before create; never create or delete workspaces or touch billing or members; never print or commit the key.
 
-**Three operations — every integration is a thin wrapper around these:**
+## Why each rule exists
 
-```python
-# Write side: ingest a conversation or document
-await sdk.memories.create(
-    document="User: I prefer dark mode.\nAssistant: Noted.",
-    document_type="ai-chat-conversation",
-    user_id="alice",
-    customer_id="acme",          # B2B only: required there, rejected on B2C
-    mode="long-range",           # "fast" or "long-range"
-)
+- **Ask, never guess; approve the exact file:** B2C or B2B and the use-case cannot change after create.
+- **No memory calls before ready:** the server refuses them.
+- **Key in `.env`, never printed; `auth logout` last:** transcripts are kept; reports need the key first.
 
-# Read side: fetch context before the next LLM call.
-# Match the retrieval interface to the scope you wrote at — we wrote with user_id,
-# so we read at user scope. (For per-conversation memory, register turns with
-# sdk.conversation.record_message(...) first, then use sdk.conversation.context.fetch.)
-context = await sdk.user.context.fetch(
-    user_id="alice",
-    customer_id="acme",          # B2B only: required there, rejected on B2C
-    search_query=["user preferences"],
-    max_results=10,
-    mode="fast",                 # "fast" (~50-100ms) or "accurate" (~200-500ms)
-)
+## Docs map (`docs.maximem.ai`, `.md` after any path gives clean markdown; full list: `reference/docs-map.md`)
 
-# Stream side: report the turn as it happens, so Synap can predict the next one
-# and so turns become memory without an explicit write. One long-lived stream
-# per process. Full loop and the five events: reference/streaming.md
-await sdk.instance.listen()                     # once, at startup
-await sdk.instance.send_message(
-    content="I prefer dark mode.", role="user", event_type="user_message",
-    conversation_id=conv_id, user_id="alice", customer_id="acme",
-)
-# ... record_thinking / record_tool_call / record_tool_result ...
-await sdk.instance.send_message(
-    content="Noted.", role="assistant", event_type="assistant_message",
-    conversation_id=conv_id, user_id="alice", customer_id="acme",
-)
-await sdk.instance.stop_listening()             # once, at shutdown
-```
+| Topic | Pages | Re-visit when |
+|---|---|---|
+| Orientation, CLI | /getting-started/quickstart, /concepts/memory-model-cheat-sheet, /cli/overview | Step 0; each CLI step |
+| SDK setup, auth | /setup/installation, /setup/authentication, /sdk/initialization, /sdk-reference/lifecycle/initialize | Before init code |
+| Scoping, B2C vs B2B | /concepts/memory-scopes, /guides/multi-user-scoping | Every call with `user_id` or `customer_id` |
+| Writes and reads | /sdk/ingestion, /sdk/context-fetch, /sdk-reference/memories/create, /sdk-reference/context/fetch | Before and after each call |
+| Live stream (implicit path) | /concepts/real-time-anticipation, /concepts/grpc-vs-rest, /concepts/event-delivery, /patterns/real-time-anticipation-server, /sdk-reference/instance/listen, send-message, record-thinking, record-tool-call, record-tool-result, end-session, stop-listening (all in sdk-reference/instance), /capture/traces-and-tool-calls | Before wiring it; again after |
+| Use-case and MACA | /concepts/memory-architecture, /guides/configuring-memory | Before drafting |
+| Frameworks | /integrations/overview, /integrations/<name> | Before and after wiring |
+| Privacy | /guides/pii-protection, /guides/erasure | Sensitive data named |
+| Production, errors | /guides/production-checklist, /patterns/graceful-degradation, /sdk-reference/errors, /sdk/error-handling | Before step 9; on any error |
 
-The stream is the operation most integrations skip, and skipping it is why a
-working integration can still deliver nothing: **anticipation runs on the
-`assistant_message` event**, so an agent that never reports the reply gets no
-prefetching at all and looks healthy from outside. Read `reference/streaming.md`
-before you finish.
+## What to load when
 
-**Two instance modes. Find out which one you are on before writing a single call:**
-
-`GET /api/v1/auth/whoami` returns `user_context_isolation`. `equals_customer` means B2C: the caller sends `user_id` only, and a `customer_id` is rejected with HTTP 400 (the Python SDK raises client-side from 0.4.7). `strict` means B2B: `customer_id` is required, and a `user_id` on its own is an error. `sdk.customer.context.fetch` (`POST /v1/context/customer/fetch`) is B2B only and is rejected on B2C. Never pass the user id as a customer id to fill the field, and never send both to see which one sticks: call whoami.
-
-**Four scope levels — wider scopes are visible to narrower ones, never the reverse:**
-
-```
-USER   →  CUSTOMER  →  CLIENT  →  WORLD
-private    org-wide      app-wide   global
-```
-
-Decide scoping at ingestion time by which `*_id` you pass. On B2C: `user_id` → user-scoped, nothing → client-scoped, and that is the whole set. On B2B: `user_id` + `customer_id` → user-scoped, `customer_id` only → org-shared, nothing → client-scoped.
-
-**Two modes per axis — pick one:**
-
-| | `fast` | `accurate` / `long-range` |
-| --- | --- | --- |
-| Ingestion | Lightweight extraction, seconds | Full pipeline + graph, seconds-to-minutes |
-| Retrieval | Vector only, ~50-100ms | Vector + graph + multi-signal rank, ~200-500ms |
-
-Default to `fast` for retrieval (it's in the agent hot path) and `long-range` for ingestion (extraction quality compounds).
-
-## SDK lifecycle
-
-Every Python integration assumes you have done this once at process start:
-
-```python
-import os
-from maximem_synap import MaximemSynapSDK
-
-sdk = MaximemSynapSDK(
-    api_key=os.environ["SYNAP_API_KEY"],
-)
-await sdk.initialize()      # validates key, resolves the instance, opens connection
-# ... use sdk ...
-await sdk.shutdown()        # flush telemetry, close connections
-```
-
-TypeScript uses a different, flatter API — package `@maximem/synap-js-sdk`:
-
-```typescript
-import { SynapClient } from "@maximem/synap-js-sdk";
-
-const sdk = new SynapClient({ apiKey: process.env.SYNAP_API_KEY! });
-await sdk.init();                 // note: init(), not initialize()
-// write: await sdk.addMemory({ userId, customerId, messages, mode })
-// read:  await sdk.fetchUserContext({ userId, searchQuery, mode })
-// customerId is B2B only: on a B2C instance send userId alone.
-await sdk.shutdown();
-```
-
-The JS SDK is pure TypeScript: no Python, no subprocess, zero runtime dependencies, Node 20+. gRPC is behind a lazy `import()`, so importing it on Edge or in a Worker is safe; only the live stream needs Node. There is no `MaximemSynapSDK` class and no `sdk.memories` / `sdk.conversation` namespaces in JS.
-
-The Python SDK is a **singleton per API key** — constructing twice with the same key returns the same live SDK. This is intentional; do not work around it. Different keys give different SDKs, so one process can serve several tenants. For tests use `_force_new=True`.
-
-**Critical:** every SDK call is async. Forgetting `await` is the #1 mistake.
-
-## The 19 supported frameworks at a glance
-
-| Framework | Package | Language | Style |
-| --- | --- | --- | --- |
-| LangChain | `maximem-synap-langchain` | Python | History + callback + retriever + tools |
-| LangGraph | `maximem-synap-langgraph` | Python | Checkpointer + cross-thread Store |
-| LlamaIndex | `maximem-synap-llamaindex` | Python | `BaseMemory` + retriever |
-| OpenAI Agents SDK | `maximem-synap-openai-agents` | Python | Function tools |
-| Pydantic AI | `maximem-synap-pydantic-ai` | Python | Deps + auto-registered tools |
-| CrewAI | `maximem-synap-crewai` | Python | `StorageBackend` |
-| AutoGen | `maximem-synap-autogen` | Python | `BaseTool` |
-| Google ADK | `maximem-synap-google-adk` | Python | `FunctionTool` factory |
-| Haystack | `maximem-synap-haystack` | Python | Pipeline components |
-| Agno | `maximem-synap-agno` | Python | `InMemoryDb` subclass |
-| Semantic Kernel | `maximem-synap-semantic-kernel` | Python | Kernel plugin |
-| Microsoft Agent Framework | `maximem-synap-microsoft-agent` | Python | Context + history providers |
-| NVIDIA NeMo Agent Toolkit | `maximem-synap-nemo-agent-toolkit` | Python | `MemoryEditor` |
-| LiveKit Agents | `maximem-synap-livekit-agents` | Python | Preload + recording + tools |
-| Pipecat | `maximem-synap-pipecat` | Python | Frame processors |
-| Claude Agent SDK | `maximem-synap-claude-agent` / `@maximem/synap-claude-agent` | Py + TS | Hooks + MCP server |
-| Mastra | `@maximem/synap-mastra` | TypeScript | `SynapMemory` + tools |
-| Vercel AI SDK | `@maximem/synap-vercel-adk` | TypeScript | Model middleware |
-
-For any of these, jump to `reference/frameworks/<name>.md`. They share a contract:
-
-- **Read failures degrade gracefully** — context fetch errors return empty results and log; the agent keeps running.
-- **Write failures surface explicitly** — ingestion errors raise `SynapIntegrationError` (or framework equivalent).
-- **Same scoping model**: every helper accepts `user_id`, `customer_id` (B2B only, and required there), optional `conversation_id`.
-
-Five of them also drive the live stream from the framework's own hooks: OpenAI Agents, Google ADK, the Claude Agent SDK, the Vercel AI SDK and Strands Agents. Each is silent until `listen()` is running, and none of them covers every event on its own — see the table in `reference/streaming.md` for what is left for you in each case.
-
-## Custom stack (no integration package)
-
-If the user's framework isn't in the list (rare), they wire `sdk.memories.create()` and `sdk.conversation.context.fetch()` directly. See `reference/ingestion.md` and `reference/context-fetch.md`. The live stream is plain SDK calls and works with any framework or none — `reference/streaming.md` still applies.
-
-## Defaults to use unless told otherwise
-
-When generating code, default to:
-
-- Read the environment variable `SYNAP_API_KEY`. Never hardcode. `SYNAP_INSTANCE_ID` is optional — the instance is resolved from the key.
-- Ingestion `mode="long-range"`, `document_type="ai-chat-conversation"`.
-- Retrieval `mode="fast"`, `max_results=10`.
-- Always pass `user_id`. Add `customer_id` only on a B2B instance, where it is required. Confirm the mode with `GET /api/v1/auth/whoami` (`user_context_isolation`); on B2C a `customer_id` is rejected with HTTP 400.
-- `conversation_id` must be a valid UUID — if the user passes a session string, wrap it: `str(uuid5(NAMESPACE_URL, session_str))`.
-- Open the live stream. In a long-lived process this is a default, not a question to ask: `listen()` at startup, the five events per turn, `stop_listening()` at shutdown. Skip it only for per-request serverless, edge runtimes and batch jobs, and say why when you do.
+Local references live in `reference/`: `onboarding-details.md` (full steps), `onboarding-ask-rules.md`, `integration-depth.md` (the path choice and its sources), `integration-checklist.md`, `final-report-template.md`, `no-code-path.md`, `use-case-markdown.md`, `sdk-setup.md`, `streaming.md` (the implicit path), `frameworks/<name>.md`, `mental-model.md`, `docs-map.md`; the README lists them all. The docs-reading rules in Step 0 and the checkpoint are NOT optional.
 
 ## What this skill does NOT do
 
-- Configure MACA (Memory Architecture Configuration). That's a YAML file in the dashboard. Mention it exists; point to `https://docs.maximem.ai/concepts/customized-memory-architectures` and let the user configure it themselves.
-- Create instances or API keys. The user must do this from `https://synap.maximem.ai`. The skill should never attempt to provision.
-- Migrate data from another memory vendor. Point to `https://docs.maximem.ai/migration/overview`.
+- Decide B2C vs B2B, compliance or what to store. Only the human decides.
+- Create or delete workspaces, or touch billing or members.
+- Configure MACA by hand: it is generated from the approved use-case (`https://docs.maximem.ai/concepts/memory-architecture`).
+- Migrate data from another memory vendor: point to `https://docs.maximem.ai/migrations/overview`.
 
 ## Authoritative source
 
-Every claim in this skill is grounded in `https://docs.maximem.ai`. If something here conflicts with the live docs, the live docs win. When in doubt, fetch the relevant `https://docs.maximem.ai/<path>.md` URL — Mintlify serves a clean markdown version of every page.
-
-`https://docs.maximem.ai/llms.txt` is the canonical machine-readable index of all pages.
+`https://docs.maximem.ai` is the source of truth; if this skill conflicts with it, the docs win. Index: `https://docs.maximem.ai/llms.txt`.
 
 ---
-*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+*Versions: run `pip show maximem-synap` (Python) or `npm ls @maximem/synap-js-sdk` (JS) for what is installed; no version is pinned here. Source of truth: https://docs.maximem.ai (append `.md` to any page).*

@@ -1,6 +1,7 @@
 """Tests for :mod:`synap_deepagents.short_term`."""
 
 import pytest
+from maximem_synap.models.context import ContextForPromptResponse
 from synap_integrations_common import SynapIntegrationError
 
 from synap_deepagents.short_term import (
@@ -8,6 +9,20 @@ from synap_deepagents.short_term import (
     fetch_st_block,
     synap_st_instructions,
 )
+
+
+COMPACTION = "## Conversation so far (compacted 1x)\nRecent conversation summary"
+
+
+@pytest.fixture(autouse=True)
+def _compacted(mock_sdk):
+    """The conversation has been compacted. `formatted_context` is what the
+    server sends beside the compaction: the compaction AND the recent turns,
+    which the agent already sends, so it must never reach the prompt."""
+    mock_sdk.conversation.context.get_context_for_prompt.return_value = ContextForPromptResponse(
+        formatted_context=f"{COMPACTION}\nRECENT-TURNS-DUPLICATE",
+        context_block=COMPACTION, available=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -49,8 +64,17 @@ async def test_accepts_supported_styles(mock_sdk, style):
 # ---------------------------------------------------------------------------
 
 
-async def test_fetch_returns_context(mock_sdk):
-    assert await fetch_st_block(mock_sdk, "conv-1") == "Recent conversation summary"
+async def test_fetch_returns_the_compaction_not_the_recent_turns(mock_sdk):
+    block = await fetch_st_block(mock_sdk, "conv-1")
+    assert block == COMPACTION
+    assert "RECENT-TURNS-DUPLICATE" not in block
+
+
+async def test_fetch_returns_nothing_before_the_first_compaction(mock_sdk):
+    mock_sdk.conversation.context.get_context_for_prompt.return_value = ContextForPromptResponse(
+        formatted_context="recent turns", available=True,
+    )
+    assert await fetch_st_block(mock_sdk, "conv-1") == ""
 
 
 async def test_fetch_passes_conversation_id(mock_sdk):
@@ -119,6 +143,7 @@ async def test_instructions_combine_block_and_system(mock_sdk):
         mock_sdk, "conv-1", system="You are a coding agent."
     )
     assert "Recent conversation summary" in result
+    assert "RECENT-TURNS-DUPLICATE" not in result
     assert result.endswith("You are a coding agent.")
 
 

@@ -1,9 +1,9 @@
 """Enumerations for MaximemSynap SDK."""
 
-from enum import Enum
+from enum import StrEnum
 
 
-class ContextScope(str, Enum):
+class ContextScope(StrEnum):
     """Scope levels for context storage."""
 
     CLIENT = "client"
@@ -12,18 +12,18 @@ class ContextScope(str, Enum):
     CONVERSATION = "conversation"
 
 
-class ContextType(str, Enum):
+class ContextType(StrEnum):
     """Types of context that can be retrieved."""
 
     FACTS = "facts"
     PREFERENCES = "preferences"
     EPISODES = "episodes"
     EMOTIONS = "emotions"
-    TEMPORAL = "temporal"
+    TEMPORAL = "temporal_events"
     ALL = "all"
 
 
-class CompactionLevel(str, Enum):
+class CompactionLevel(StrEnum):
     """Levels of context compaction."""
 
     LOW = "low"
@@ -35,7 +35,7 @@ class CompactionLevel(str, Enum):
     CONSERVATIVE = "conservative"
 
 
-class LogLevel(str, Enum):
+class LogLevel(StrEnum):
     """SDK logging levels."""
 
     DEBUG = "debug"
@@ -44,7 +44,7 @@ class LogLevel(str, Enum):
     ERROR = "error"
 
 
-class RetrievalMode(str, Enum):
+class RetrievalMode(StrEnum):
     """Retrieval mode for context fetch operations."""
 
     FAST = "fast"

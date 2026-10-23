@@ -1,6 +1,6 @@
 {
   "name": "@maximem/synap-claude-agent",
-  "version": "0.1.1",
+  "version": "0.1.4",
   "description": "Synap memory integration for Anthropic's Claude Agent SDK (TypeScript)",
   "type": "module",
   "main": "./dist/index.js",
@@ -13,6 +13,7 @@
   },
   "files": [
     "dist",
+    "!dist/__tests__",
     "README.md"
   ],
   "scripts": {

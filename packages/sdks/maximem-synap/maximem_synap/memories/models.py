@@ -1,13 +1,13 @@
 """Models for memory operations."""
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel, Field
 from uuid import UUID
 
 
-class DocumentType(str, Enum):
+class DocumentType(StrEnum):
     """Type of document being ingested."""
     CONVERSATION = "ai-chat-conversation"
     DOCUMENT = "document"
@@ -18,13 +18,13 @@ class DocumentType(str, Enum):
     MEETING_TRANSCRIPT = "meeting-transcript"
 
 
-class IngestMode(str, Enum):
+class IngestMode(StrEnum):
     """Ingestion processing mode."""
     FAST = "fast"           # Quick processing, less thorough
     LONG_RANGE = "long-range"  # Full pipeline, more thorough
 
 
-class IngestStatus(str, Enum):
+class IngestStatus(StrEnum):
     """Status of an ingestion job."""
     QUEUED = "queued"
     PROCESSING = "processing"
@@ -33,7 +33,7 @@ class IngestStatus(str, Enum):
     PARTIAL_SUCCESS = "partial_success"
 
 
-class MergeStrategy(str, Enum):
+class MergeStrategy(StrEnum):
     """Strategy for memory updates."""
     REPLACE = "replace"
     APPEND = "append"
@@ -136,3 +136,43 @@ class Memory(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime] = None
     source_document_id: Optional[str] = None
+
+
+class ForgetMode(StrEnum):
+    """How `memories.forget` acts on what it finds."""
+    PREVIEW = "preview"
+    DIRECT = "direct"
+
+
+class ForgetStatus(StrEnum):
+    """Outcome of a `memories.forget` call."""
+    NOTHING_MATCHES = "nothing_matches"
+    PREVIEW = "preview"
+    DELETED = "deleted"
+    PARTIAL = "partial"
+
+
+class ForgetCandidate(BaseModel):
+    """Something the description matched: a memory, or a copy of its text kept elsewhere."""
+    memory_id: str
+    content: str
+    memory_type: Optional[str] = None
+    # "memory", or where a copy lives: "chunk", "sentence", "entity", "triple",
+    # "profile" or "candidate".
+    store: str = "memory"
+
+
+class ForgetResponse(BaseModel):
+    """Result of `memories.forget`.
+
+    Check `status == "deleted"` before telling an end user something was
+    removed. "partial" means the memories are hidden but a named store may
+    still hold the text (see `still_present_in`).
+    """
+    status: ForgetStatus
+    request_id: Optional[str] = None
+    candidates: List[ForgetCandidate] = Field(default_factory=list)
+    deleted_ids: List[str] = Field(default_factory=list)
+    failed_ids: List[str] = Field(default_factory=list)
+    still_present_in: List[str] = Field(default_factory=list)
+    may_be_incomplete: bool = False

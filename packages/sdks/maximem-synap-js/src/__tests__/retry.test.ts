@@ -133,4 +133,16 @@ describe('retry backoff holds the event loop', () => {
     expect(attempts).toBe(2);
     expect(result.ok).toBe(true);
   });
+
+  it.each(['trial_limit_reached', 'subscription_inactive'])(
+    'never retries the %s credit stop', (reason) => {
+      const d = decide({ error: new RateLimitError('x', { reason }) });
+      expect(d.retry).toBe(false);
+      expect(d.reason).toBe('credit_stop');
+    },
+  );
+
+  it('still retries a plain 429', () => {
+    expect(decide({ error: new RateLimitError('x'), method: 'POST' }).retry).toBe(true);
+  });
 });

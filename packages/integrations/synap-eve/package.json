@@ -1,6 +1,6 @@
 {
   "name": "@maximem/synap-eve",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "description": "Synap memory integration for Vercel eve agents",
   "type": "module",
   "main": "./dist/index.js",
@@ -13,6 +13,7 @@
   },
   "files": [
     "dist",
+    "!dist/__tests__",
     "README.md"
   ],
   "scripts": {
@@ -43,6 +44,7 @@
     "zod": ">=4.0.0"
   },
   "devDependencies": {
+    "@maximem/synap-js-sdk": "0.5.14",
     "@types/node": "^22.0.0",
     "eve": "^0.25.1",
     "typescript": "^5.7.0",

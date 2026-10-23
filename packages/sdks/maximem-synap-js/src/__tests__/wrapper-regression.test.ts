@@ -49,7 +49,7 @@ describe('no regression against the 0.3.x wrapper', () => {
   it('accepts both id spellings, as the wrapper did', async () => {
     // The wrapper read `pickDefined(args.user_id, args.userId)` everywhere.
     const calls: string[] = [];
-    const c = new SynapClient({ _force_new: true, apiKey: 'k',
+    const c = new SynapClient({ _force_new: true, apiKey: 'k', clientId: 'cli_test', instanceId: 'inst_0123456789abcdef',
       fetchImpl: (async (_u: string, i: RequestInit) => {
         calls.push(i.body as string);
         return new Response('{"context":{}}');
