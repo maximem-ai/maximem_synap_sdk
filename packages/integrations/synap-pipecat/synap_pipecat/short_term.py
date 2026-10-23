@@ -5,10 +5,17 @@ Mirrors the existing :class:`SynapMemoryProcessor` pattern but injects
 into the shared ``LLMContext`` on each :class:`TranscriptionFrame`.
 
 Place BEFORE the user context aggregator in your pipeline. The shared
-``LLMContext`` is mutated in place: a single tagged system message is
-appended on every user turn. The next turn's ST replaces the previous
-one (we look up the tagged message and overwrite its content) so the
-prompt window doesn't grow unbounded.
+``LLMContext`` is mutated in place: a single tagged system message sits at
+the head of the history (after the leading system prompt). The next turn's
+ST replaces the previous one (we look up the tagged message and overwrite
+its content) so the prompt window doesn't grow unbounded.
+
+The block never sends a turn the context already holds a second time. Once
+Synap has compacted the conversation, the context's earlier turns are
+replaced by the compaction and the turns after it
+(:func:`synap_pipecat.compaction.splice_synap_history`) and no block is
+added. Before that, the block carries only the turns the context lacks (all
+of them for a resumed conversation, none for a live one).
 
 Quality contract identical to the LangGraph adapter:
 
@@ -35,6 +42,8 @@ from synap_integrations_common import (
     wrap_sdk_errors_async,
 )
 
+from synap_pipecat.compaction import _text_of, splice_synap_history
+
 logger = logging.getLogger(__name__)
 
 _SUPPORTED_STYLES = ("structured", "narrative", "bullet_points")
@@ -43,6 +52,46 @@ _DEFAULT_CLOSE = "</synap_short_term_context>"
 _ST_MARKER = "<!-- synap_st -->"
 
 _OnError = Literal["fallback", "raise"]
+
+
+def _norm(text: object) -> str:
+    return " ".join(str(text or "").split())
+
+
+def _is_system(message: Any) -> bool:
+    return isinstance(message, dict) and message.get("role") == "system"
+
+
+def _is_st_message(message: Any) -> bool:
+    return (
+        _is_system(message)
+        and isinstance(message.get("content"), str)
+        and message["content"].startswith(_ST_MARKER)
+    )
+
+
+def _without_held_turns(response: Any, held: frozenset) -> str:
+    """The ST text, minus the turns the context already holds.
+
+    ``formatted_context`` carries the recent turns, so beside a context that
+    holds them it sends each one twice. Nothing is dropped from a context that
+    holds none of them (a resumed conversation), and the block is left whole
+    when it has no turns to compare (a summary).
+    """
+    st_block = (getattr(response, "formatted_context", None) or "").strip()
+    recent = getattr(response, "recent_messages", None)
+    if not st_block or not held or not isinstance(recent, list):
+        return st_block
+    turns = [(getattr(m, "role", None), getattr(m, "content", None)) for m in recent]
+    turns = [(r, t) for r, t in turns if r in ("user", "assistant") and isinstance(t, str)]
+    if not turns:
+        return st_block
+    missing = [(r, t) for r, t in turns if (r, _norm(t)) not in held]
+    if not missing:
+        return ""
+    if len(missing) == len(turns):
+        return st_block
+    return "\n".join(f"{r}: {t}" for r, t in missing)
 
 
 class SynapShortTermProcessor(FrameProcessor):
@@ -134,7 +183,15 @@ class SynapShortTermProcessor(FrameProcessor):
                     style=self.style,
                 )
             if getattr(response, "available", False):
-                st_block = (getattr(response, "formatted_context", None) or "").strip()
+                # The same read answers both: has Synap compacted this
+                # conversation, and what does the block say.
+                if await splice_synap_history(
+                    self._context, self.sdk, conversation_id=self.conversation_id,
+                    timeout=None, response=response,
+                ):
+                    self._drop_existing_st()  # the compaction replaced it
+                    return
+                st_block = _without_held_turns(response, self._held_turns())
         except SynapIntegrationError:
             if self.on_error == "raise":
                 raise
@@ -150,41 +207,35 @@ class SynapShortTermProcessor(FrameProcessor):
             wrapped = st_block
 
         marker_content = f"{_ST_MARKER}\n{wrapped}"
+        new_message = {"role": "system", "content": marker_content}
 
-        # Replace existing tagged system message or append a new one.
-        messages = self._context.get_messages()
+        # Replace the existing tagged system message, or insert one at the
+        # head: after the leading system prompt, ahead of the history.
+        messages = list(self._context.get_messages())
         for i, msg in enumerate(messages):
-            if (
-                isinstance(msg, dict)
-                and msg.get("role") == "system"
-                and isinstance(msg.get("content"), str)
-                and msg["content"].startswith(_ST_MARKER)
-            ):
-                messages[i] = {"role": "system", "content": marker_content}
-                # Reset the context's messages list. LLMContext exposes a
-                # ``set_messages`` method on most versions.
-                if hasattr(self._context, "set_messages"):
-                    self._context.set_messages(messages)
+            if _is_st_message(msg):
+                messages[i] = new_message
+                self._context.set_messages(messages)
                 return
 
-        # Not found — append.
-        self._context.add_message(
-            {"role": "system", "content": marker_content}
+        head = 0
+        while head < len(messages) and _is_system(messages[head]):
+            head += 1
+        messages.insert(head, new_message)
+        self._context.set_messages(messages)
+
+    def _held_turns(self) -> frozenset:
+        """The ``(role, text)`` turns the context already sends to the model."""
+        return frozenset(
+            (m["role"], _norm(_text_of(m))) for m in self._context.get_messages()
+            if isinstance(m, dict) and m.get("role") in ("user", "assistant")
         )
 
     def _drop_existing_st(self) -> None:
         if self._context is None or not hasattr(self._context, "set_messages"):
             return
         messages = self._context.get_messages()
-        filtered = [
-            m for m in messages
-            if not (
-                isinstance(m, dict)
-                and m.get("role") == "system"
-                and isinstance(m.get("content"), str)
-                and m["content"].startswith(_ST_MARKER)
-            )
-        ]
+        filtered = [m for m in messages if not _is_st_message(m)]
         if len(filtered) != len(messages):
             self._context.set_messages(filtered)
 

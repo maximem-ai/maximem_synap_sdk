@@ -47,6 +47,13 @@ message ContextUsedEvent {
   int64 timestamp_ms = 6;
   string scope = 7;                      // "conversation" | "user" | "customer" | "client"
   repeated string source_bundle_ids = 8; // Server-side source bundles that contributed items
+  // How many distinct search queries the caller's fetch carried. A fetch
+  // served from the prefetch cache never reaches the fetch route, so this event
+  // is the only thing that tells the server it happened, and the count is what
+  // it is charged by, the same as a fetch the server answered. A count, never
+  // the queries: this event must not carry the caller's words. Zero from an
+  // SDK that predates the field, which the server charges as one.
+  int32 query_count = 9;
 }
 
 // Emitted by the SDK after fetch() resolves and the response composition is
@@ -184,7 +191,24 @@ message StreamResponse {
     HeartbeatPong heartbeat_pong = 2;
     StreamSignal signal = 3;
     EventAck event_ack = 4;
+    ConversationState conversation_state = 5;
   }
+}
+
+// How many messages the server holds for a conversation, sent after a streamed
+// message has been written.
+//
+// Not part of EventAck, on purpose. The ack goes out before the write, and the
+// write runs in the background and can fail, so a count on the ack would be a
+// count that does not yet include the message it acknowledges. The SDK compares
+// this number with what it holds locally to decide whether its short-term cache
+// is complete enough to answer from without a round trip.
+//
+// A client built before this message existed sees an unset `payload` and skips
+// it.
+message ConversationState {
+  string conversation_id = 1;
+  int64 message_count = 2;
 }
 
 // The server has taken responsibility for these events.
@@ -275,6 +299,18 @@ message ConversationContextProto {
   string compaction_id = 5;
   string compacted_at = 6;               // ISO 8601
   string conversation_id = 7;
+  // Set on compaction_update bundles. `compacted_message_count` is how many
+  // messages the summary covers, counted from the start of the conversation.
+  // `total_message_count` is how many the conversation held when the bundle was
+  // built, so the last (total - compacted) entries of `recent_turns` are exactly
+  // the messages the summary does not cover. Both 0 means the server did not say.
+  int32 compacted_message_count = 8;
+  int32 total_message_count = 9;
+  // Compaction v3: the one server-rendered block, framed as a reference-only
+  // record, that REST and retrieval return too. Both SDK formatters print it
+  // as received, once, in place of summary + paragraphs. Empty for a
+  // compaction written before v3, whose summary is printed the old way.
+  string context_block = 10;
 }
 
 message RecentTurnProto {
@@ -303,6 +339,29 @@ message ContextItemProto {
   string valid_until = 12;              // ISO 8601, empty if null
   string temporal_category = 13;        // "perpetual" | "temporal_fact" | "episode"
   float temporal_confidence = 14;       // 0.0 if unset
+  // The day the words were SAID, which is not the day the event happened.
+  // `event_date` is empty unless somebody stated when the event took place, so
+  // without this an item whose turn stated no event date carries no date at
+  // all. Empty when the client never said when the conversation happened; it
+  // is never the server's own ingest or extraction clock.
+  string said_at = 15;                  // ISO 8601, empty if null
+  // The number the item was ranked by, as the HTTP response publishes it in
+  // `metadata.rank_score`: higher is better, and sorting on it descending
+  // reproduces the served order. `optional` because 0.0 is a real score and
+  // "not ranked" (a server that predates this) has to be told apart from it.
+  //
+  // Per item, and no per-bundle order beside it, because a cache hit is not a
+  // bundle: both SDK caches pick their best-matching items from every stored
+  // bundle, so an order written for one bundle has nothing to apply to. Both
+  // SDKs read this to serve `response_shape="ranked"` from the cache.
+  optional double rank_score = 16;
+  // The questions this memory answers (its hypothetical questions, written
+  // when it was stored), sent with anticipation bundles so the SDK can match a
+  // fetch query against them as well as against the memory's own text: a
+  // question compared with a question scores far closer than a question
+  // compared with the statement that answers it. Empty when none were stored
+  // or for an item that is not a memory.
+  repeated string questions = 17;
 }
 
 // =============================================================================

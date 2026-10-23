@@ -71,8 +71,8 @@ main().catch((e) => {
 });
 
 // ---------------------------------------------------------------------------
-// Namespaced API (mirrors the Python SDK 1:1), available from
-// @maximem/synap-js-sdk 0.5.1. The flat methods used above (addMemory,
+// Namespaced API (mirrors the Python SDK 1:1), available in
+// recent @maximem/synap-js-sdk releases (check `npm ls @maximem/synap-js-sdk`). The flat methods used above (addMemory,
 // fetchUserContext) still work; the namespaced surface is added alongside them
 // and accepts camelCase OR snake_case argument keys:
 //
@@ -96,4 +96,4 @@ main().catch((e) => {
 // fetch is a cold retrieval and no turn becomes memory on its own.
 // See reference/streaming.md. Note: the stream needs Node, not Edge.
 //
-// Accurate as of @maximem/synap-js-sdk 0.5.1 — verified 2026-09-25. Docs: https://docs.maximem.ai
+// Versions: run `pip show maximem-synap` (Python) or `npm ls @maximem/synap-js-sdk` (JS) for what is installed; no version is pinned here. Docs: https://docs.maximem.ai

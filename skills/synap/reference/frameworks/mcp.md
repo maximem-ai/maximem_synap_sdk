@@ -1,5 +1,7 @@
 # MCP server (no-code)
 
+> **Read this next:** [This integration's docs page](https://docs.maximem.ai/integrations/mcp.md); [memories.create](https://docs.maximem.ai/sdk-reference/memories/create.md); [context fetch](https://docs.maximem.ai/sdk-reference/context/fetch.md); [listen](https://docs.maximem.ai/sdk-reference/instance/listen.md); [Errors](https://docs.maximem.ai/sdk-reference/errors.md); [Graceful degradation](https://docs.maximem.ai/patterns/graceful-degradation.md). **Checkpoint:** open the method's page before writing each call, re-read it after and compare every parameter, scope rule and error; if the docs and this file disagree, the docs win and tell the human.
+
 No package, no SDK, no code. Synap runs a hosted **Model Context Protocol** server; any
 MCP-capable client (Claude Desktop, Cursor, a custom MCP client, another agent) connects to
 it over HTTP and gets memory as a set of tools. Use this when the developer wants memory in
@@ -74,5 +76,5 @@ client so a lost memory is visible, not silent. Tune timeouts server-side via
 `https://docs.maximem.ai/integrations/mcp`
 
 ---
-> **Accurate as of** `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25.
+> Versions: run `pip show maximem-synap` (Python) or `npm ls @maximem/synap-js-sdk` (JS) for what is installed; no version is pinned here.
 > Hosted MCP server: `https://synap-mcp.maximem.ai/mcp`.

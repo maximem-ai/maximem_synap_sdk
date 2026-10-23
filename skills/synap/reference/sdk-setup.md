@@ -1,17 +1,107 @@
 # SDK setup — install, init, lifecycle, errors
 
+> **Read this next:** [Installation](https://docs.maximem.ai/setup/installation.md); [Authentication](https://docs.maximem.ai/setup/authentication.md); [SDK initialization](https://docs.maximem.ai/sdk/initialization.md); [SDK configuration](https://docs.maximem.ai/sdk/configuration.md); [initialize](https://docs.maximem.ai/sdk-reference/lifecycle/initialize.md); [configure](https://docs.maximem.ai/sdk-reference/lifecycle/configure.md); [shutdown](https://docs.maximem.ai/sdk-reference/lifecycle/shutdown.md); [Errors](https://docs.maximem.ai/sdk-reference/errors.md); [Error handling](https://docs.maximem.ai/sdk/error-handling.md); [Agent integration walkthrough](https://docs.maximem.ai/setup/agent-integration.md). **Checkpoint:** open the method's page before writing each call, re-read it after and compare every parameter, scope rule and error; if the docs and this file disagree, the docs win and tell the human.
+
 The same `MaximemSynapSDK` is the foundation of every framework integration. Get this right once and everything else slots in.
 
-## Prerequisites — do this in the dashboard, not in code
+## Prerequisites: an instance and an API key
 
-The user must do these manually at `https://synap.maximem.ai`:
+Before any code runs you need a **Client** (workspace, `cli_<hex16>`), an **Instance** (`inst_<hex16>`) and an
+**API key** (`synap_...`, shown once). The onboarding procedure in `SKILL.md` creates the instance and key
+through the CLI (`reference/dashboard-setup.md`); a developer with no coding agent can create them by hand in the dashboard at
+`https://synap.maximem.ai`. The use-case file that seeds the memory architecture is described in
+`reference/use-case-markdown.md`. Never provision from application code.
 
-1. Create a **Client** (their organization). Get the `cli_<hex16>`.
-2. Create an **Instance** for the agent they're building. Get the `inst_<hex16>`.
-3. (Recommended) Upload a **Use-Case Markdown** describing what the agent does — Synap uses this to auto-generate an optimized MACA. Template + guidance: `reference/use-case-markdown.md`.
-4. Generate an **API Key** under the instance's API Keys section. **The key is shown once.** Format: `synap_...`.
+## While the memory architecture is building: `instance_not_ready`
 
-Never attempt to provision instances or keys from code in this skill.
+For 15 to 20 minutes after `instances create`, the instance rejects runtime writes and context fetches with
+HTTP 409 `{"error":"instance_not_ready","message":"...","state":"building","retry_after_seconds":N,"instance_id":"..."}`
+and a `Retry-After` header. This applies to the user's own app too, not just to you.
+
+**One rule, two SDK generations. Handle BOTH:**
+
+- Newer SDKs raise `InstanceNotReadyError` (a subclass of `ConflictError`) with `retry_after_seconds` (the SDK
+  tells you how long to wait), `from_cooldown` (true when the SDK refused locally, no network call, and the
+  figure is the remaining wait), `instance_id` and `state`.
+- Older SDKs, including the currently published 0.5.16, raise a plain `ConflictError` whose message begins
+  "This instance's memory architecture is still being built"; the code and `retry_after_seconds` are dropped.
+
+Catch the typed class first, then check the `ConflictError` message. Any other `ConflictError` (for example
+"compaction already in progress") is a real conflict. The SDK never retries this error inside a call, so
+**never loop inside the call**: a read degrades to no memory (log it, continue), a write is retried later.
+
+```python
+from maximem_synap import ConflictError
+
+try:  # newer SDKs
+    from maximem_synap import InstanceNotReadyError
+except ImportError:  # older SDKs (0.5.16 and before)
+    InstanceNotReadyError = None
+
+NOT_READY_TEXT = "memory architecture is still being built"
+DEFAULT_WAIT = 30  # seconds, when the SDK gives no figure
+
+
+def not_ready_wait(exc: BaseException):
+    """Seconds to wait if `exc` means "instance still building", else None."""
+    if InstanceNotReadyError is not None and isinstance(exc, InstanceNotReadyError):  # typed first
+        return exc.retry_after_seconds or DEFAULT_WAIT
+    if isinstance(exc, ConflictError) and NOT_READY_TEXT in str(exc).lower():  # then the message
+        return DEFAULT_WAIT
+    return None
+```
+
+Async (the SDK's native form). A read degrades, a write is parked for a later retry:
+
+```python
+async def recall(sdk, user_id, query):
+    try:
+        return await sdk.user.context.fetch(user_id=user_id, search_query=[query])
+    except ConflictError as e:               # InstanceNotReadyError is a ConflictError too
+        if not_ready_wait(e) is None:
+            raise                            # a real conflict: do not hide it
+        log.warning("memory not ready (%s); continuing without memory", e)
+        return None                          # degrade: the agent answers without memory
+
+async def remember(sdk, user_id, text, retry_queue):
+    try:
+        await sdk.memories.create(document=text, document_type="ai-chat-conversation", user_id=user_id)
+    except ConflictError as e:
+        wait = not_ready_wait(e)
+        if wait is None:
+            raise
+        retry_queue.put((time.monotonic() + wait, user_id, text))   # retry later, once, after `wait`
+```
+
+Sync (a script, CLI or worker thread with no running event loop; in a web framework use its own loop instead of
+`asyncio.run`):
+
+```python
+def recall_sync(sdk, user_id, query):
+    try:
+        return asyncio.run(sdk.user.context.fetch(user_id=user_id, search_query=[query]))
+    except ConflictError as e:
+        if not_ready_wait(e) is None:
+            raise
+        log.warning("memory not ready (%s); continuing without memory", e)
+        return None
+
+def remember_sync(sdk, user_id, text, retry_queue):
+    try:
+        asyncio.run(sdk.memories.create(document=text, document_type="ai-chat-conversation", user_id=user_id))
+    except ConflictError as e:
+        wait = not_ready_wait(e)
+        if wait is None:
+            raise
+        retry_queue.append((time.monotonic() + wait, user_id, text))
+```
+
+Tell the human how long you are waiting ("the memory architecture is still being built, retrying in 30 s").
+An in-process retry queue is lost on a serverless cold start; there, re-send from a durable source or accept the
+loss and say so. Add `customer_id` to these calls on a B2B instance only. Error-handling patterns:
+[Error handling](https://docs.maximem.ai/sdk/error-handling.md). How the JS SDK surfaces this is not confirmed in
+this skill: check the status code and message rather than assuming an error class.
+`scripts/verify_synap.py` already does the Python detection and a bounded retry.
 
 ## Install
 
@@ -297,4 +387,4 @@ For testing, point `storage_path` at a tempdir or disable caching with `cache_ba
 - Error handling: `https://docs.maximem.ai/sdk/error-handling`
 
 ---
-*Accurate as of `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25. Source of truth: https://docs.maximem.ai (append `.md` to any page).*
+*Versions: run `pip show maximem-synap` (Python) or `npm ls @maximem/synap-js-sdk` (JS) for what is installed; no version is pinned here. Source of truth: https://docs.maximem.ai (append `.md` to any page).*

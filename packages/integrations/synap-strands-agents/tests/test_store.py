@@ -4,8 +4,8 @@ Contract:
 - satisfies the Strands MemoryStore protocol (5 config attrs + search/add/add_messages).
 - search maps Synap structured items -> MemoryEntry, honors max_search_results,
   and degrades to [] on SDK failure.
-- add / add_messages ingest via memories.create (NOT record_messages_batch),
-  add_messages uses a stable document_id, and both raise on failure.
+- add ingests via memories.create; add_messages records turns (no transcript
+  ingest, no double write next to SynapStreamHook), and both raise on failure.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import pytest
 
 from strands.memory import MemoryEntry, MemoryManager
 
-from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common import SynapIntegrationError, set_auto_listen
 from synap_integrations_common.testing import (
     make_episode,
     make_fact,
@@ -128,10 +128,23 @@ async def test_add_raises_on_failure(failing_sdk):
 
 
 # ── add_messages ─────────────────────────────────────────────────────────────
+#
+# The batch is recorded as conversation turns, not ingested as a transcript with
+# memories.create: Synap extracts from the conversation it keeps, and a
+# transcript on top of turns SynapStreamHook already wrote is extracted twice.
 
 
-async def test_add_messages_renders_transcript_and_ingests(mock_sdk):
-    store = SynapMemoryStore(mock_sdk, "alice", conversation_id="conv_1")
+@pytest.fixture(autouse=True)
+def _rest_only(mock_sdk):
+    set_auto_listen(mock_sdk, False)  # the stream path is test_history's
+
+
+def _written(sdk):
+    return [(c.kwargs["role"], c.kwargs["content"]) for c in sdk.conversation.record_message.await_args_list]
+
+
+async def test_add_messages_records_the_turns_and_does_not_ingest_a_transcript(mock_sdk):
+    store = SynapMemoryStore(mock_sdk, "alice", customer_id="acme", conversation_id="conv_1")
     await store.add_messages(
         [
             _user("what's the weather"),
@@ -140,28 +153,65 @@ async def test_add_messages_renders_transcript_and_ingests(mock_sdk):
         ]
     )
 
-    kwargs = mock_sdk.memories.create.await_args.kwargs
-    assert kwargs["document"] == "user: what's the weather\nassistant: sunny"
-    assert kwargs["document_type"] == "ai-chat-conversation"
-    assert kwargs["document_id"] == "strands-conv_1"
+    assert _written(mock_sdk) == [("user", "what's the weather"), ("assistant", "sunny")]
+    kwargs = mock_sdk.conversation.record_message.await_args.kwargs
+    assert kwargs["conversation_id"] == "conv_1"
+    assert kwargs["user_id"] == "alice"
+    assert kwargs["customer_id"] == "acme"
+    mock_sdk.memories.create.assert_not_awaited()
 
 
-async def test_add_messages_document_id_is_stable(mock_sdk):
-    store = SynapMemoryStore(mock_sdk, "alice", conversation_id="conv_1")
+async def test_add_messages_without_a_conversation_id_keeps_one_per_store(mock_sdk):
+    store = SynapMemoryStore(mock_sdk, "alice")
     await store.add_messages([_user("one")])
-    await store.add_messages([_user("one"), _assistant("two")])
+    await store.add_messages([_assistant("two")])
 
-    ids = {c.kwargs["document_id"] for c in mock_sdk.memories.create.await_args_list}
-    assert ids == {"strands-conv_1"}
+    ids = {c.kwargs["conversation_id"] for c in mock_sdk.conversation.record_message.await_args_list}
+    assert len(ids) == 1 and next(iter(ids)).startswith("strands-")
+
+
+async def test_add_messages_skips_what_the_stream_hook_already_wrote(mock_sdk):
+    from unittest.mock import MagicMock
+    from strands.hooks import MessageAddedEvent
+    from synap_strands_agents.stream import SynapStreamHook
+
+    hook = SynapStreamHook(mock_sdk, conversation_id="conv_1", user_id="alice")
+    for role, text in (("user", "hi"), ("assistant", "hello"), ("user", "ok")):
+        await hook._on_message(MessageAddedEvent(
+            agent=MagicMock(), message={"role": role, "content": [{"text": text}]}))
+    assert len(_written(mock_sdk)) == 3
+
+    store = SynapMemoryStore(mock_sdk, "alice", conversation_id="conv_1")
+    await store.add_messages([_user("hi"), _assistant("hello"), _user("ok"), _user("ok")])
+
+    # only the second "ok" is new: one write consumed one write
+    assert _written(mock_sdk)[3:] == [("user", "ok")]
+    mock_sdk.memories.create.assert_not_awaited()
 
 
 async def test_add_messages_empty_batch_is_noop(mock_sdk):
     store = SynapMemoryStore(mock_sdk, "alice", conversation_id="conv_1")
     await store.add_messages([{"role": "user", "content": [{"toolResult": {}}]}])
+    mock_sdk.conversation.record_message.assert_not_awaited()
     mock_sdk.memories.create.assert_not_awaited()
 
 
-async def test_add_messages_raises_on_failure(failing_sdk):
-    store = SynapMemoryStore(failing_sdk, "alice", conversation_id="conv_1")
+async def test_add_messages_never_records_synap_context_as_a_turn(mock_sdk):
+    store = SynapMemoryStore(mock_sdk, "alice", conversation_id="conv_1")
+    await store.add_messages([{"role": "user", "content": [
+        {"text": "<synap_short_term_context>\nx\n</synap_short_term_context>"}, {"text": "hello"}]}])
+    assert _written(mock_sdk) == [("user", "hello")]
+
+
+async def test_add_messages_raises_on_failure_and_a_retry_does_not_repeat_what_went_through(mock_sdk):
+    store = SynapMemoryStore(mock_sdk, "alice", conversation_id="conv_1")
+    sent = mock_sdk.conversation.record_message
+    sent.side_effect = [None, RuntimeError("down")]
+    batch = [_user("one"), _assistant("two")]
     with pytest.raises(SynapIntegrationError):
-        await store.add_messages([_user("boom")])
+        await store.add_messages(batch)
+
+    sent.side_effect = None
+    await store.add_messages(batch)
+    contents = [c.kwargs["content"] for c in sent.await_args_list]
+    assert contents == ["one", "two", "two"]  # "one" went through the first time

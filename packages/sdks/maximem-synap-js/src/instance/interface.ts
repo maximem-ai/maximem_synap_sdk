@@ -7,8 +7,9 @@
  * and a static import fails the BUILD there, not the call.
  */
 
+import { agentModelOf, withAgentModel, type AgentModel } from '../agent-model.js';
 import {
-  ListeningAlreadyActiveError, ListeningNotActiveError, SynapError,
+  InvalidInputError, ListeningAlreadyActiveError, ListeningNotActiveError, SynapError,
 } from '../errors.js';
 import type { AnticipationCache } from '../context/anticipation-cache.js';
 import type { StreamCredentials, StreamState } from '../grpc/stream-client.js';
@@ -52,6 +53,10 @@ export interface SendMessageOptions {
   event_type?: string;
   eventType?: string;
   metadata?: Record<string, string>;
+  /** The agent's model, as on `conversation.record_message`. Python's `model=`. */
+  model?: string;
+  context_window?: number;
+  contextWindow?: number;
   /**
    * Report a tool call on the stream. Python's `send_message` takes both, and
    * the proto has `tool_name` / `tool_args_json`; the JS surface simply never
@@ -75,6 +80,12 @@ export interface SendMessageOptions {
   searchQueries?: string[];
   context_types?: string[];
   contextTypes?: string[];
+  /**
+   * The level of your scope ladder this conversation belongs to. Sent as the
+   * event's `scope`; the server keeps the first one it sees. Since 0.5.18.
+   */
+  scope_path?: Record<string, string>;
+  scopePath?: Record<string, string>;
 }
 
 export interface RecordThinkingOptions {
@@ -155,6 +166,18 @@ export interface InstanceInternals {
   onCompactionUpdate(conversationId: string, bundle: Record<string, unknown>): void;
   /** Set by the client so a compaction can prune the locally buffered tail. */
   setCompactionApplier(apply: (bundle: Record<string, unknown>) => void): void;
+  /**
+   * Set by the client: called when `listen()` starts, which is when prefetched
+   * bundles begin to arrive, so the local embedding model loads then.
+   */
+  setOnListen(handle: () => void): void;
+  /**
+   * Set by the client. Receives the server's message count for a conversation
+   * after each streamed write has been stored.
+   */
+  setConversationStateHandler(
+    handle: (conversationId: string, messageCount: number) => void,
+  ): void;
   /** Learning-loop event, fired after a fetch is served from the cache. */
   sendContextUsed(event: Record<string, unknown>): void;
   /** Audit event, fired after every fetch resolves. */
@@ -269,6 +292,14 @@ export function createInstanceNamespace(
   cache: AnticipationCache,
   /** Buffers a stream-sent turn locally, same as the HTTP write paths. */
   onTurn?: (turn: { conversationId: string; role: string; content: string }) => void,
+  /** The client's `agent_model` / `agent_context_window`, folded into each event's metadata. */
+  agentModel: () => AgentModel = () => ({}),
+  /** Keeps a reported tool result in the local turn archive (`archive_tool_result`). */
+  onToolResult?: (r: { conversationId: string; result: unknown; toolName: string }) => void,
+  // The B2C customer_id check, as every HTTP write runs it. Passed in because
+  // the stream has no HttpTransport, which is where the instance's isolation
+  // lives once whoami has resolved it.
+  checkCustomerId: (customerId: unknown, where: string) => Promise<void> = async () => {},
 ): InstanceNamespace {
   let client: StreamClient | null = null;
   // conversationId -> sessionId, for conversations this stream has opened a
@@ -280,6 +311,9 @@ export function createInstanceNamespace(
     | null = null;
 
   let applyCompaction: ((bundle: Record<string, unknown>) => void) | null = null;
+  let onListen: (() => void) | null = null;
+  let onConversationState: ((conversationId: string, messageCount: number) => void) | null =
+    null;
 
   const internals: InstanceInternals = {
     onCompactionUpdate(conversationId, bundle) {
@@ -290,6 +324,12 @@ export function createInstanceNamespace(
     },
     setCompactionApplier(apply) {
       applyCompaction = apply;
+    },
+    setOnListen(handle) {
+      onListen = handle;
+    },
+    setConversationStateHandler(handle) {
+      onConversationState = handle;
     },
     sendContextUsed(event) {
       // Fire-and-forget: the stream drops it silently when disconnected, which
@@ -355,6 +395,11 @@ export function createInstanceNamespace(
         throw new ListeningAlreadyActiveError('Listening is already active on this instance');
       }
 
+      try {
+        onListen?.();
+      } catch {
+        /* loading the local model must never stop the stream */
+      }
       const { GrpcStreamClient } = await import('../grpc/stream-client.js');
       const onContext = options.on_context ?? options.onContext;
       const onDisconnect = options.on_disconnect ?? options.onDisconnect;
@@ -372,6 +417,9 @@ export function createInstanceNamespace(
         ...(onContext !== undefined ? { onContext } : {}),
         onCompactionUpdate: (conversationId, bundle) => {
           internals.onCompactionUpdate(conversationId, bundle);
+        },
+        onConversationState: (conversationId, messageCount) => {
+          onConversationState?.(conversationId, messageCount);
         },
         onStateChange: (state: StreamState) => {
           // Any state change away from connected retires the sessions this
@@ -442,16 +490,25 @@ export function createInstanceNamespace(
     },
 
     async send_message(options: SendMessageOptions) {
+      // First, as Python checks it. Until 0.5.18 the stream skipped it, so a
+      // B2C customer_id went out and the server refused the event on the
+      // stream, where nothing surfaced it.
+      await checkCustomerId(
+        options.customer_id ?? options.customerId, 'instance.send_message',
+      );
       if (client === null) throw new ListeningNotActiveError('Listening is not active');
-      if (options.content === undefined) {
-        throw new ListeningNotActiveError('content is required');
-      }
       const eventType = options.event_type ?? options.eventType ?? 'user_message';
+      // InvalidInputError, as Python raises both. Until 0.5.18 a bad
+      // event_type was a bare SynapError and a missing content a
+      // ListeningNotActiveError.
       if (!KNOWN_EVENT_TYPES.has(eventType)) {
-        throw new SynapError(
+        throw new InvalidInputError(
           `unknown event_type '${eventType}'. Expected one of: `
           + [...KNOWN_EVENT_TYPES].sort().join(', '),
         );
+      }
+      if (options.content === undefined || options.content === null) {
+        throw new InvalidInputError('content is required');
       }
       const conversationId = options.conversation_id ?? options.conversationId ?? '';
       ensureSession(
@@ -479,7 +536,7 @@ export function createInstanceNamespace(
         customer_id: options.customer_id ?? options.customerId ?? '',
         session_id: options.session_id ?? options.sessionId
           ?? openSessions.get(conversationId) ?? '',
-        metadata: options.metadata ?? {},
+        metadata: withAgentModel(options.metadata, agentModelOf(options), agentModel(), true) ?? {},
         timestamp_ms: Date.now(),
         tool_name: options.tool_name ?? options.toolName ?? '',
         // Python serialises tool_args with json.dumps into tool_args_json.
@@ -491,6 +548,12 @@ export function createInstanceNamespace(
         tool_call_id: options.tool_call_id ?? options.toolCallId ?? '',
         search_queries: options.search_queries ?? options.searchQueries ?? [],
         context_types: options.context_types ?? options.contextTypes ?? [],
+        // The proto's `scope`: the conversation's rung, kept from the first
+        // event that names one. Omitted when absent or empty, as in Python.
+        ...(() => {
+          const sp = options.scope_path ?? options.scopePath;
+          return sp && Object.keys(sp).length > 0 ? { scope: sp } : {};
+        })(),
       });
     },
 
@@ -520,6 +583,10 @@ export function createInstanceNamespace(
       // ⚠ A tool result is usually the caller's customer data. It is an
       // anticipation hint and is not written into long-term memory, but it does
       // reach us: send what the agent needs, not the whole row.
+      const conversationId = options.conversation_id ?? options.conversationId ?? '';
+      if (conversationId) {
+        onToolResult?.({ conversationId, result: options.result, toolName: options.tool_name ?? options.toolName ?? '' });
+      }
       await namespace.send_message({
         content: '',
         role: 'tool',

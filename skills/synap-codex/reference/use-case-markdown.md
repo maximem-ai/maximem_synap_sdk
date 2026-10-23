@@ -1,50 +1,67 @@
 # Use-Case Markdown — the instance's brief
 
-When you create an Instance (Dashboard step 3, see `reference/dashboard-setup.md`) you
-upload a short Markdown file describing what the agent does. Synap reads it to generate the
-instance's **Memory Architecture (MACA)** — what kinds of facts, preferences, episodes, and
-entities it should extract and how to weight them at retrieval.
+> **Read this next:** [Memory Architecture (MACA) and the use-case file](https://docs.maximem.ai/concepts/memory-architecture.md); [Shaping your MACA](https://docs.maximem.ai/guides/configuring-memory.md). The live docs win over this file.
 
-A good brief makes extraction sharper. A vague one makes memory noisy. It's worth 5 minutes.
+The use-case file is a short Markdown brief describing what the agent does. Synap reads it to generate the
+instance's **Memory Architecture (MACA)**: what kinds of facts, preferences, episodes and entities it extracts
+and how it weights them at retrieval. A good brief makes extraction sharper; a vague or invented one makes
+memory noisy.
 
-- Accepted formats: `.md`, `.markdown`, `.txt`, ≤512 KB.
-- The Dashboard form has a **"Download Template"** button — this file is the same idea, so
-  you can fill it in here and the developer uploads it.
-- You can refine the MACA later in the Dashboard; this file just seeds it.
+**It cannot be edited after the instance is created.** So the human approves the draft first, and you never
+fill a gap with a guess. Write the literal text `not stated` instead.
 
-## Template
+- Accepted formats: `.md`, `.markdown`, `.txt`, up to 512 KB.
+- Get the current template with `instances template --output-file usecase.md`. It is the source of truth for
+  section headings; if it differs from the example below, follow the CLI's version.
+- Pass it with `instances create ... --from-file usecase.md`.
+
+## The sections (per the docs: three required, five optional)
+
+| Section | Required | May the agent infer it from code? | Rule |
+|---|---|---|---|
+| Agent Objective | Yes | Yes: README, prompts, entry points | Quote what you found. Ask if the repo does not say what "remembering well" means. |
+| Target Users | Yes | **No. Always ask.** | Includes B2C vs B2B and what identifies a returning person (a stable user id; none means per-session memory only, which the goal text must not contradict). Show the evidence (user model, tenant or org tables, auth) and still ask. Immutable after create; must match `--relationship`. |
+| Task Examples | Yes | Partly: real utterances from tests, fixtures, prompts | Use real examples found in the repo, marked as such, and ask the human for the ones that matter. Never invent utterances. |
+| Interaction Pattern (if the template has it) | Optional | Partly: voice or text from the code | Modality and average turn speed. Ask once and reuse the answer for the integration path step; never ask twice. |
+| Behavioral Guidelines | Optional | Only if the code states them | Otherwise `not stated`. |
+| Role Descriptions | Optional | Only if the code states who the client, customer and user are | Otherwise `not stated`; ask if tenancy is unclear. |
+| Compliance & Data Sensitivity | Optional | **No. Always ask.** | Write the human's answer verbatim. Do not assume "no PII". For health, financial or children's data follow the sensitive-data rule in `onboarding-ask-rules.md`. Unanswered means `not stated`, and ask again before approval. |
+| Memory Priorities | Optional | **No. Always ask.** | The human's words: what to prioritize, deprioritize, or never remember. |
+| Additional Context | Optional | Yes, for deployment and integrations visible in code | Otherwise `not stated`. |
+
+The file you show is the file you upload: print its full contents in chat, quote its `shasum -a 256`, and if you change one character after approval, ask again.
+
+A draft with `not stated` in it is fine to show. A draft with an invented answer is not. Show the whole file to
+the human and wait for an explicit yes before `instances create`. Section names above come from
+`https://docs.maximem.ai/concepts/memory-architecture.md`; `instances template` is the source of truth if they differ.
+
+## Template (shape only; the CLI's template wins)
 
 ```markdown
-# Agent Objective
-<One or two sentences: what is this agent for, and what does "remembering well" mean for it?
- e.g. "A B2B support copilot for our analytics product. It should remember each user's
- environment, past tickets, and stated preferences so it never re-asks setup questions.">
+## Agent Objective
+<what the agent does and the problem it solves, or `not stated`>
 
-# Target Users
-<Who talks to it, and how are they organized? Name the tenancy explicitly.
- e.g. "Engineers at customer companies. Multi-tenant (B2B): each user belongs to a
- customer org; memory must never leak across orgs.">
+## Target Users
+<who talks to it, how they are organized, B2C or B2B, or `not stated`>
 
-# Task Examples
-<3–6 concrete things a user says or asks, spanning the memory you care about. Cover
- facts, preferences, and recurring episodes.>
-- "We run Postgres 15 on AWS, not the managed cloud version."   (durable fact about env)
-- "Always give me Terraform, never the console steps."          (preference)
-- "Same timeout error as last week's incident."                 (episode / continuity)
-- "Add my teammate Dana to this workspace."                     (entity / relationship)
+## Task Examples
+- **User**: "<a real user message>"
+  **Agent**: <what the agent should do and remember>
 
-# Out of Scope (optional)
-<Anything the agent should NOT try to remember — e.g. transient values, secrets,
- PII you don't want persisted.>
+## Behavioral Guidelines
+## Role Descriptions
+## Compliance & Data Sensitivity
+## Memory Priorities
+## Additional Context
 ```
 
 ## Tips
 
 - Be specific about **tenancy** (B2C vs B2B) — it must match the instance's User
   Relationship setting and the IDs you pass at call time.
-- Prefer real example utterances over abstract categories; the extractor calibrates to them.
+- Prefer real example utterances over abstract categories; the extractor calibrates to them. Real means from the repo or from the human, not made up.
 - If the agent is multi-domain, list the domains; the MACA can weight them differently.
 
 ---
-> **Accurate as of** `maximem-synap` 0.5.1 (Python) · `@maximem/synap-js-sdk` 0.5.1 (JS) — verified 2026-09-25.
-> MACA / memory-architecture detail: https://docs.maximem.ai/concepts/customized-memory-architectures
+> Versions: run `pip show maximem-synap` (Python) or `npm ls @maximem/synap-js-sdk` (JS) for what is installed; no version is pinned here.
+> MACA / memory-architecture detail: https://docs.maximem.ai/concepts/memory-architecture

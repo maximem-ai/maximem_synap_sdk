@@ -3,13 +3,15 @@
 import asyncio
 import logging
 import os
+import ipaddress
 import random
+import socket
 import uuid
 from collections import deque, OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 from datetime import datetime, timezone, timedelta
-from enum import Enum
+from enum import StrEnum
 
 import grpc
 from grpc import aio
@@ -27,6 +29,52 @@ from ..models.errors import (
 from ..auth.models import AuthContext
 from ..utils.correlation import generate_correlation_id
 from .outbox_journal import OutboxJournal
+
+_PROXY_ENV = ("grpc_proxy", "https_proxy", "http_proxy", "GRPC_PROXY", "HTTPS_PROXY", "HTTP_PROXY")
+
+
+async def _system_resolved_target(host: str, port: int, use_tls: bool) -> Tuple[str, List[Tuple[str, Any]]]:
+    """The channel target, resolved by the operating system rather than by gRPC.
+
+    gRPC resolves names with its own c-ares resolver, which on some networks
+    takes 2 to 5 s or times out where the system resolver answers at once
+    (measured against synap-cloud-prod: by name 0.12 s to TIMEOUT, by address
+    0.07 to 0.17 s every time). That alone failed a first ``listen()`` under the
+    5 s connect timeout. ``GRPC_DNS_RESOLVER=native`` fixes it only if set before
+    anything imports grpc, which an SDK cannot promise.
+
+    So the SDK resolves the name itself and dials the addresses, keeping the
+    real host as the TLS name and the ``:authority``. Left to gRPC when a proxy
+    is configured (its proxy support works from the name), when the caller chose
+    a resolver, for an address or localhost, and whenever resolution fails.
+    """
+    plain = f"{host}:{port}"
+    if os.environ.get("GRPC_DNS_RESOLVER") or any(os.environ.get(k) for k in _PROXY_ENV):
+        return plain, []
+    if host in ("localhost",) or host.startswith("unix:"):
+        return plain, []
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        return plain, []
+    except ValueError:
+        pass
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except Exception:  # noqa: BLE001 - gRPC can still try the name itself
+        return plain, []
+    v4 = list(dict.fromkeys(i[4][0] for i in infos if i[0] == socket.AF_INET))
+    v6 = list(dict.fromkeys(i[4][0] for i in infos if i[0] == socket.AF_INET6))
+    if v4:
+        target = "ipv4:" + ",".join(f"{ip}:{port}" for ip in v4)
+    elif v6:
+        target = "ipv6:" + ",".join(f"[{ip}]:{port}" for ip in v6)
+    else:
+        return plain, []
+    authority = host if (use_tls and port == 443) or (not use_tls and port == 80) else plain
+    options: List[Tuple[str, Any]] = [("grpc.default_authority", authority)]
+    if use_tls:
+        options.append(("grpc.ssl_target_name_override", host))
+    return target, options
 
 
 logger = logging.getLogger("synap.sdk.transport.grpc")
@@ -144,7 +192,7 @@ def is_credit_stop(error: Any) -> bool:
     ) and getattr(error, "reason", None) in CREDIT_STOP_REASONS
 
 
-class StreamState(str, Enum):
+class StreamState(StrEnum):
     """gRPC stream states."""
     CONNECTING = "connecting"
     CONNECTED = "connected"
@@ -184,6 +232,28 @@ class GRPCTransport:
     SEND_QUEUE_MAX_DEPTH = 100
     SEND_QUEUE_MAX_AGE = timedelta(minutes=5)
 
+    # Instance still building (server signal `throttle` with metadata code
+    # `instance_not_ready`). The held events are probed again after the server's
+    # retry_after_seconds, clamped to this range and jittered, so a 15 to 20 minute
+    # build is neither a tight loop nor a single 15 to 20 minute sleep that overshoots
+    # the moment the build finishes. Same numbers in the JS stream client.
+    NOT_READY_MIN_WAIT = 5.0
+    NOT_READY_MAX_WAIT = 120.0
+    NOT_READY_JITTER = 0.2  # +/-20%
+    NOT_READY_PROBE_GRACE = 3.0  # how long a replay waits for a fresh refusal
+    # Most events held in memory while the build runs (and until they are
+    # acknowledged afterwards). A build usually takes 15 to 20 minutes, so the normal 100-event
+    # cap would drop data. At the cap the OLDEST are dropped, counted, and
+    # reported in one warning when the hold ends. Same value in the JS SDK.
+    NOT_READY_MAX_HELD = 5000
+    # Instance build FAILED (throttle metadata code `instance_build_failed`).
+    # Not time based, so there is no hint to wait for: the events are held the
+    # same way, but the probe runs at this slow fixed interval (plus jitter) so
+    # the stream recovers by itself once someone rebuilds the instance, without
+    # a reconnect loop. Same numbers in the JS stream client.
+    BUILD_FAILED_PROBE_INTERVAL = 60.0
+    BUILD_FAILED_PROBE_JITTER = 10.0  # + uniform(0, 10) seconds
+
     def __init__(
         self,
         instance_id: str,
@@ -196,6 +266,7 @@ class GRPCTransport:
         on_message: Optional[Callable[[Dict[str, Any]], None]] = None,
         telemetry_callback: Optional[Callable[[Dict], None]] = None,
         storage_path: Optional[str] = None,
+        on_conversation_state: Optional[Callable[[str, int], None]] = None,
     ):
         self.instance_id = instance_id
         self.host = host or self.DEFAULT_HOST
@@ -207,6 +278,9 @@ class GRPCTransport:
         self.on_reconnect = on_reconnect
         self.on_disconnect = on_disconnect
         self.on_message = on_message
+        # (conversation_id, message_count), sent by the server after it has
+        # written a streamed message. See ConversationState in the proto.
+        self.on_conversation_state = on_conversation_state
         self.telemetry_callback = telemetry_callback
 
         # State
@@ -244,6 +318,23 @@ class GRPCTransport:
         # reconnect. The server dedupes on that id, so a replay the server DID
         # process is dropped there rather than doubling the turn.
         self._unacked: "OrderedDict[str, Tuple[datetime, Dict[str, Any]]]" = OrderedDict()
+
+        # Set while the server is refusing work because the instance's memory
+        # architecture is still being built: {"retry_after_seconds", "instance_id",
+        # "state", "message"}. None otherwise. See `_handle_not_ready`.
+        self._not_ready: Optional[Dict[str, Any]] = None
+        self._not_ready_warned = False
+        # (instance_id, series) pairs already warned about for a failed build.
+        self._build_failed_warned: set = set()
+        self._not_ready_resignalled = False
+        self._not_ready_task: Optional[asyncio.Task] = None
+        # Events held (tracked, not written) since the last replay.
+        self._not_ready_unwritten: List[Dict[str, Any]] = []
+        # Held events dropped at NOT_READY_MAX_HELD, reported when the hold ends.
+        self._not_ready_dropped = 0
+        # True from the first refusal until the held events are acknowledged, so
+        # the normal 100-event cap does not evict them in the gap after resume.
+        self._held_backlog = False
 
         # Disk backing for the two buffers above. Both survive a dropped
         # connection and neither survives the process, so `kill -9` or a pod
@@ -292,6 +383,17 @@ class GRPCTransport:
         URL to fix it. ``None`` for an ordinary disconnect.
         """
         return self._last_error
+
+    @property
+    def instance_not_ready(self) -> Optional[Dict[str, Any]]:
+        """Why the server is refusing events right now, or ``None``.
+
+        Set from the moment the server answers an event with an
+        ``instance_not_ready`` throttle until a replay of the held events is
+        accepted. Keys: ``retry_after_seconds``, ``instance_id``, ``state``,
+        ``message``. The events are held, not dropped.
+        """
+        return dict(self._not_ready) if self._not_ready else None
 
     async def connect(self, auth_context: AuthContext) -> None:
         """Establish gRPC connection.
@@ -371,7 +473,10 @@ class GRPCTransport:
                 ("grpc.keepalive_permit_without_calls", True),
                 ("grpc.http2.min_time_between_pings_ms", 30000),
             ]
-            target = f"{self.host}:{self.port}"
+            target, resolved_options = await _system_resolved_target(
+                self.host, self.port, self.use_tls
+            )
+            channel_options.extend(resolved_options)
 
             if self.use_tls:
                 credentials = grpc.ssl_channel_credentials()
@@ -446,7 +551,12 @@ class GRPCTransport:
 
     def _create_stub(self, channel):
         """Create gRPC stub from generated proto code."""
-        from .proto import synap_service_pb2_grpc
+        try:
+            from .proto import synap_service_pb2_grpc
+        except Exception as exc:  # additive: log one clear warning, then re-raise
+            from .proto_compat import warn_incompatible_protobuf
+            warn_incompatible_protobuf(exc)
+            raise
         return synap_service_pb2_grpc.SynapServiceStub(channel)
 
     async def _open_stream(self):
@@ -488,6 +598,17 @@ class GRPCTransport:
 
                 if payload_type == "signal":
                     self._handle_signal(message.signal)
+                    continue
+
+                if payload_type == "conversation_state":
+                    if self.on_conversation_state:
+                        state = message.conversation_state
+                        try:
+                            self.on_conversation_state(
+                                state.conversation_id, int(state.message_count)
+                            )
+                        except Exception as e:
+                            logger.warning(f"Conversation state handler error: {e}")
                     continue
 
                 if payload_type == "context_bundle":
@@ -683,6 +804,14 @@ class GRPCTransport:
             await self._enqueue_for_retry(message)
             return
 
+        if self._not_ready is not None:
+            # The server is refusing events until the build finishes. Writing
+            # this one would only earn another refusal, so hold it with the
+            # rest; the probe loop replays everything in order.
+            self._track_unacked(message)
+            self._not_ready_unwritten.append(message)
+            return
+
         try:
             await self._write_conversation_event(message)
             self._track_unacked(message)
@@ -715,6 +844,7 @@ class GRPCTransport:
             sent_at_ms=int(message.get("sent_at_ms", 0) or 0),
             search_queries=message.get("search_queries") or [],
             context_types=message.get("context_types") or [],
+            scope=message.get("scope") or {},
         )
         event = synap_service_pb2.StreamEvent(conversation_event=conv_event)
         async with self._write_lock:
@@ -775,8 +905,20 @@ class GRPCTransport:
         cutoff = datetime.now(timezone.utc) - self.SEND_QUEUE_MAX_AGE
         while self._unacked:
             oldest_id, (queued_at, payload) = next(iter(self._unacked.items()))
-            if queued_at >= cutoff and len(self._unacked) < self.SEND_QUEUE_MAX_DEPTH:
+            # While the build runs (and until the held backlog is acknowledged)
+            # the age limit does not apply and the depth limit is the much
+            # higher NOT_READY_MAX_HELD: a build outlasts the 5 minute window
+            # and holding 100 events would drop data.
+            holding = self._not_ready is not None or self._held_backlog
+            limit = self.NOT_READY_MAX_HELD if holding else self.SEND_QUEUE_MAX_DEPTH
+            young_enough = queued_at >= cutoff or holding
+            if young_enough and len(self._unacked) < limit:
                 break
+            if holding:
+                self._unacked.pop(oldest_id, None)
+                self._journal.record_dropped(oldest_id)
+                self._not_ready_dropped += 1
+                continue
             self._unacked.pop(oldest_id, None)
             self._journal.record_dropped(oldest_id)
             logger.warning(
@@ -794,6 +936,15 @@ class GRPCTransport:
         for event_id in ack.event_ids:
             self._unacked.pop(event_id, None)
             self._journal.record_acked(event_id)
+        if self._not_ready is None and len(self._unacked) < self.SEND_QUEUE_MAX_DEPTH:
+            self._held_backlog = False
+        if self._not_ready is None and ack.event_ids and (
+            self._not_ready_warned or self._build_failed_warned
+        ):
+            # The server is accepting again (e.g. after a reconnect replay), so
+            # the next build gets its own warning.
+            self._not_ready_warned = False
+            self._build_failed_warned.clear()
         logger.debug(
             "Acked %d event(s); %d still unacknowledged",
             len(ack.event_ids), len(self._unacked),
@@ -1009,6 +1160,7 @@ class GRPCTransport:
         served_item_ids: Optional[List[str]] = None,
         scope: str = "",
         source_bundle_ids: Optional[List[str]] = None,
+        query_count: int = 0,
     ) -> None:
         """Emit a ContextUsedEvent over the Listen stream.
 
@@ -1034,6 +1186,7 @@ class GRPCTransport:
             timestamp_ms=now_ms,
             scope=scope or "",
             source_bundle_ids=list(source_bundle_ids or []),
+            query_count=max(0, int(query_count or 0)),
         )
         event = synap_service_pb2.StreamEvent(context_used=used)
         async with self._write_lock:
@@ -1049,16 +1202,176 @@ class GRPCTransport:
         reason = signal.reason
 
         if signal_type == "throttle":
-            logger.warning(f"Server throttle signal: {reason}")
+            metadata = dict(getattr(signal, "metadata", None) or {})
+            if metadata.get("code") in ("instance_not_ready", "instance_build_failed"):
+                self._handle_not_ready(metadata, reason)
+            else:
+                logger.warning(f"Server throttle signal: {reason}")
         elif signal_type == "closing":
             logger.info(f"Server closing stream: {reason}")
             # Schedule graceful disconnect — don't block the listen loop
             asyncio.ensure_future(self._handle_disconnect("server_closing"))
         elif signal_type == "error":
-            logger.error(f"Server error signal: {reason}")
-            asyncio.ensure_future(self._handle_disconnect(f"server_error:{reason}"))
+            # Logged, not treated as fatal. The server sends it for one refused
+            # event or session_start and keeps the stream open; tearing the
+            # stream down for it dropped and rebuilt the connection on every
+            # such event. A fatal server error ends the stream, which the read
+            # loop already handles as server_close.
+            logger.warning(f"Server error signal (stream stays open): {reason}")
         else:
             logger.warning(f"Unknown signal type '{signal_type}': {reason}")
+
+    def _handle_not_ready(self, metadata: Dict[str, str], reason: str) -> None:
+        """The server refused work: the instance is still being built.
+
+        The refused event is still in ``_unacked`` (the server neither recorded
+        nor acknowledged it), so nothing is dropped here. This does not close
+        the stream and does not reconnect: a reconnect would replay the same
+        events into the same refusal for the whole build. Instead one probe
+        loop waits ``retry_after_seconds`` (clamped, jittered), replays the held
+        events and, once the server accepts them, resumes normally.
+
+        Logged once per build, not once per event: replaying N held events
+        draws N refusals, and a warning each would bury the log.
+        """
+        code = metadata.get("code") or "instance_not_ready"
+        failed = code == "instance_build_failed"
+        try:
+            retry_after = float(metadata.get("retry_after_seconds", ""))
+        except (TypeError, ValueError):
+            retry_after = self.NOT_READY_MAX_WAIT
+        self._not_ready = {
+            "retry_after_seconds": int(retry_after),
+            "instance_id": metadata.get("instance_id") or self.instance_id,
+            "state": metadata.get("state") or ("failed" if failed else "building"),
+            "message": reason,
+            "code": code,
+        }
+        if failed:
+            self._not_ready["hint"] = metadata.get("hint") or ""
+            self._not_ready["attempts"] = metadata.get("attempts") or ""
+        self._not_ready_resignalled = True
+        self._held_backlog = True
+        if failed:
+            key = (self._not_ready["instance_id"], metadata.get("series") or "")
+            if key not in self._build_failed_warned:
+                self._build_failed_warned.add(key)
+                logger.warning(
+                    "Instance %s: its memory architecture build FAILED, so the "
+                    "server is refusing events. %d event(s) are held in memory "
+                    "(up to %d; beyond that the oldest are dropped and the count "
+                    "is reported). Waiting alone will not fix this. %s The SDK "
+                    "checks again about every %ds and resumes by itself after a "
+                    "successful rebuild. Server said: %s",
+                    self._not_ready["instance_id"],
+                    len(self._unacked),
+                    self.NOT_READY_MAX_HELD,
+                    ("To recover: " + self._not_ready["hint"]) if self._not_ready["hint"]
+                    else "Rebuild the instance.",
+                    int(self.BUILD_FAILED_PROBE_INTERVAL),
+                    reason,
+                )
+        elif not self._not_ready_warned:
+            self._not_ready_warned = True
+            logger.warning(
+                "Instance %s is still building its memory architecture; the "
+                "server is refusing events for now. %d event(s) are held in "
+                "memory and will be re-sent automatically when it is ready "
+                "(next check in about %ds). Up to %d events are held; beyond "
+                "that the oldest are dropped and the count is reported. "
+                "Server said: %s",
+                self._not_ready["instance_id"],
+                len(self._unacked),
+                int(self._not_ready_wait()),
+                self.NOT_READY_MAX_HELD,
+                reason,
+            )
+        task = self._not_ready_task
+        if task is None or task.done():
+            self._not_ready_task = asyncio.ensure_future(self._not_ready_probe_loop())
+
+    def _not_ready_wait(self) -> float:
+        """Seconds until the next probe: the hint, clamped, with jitter."""
+        if (self._not_ready or {}).get("code") == "instance_build_failed":
+            return self.BUILD_FAILED_PROBE_INTERVAL + random.uniform(
+                0.0, self.BUILD_FAILED_PROBE_JITTER
+            )
+        hint = float((self._not_ready or {}).get("retry_after_seconds") or 0)
+        base = min(max(hint, self.NOT_READY_MIN_WAIT), self.NOT_READY_MAX_WAIT)
+        wait = base * random.uniform(1 - self.NOT_READY_JITTER, 1 + self.NOT_READY_JITTER)
+        return max(wait, self.NOT_READY_MIN_WAIT)
+
+    async def _not_ready_probe_loop(self) -> None:
+        """Replay the held events until the server stops refusing them."""
+        try:
+            while not self._shutdown_event.is_set():
+                await asyncio.sleep(self._not_ready_wait())
+                if self._shutdown_event.is_set():
+                    return
+                if self._state != StreamState.CONNECTED:
+                    # The reconnect path replays everything. If the build is
+                    # still running the next refusal restarts this loop, and
+                    # the warning has already been given.
+                    return
+                self._not_ready_resignalled = False
+                # Fresh timestamps, so the age limit cannot evict a held event
+                # in the moment between the build finishing and its ack.
+                now = datetime.now(timezone.utc)
+                for event_id, (_ts, payload) in list(self._unacked.items()):
+                    self._unacked[event_id] = (now, payload)
+                # The held-since-last-replay list is only emptied once the
+                # replay has actually written every event it covered.
+                snapshot = list(self._unacked)
+                replayed = await self._replay_unacked()
+                if replayed < len(snapshot):
+                    logger.warning(
+                        "Replay of held events stopped after %d of %d; retrying",
+                        replayed, len(snapshot),
+                    )
+                    continue
+                covered = set(snapshot)
+                self._not_ready_unwritten = [
+                    m for m in self._not_ready_unwritten
+                    if m.get("event_id") not in covered
+                ]
+                await asyncio.sleep(self.NOT_READY_PROBE_GRACE)
+                if not self._not_ready_resignalled:
+                    resumed = True
+                    # New sends go straight out from here. Write what was held
+                    # after the replay, or it would wait for a reconnect.
+                    instance_id = (self._not_ready or {}).get("instance_id")
+                    self._not_ready = None
+                    late, self._not_ready_unwritten = self._not_ready_unwritten, []
+                    for payload in late:
+                        if payload.get("event_id") not in self._unacked:
+                            continue  # dropped at the cap; reported, not sent
+                        try:
+                            await self._write_conversation_event(payload)
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("Write of held event failed (kept unacked): %s", e)
+                            break
+                    self._not_ready_warned = False
+                    self._build_failed_warned.clear()
+                    logger.info(
+                        "Instance %s is ready; held events were accepted and the "
+                        "stream is back to normal", instance_id,
+                    )
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — never break the stream
+            logger.warning("Instance-not-ready probe failed: %s", e)
+        finally:
+            self._not_ready = None
+            self._not_ready_unwritten = []
+            if self._not_ready_dropped:
+                logger.warning(
+                    "While the instance was building, %d held event(s) were "
+                    "DROPPED (oldest first) because the in-memory limit of %d "
+                    "was reached. They were not sent.",
+                    self._not_ready_dropped, self.NOT_READY_MAX_HELD,
+                )
+                self._not_ready_dropped = 0
 
     def _proto_to_bundle_dict(self, proto) -> Dict[str, Any]:
         """Convert a ContextBundleProto to a plain dict matching ContextBundle.to_dict().
@@ -1084,9 +1397,26 @@ class GRPCTransport:
                     "entity_id": item.entity_id,
                     "created_at": item.created_at,
                     "event_date": item.event_date or None,
+                    "said_at": item.said_at or None,
                     "valid_until": item.valid_until or None,
                     "temporal_category": item.temporal_category or None,
                     "temporal_confidence": item.temporal_confidence,
+                    # The score the server ranked the item by. Presence matters:
+                    # a stub or a server that predates the field leaves it
+                    # unset, and that reads as "not ranked", never as 0.0.
+                    "rank_score": (
+                        item.rank_score
+                        if "rank_score" in type(item).DESCRIPTOR.fields_by_name
+                        and item.HasField("rank_score")
+                        else None
+                    ),
+                    # The questions the memory answers, which the anticipation
+                    # cache matches against; empty from a server that predates them.
+                    "questions": (
+                        list(item.questions)
+                        if "questions" in type(item).DESCRIPTOR.fields_by_name
+                        else []
+                    ),
                 }
                 for item in item_list.items
             ]
@@ -1107,6 +1437,12 @@ class GRPCTransport:
                 "compaction_id": cc.compaction_id or None,
                 "compacted_at": cc.compacted_at or None,
                 "conversation_id": cc.conversation_id or None,
+                # `getattr` because a stub built from an older proto has no
+                # such field. 0 means the server did not say.
+                "compacted_message_count": int(getattr(cc, "compacted_message_count", 0) or 0),
+                "total_message_count": int(getattr(cc, "total_message_count", 0) or 0),
+                # Compaction v3's framed block; "" from a server before v3.
+                "context_block": getattr(cc, "context_block", "") or None,
             }
 
         return {
@@ -1159,6 +1495,13 @@ class GRPCTransport:
             self._heartbeat_task.cancel()
             try:
                 await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._not_ready_task and not self._not_ready_task.done():
+            self._not_ready_task.cancel()
+            try:
+                await self._not_ready_task
             except asyncio.CancelledError:
                 pass
 

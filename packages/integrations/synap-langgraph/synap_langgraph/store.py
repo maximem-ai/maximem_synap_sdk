@@ -69,7 +69,7 @@ from langgraph.store.base import (
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
     SynapIntegrationError,
-    report_turn,
+    record_turn,
     run_async,
     wrap_sdk_errors_async,
 )
@@ -358,29 +358,27 @@ class SynapStore(BaseStore):
         conversation channel without reaching for the raw SDK. Best-effort: a
         failure here is logged and swallowed so it never breaks an agent turn.
 
-        Stream first, REST only as a fallback, never both. The server
-        persists ``user_message`` and ``assistant_message`` from the stream
-        itself (``grpc/servicer.py``), so a ``record_message`` on top of a
-        delivered stream event writes the turn twice and extracts it twice.
-        ``report_turn`` returns whether it actually went out, which is what
-        makes the choice decidable rather than guessed; it is silent and
-        returns False when no ``sdk.instance.listen()`` is running.
+        On the gRPC stream, which the first call opens, and over REST when the
+        stream cannot carry it; never both. The server persists
+        ``user_message`` and ``assistant_message`` from the stream itself, so a
+        REST write on top of a delivered stream event would write the turn
+        twice. ``customer_id`` is optional: a B2C instance refuses one, so the
+        store is built with ``user_id`` alone there.
 
-        ⚠ ``session_id`` rides the REST path only. On the stream the SDK
-        opens and owns the session itself, and the shared ``report_turn``
-        helper has no field for one.
+        ⚠ ``session_id`` is not sent: the stream owns the session, and the
+        shared turn writer has no field for one.
         """
-        if not self.user_id or not self.customer_id:
+        if not self.user_id:
             logger.warning(
-                "SynapStore.record_message needs both user_id and customer_id "
-                "(anticipation is user+customer scoped); skipping."
+                "SynapStore.record_message needs a user_id (a conversation turn "
+                "belongs to a user); skipping."
             )
             return
         # Stream metadata is string key/value on the wire; coerce rather than
         # let a non-string value fail the send and silently demote the turn to
         # the REST path.
         stream_metadata = {str(k): str(v) for k, v in (metadata or {}).items()}
-        if await report_turn(
+        await record_turn(
             self.sdk,
             role=role,
             content=content,
@@ -388,20 +386,7 @@ class SynapStore(BaseStore):
             user_id=self.user_id,
             customer_id=self.customer_id,
             metadata=stream_metadata,
-        ):
-            return
-        try:
-            await self.sdk.conversation.record_message(
-                conversation_id=conversation_id,
-                role=role,
-                content=content,
-                user_id=self.user_id,
-                customer_id=self.customer_id,
-                session_id=session_id,
-                metadata=metadata,
-            )
-        except Exception as exc:  # noqa: BLE001 — anticipation is best-effort
-            logger.warning("SynapStore.record_message failed (non-fatal): %s", exc)
+        )
 
     def record_message(
         self,
