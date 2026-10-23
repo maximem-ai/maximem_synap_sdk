@@ -38,11 +38,21 @@ const agent = new Agent({
 });
 ```
 
-Synap-backed methods:
+It works with or without a Mastra storage attached. What Mastra's Agent calls on a memory is
+`getInputProcessors` / `getOutputProcessors`, and those are what `SynapMemory` backs:
+
+- **Before the model:** Synap's long-term context is added as a system message. Once Synap has
+  compacted the conversation, its compaction replaces the turns Mastra loaded before the current
+  message (Mastra's own compaction stays installed and is the fallback while Synap has none). With no
+  Mastra storage attached, Synap's own turns are the history.
+- **After the run:** the turns are written to Synap, and the tool calls, results and reasoning go on
+  the stream (section 3).
+
+The explicit methods remain for callers that invoke them:
 
 - `recall({ threadId })` → loads prior turns from `sdk.conversation.context.get_context_for_prompt`
-- `saveMessages({ messages })` → persists each turn via `sdk.conversation.record_message`
-- `getSystemMessage({ threadId })` → fetches Synap context and returns it as a system-message preamble the Agent injects before the turn
+- `saveMessages({ messages })` → writes each turn the way the output processor does
+- `getSystemMessage({ threadId })` → fetches Synap context and returns it as a system-message preamble
 
 Thread metadata is kept in-process via a Map — adequate for single-process apps; multi-process thread persistence is a v0.2 concern.
 
@@ -75,17 +85,20 @@ Synap has a bidirectional `Listen` stream that carries five per-turn events. Two
 (`agent_thinking`, `tool_call`, `tool_result`) have no other durable home: they are what lets the
 anticipation agent predict the next turn, so that the next fetch is not a cold retrieval.
 
-`SynapMemory` reports all five. Start a stream and it happens on its own:
+`SynapMemory` reports all five, and opens the stream itself on the first turn: there is no
+`sdk.instance.listen()` to call.
 
 ```ts
-await sdk.instance.listen();   // your app opens this once
-
 const agent = new Agent({
   name: "support-agent",
   model: /* your model */,
   memory: new SynapMemory({ sdk, userId: "alice" }),
 });
 ```
+
+Set `SYNAP_AUTO_LISTEN=false` (or call `setAutoListen(sdk, false)`) to keep the stream closed; turns
+then go over REST. A stream you opened with `listen()` yourself is used either way, and the stream
+does not keep a plain `node script.js` alive once your work is done.
 
 What each part of a saved message becomes:
 
@@ -99,10 +112,8 @@ What each part of a saved message becomes:
 | role `system` | nothing — the instructions are not a turn |
 
 **Stream first, REST second, never both.** The server persists a turn it receives on the stream, so
-when the stream takes a turn `saveMessages` does *not* also call `conversation.record_message`.
-
-**Nothing changes if you never call `listen()`.** Every report is a no-op without an open stream, and
-`saveMessages` is byte for byte the REST write it always was.
+a turn goes over `conversation.record_message` only when the stream cannot carry it. A message Mastra
+saves again is not written again.
 
 Two options, both on by default:
 
@@ -120,8 +131,8 @@ new SynapMemory({
 ## Error policy
 
 - **`SynapMemory.recall` / `getSystemMessage`** — read-side, degrade gracefully (empty recall / null system message) with an `ERROR` log on failure.
-- **`SynapMemory.saveMessages`** — write-side, throws on SDK failure (silent drops would hide ingestion outages).
+- **Turn writes** (the output processor and `saveMessages`): never throw: a write that fails is logged and the Agent run goes on, since a throw from a save path ends the run.
 - **`synapSearchTool`** — returns `{ available: false }` on SDK failure; the agent loop keeps going.
 - **`synapStoreTool`** — throws on SDK failure so the tool call surfaces as an error to the agent.
-- **Stream reporting** — never throws and never blocks the Agent. A failed report falls back to the
-  REST write; a failed reasoning or tool event is simply not reported.
+- **Stream reporting**: never throws and never blocks the Agent. A turn the stream cannot carry
+  falls back to the REST write; a failed reasoning or tool event is simply not reported.

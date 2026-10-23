@@ -25,7 +25,9 @@ dependencies = [
     "pydantic>=2.0",
     "cryptography>=41.0",
     "httpx>=0.25.0",
-    "grpcio>=1.60.0",
+    # The floor is what synap_service_pb2_grpc.py was generated with
+    # (GRPC_GENERATED_VERSION); below it the import raises RuntimeError.
+    "grpcio>=1.71.0",
     # grpcio does NOT pull protobuf in transitively, and the generated
     # `synap_service_pb2` starts with `from google.protobuf import descriptor`.
     # Without this line a clean `pip install maximem-synap` gets grpcio and no
@@ -35,7 +37,14 @@ dependencies = [
     # arrives the moment a client opens the stream. That also made anticipation
     # unreachable: the only writer to the prefetch cache is the stream's
     # on_message callback, so the cache could never be populated at all.
-    "protobuf>=4.25.0",
+    #
+    # The floor is the protoc that generated synap_service_pb2.py (5.29.0),
+    # not an API we need. Gencode calls ValidateProtobufRuntimeVersion and
+    # refuses to load on a runtime OLDER than itself, so regenerating with a
+    # newer protoc silently raises this floor for every customer. AutoGen pins
+    # protobuf~=5.29.3, which a 6.31.1 gencode broke at listen(). Regenerate
+    # with a protoc no newer than the lowest runtime we mean to support.
+    "protobuf>=5.29.1",
 ]
 
 [project.optional-dependencies]
@@ -51,6 +60,19 @@ graph = [
     "neo4j>=5.0.0",
     "pyyaml>=6.0",
 ]
+# Local embedding model (cache/encoders.py): history search after compaction,
+# and matching fetch queries to prefetched items. One int8 ONNX file, the one
+# the JS SDK runs too.
+local-search = [
+    "onnxruntime>=1.20",
+    "tokenizers>=0.20",
+    "huggingface_hub>=0.24",
+    "numpy>=1.24",
+]
+# Other encoders history_search_model can name (cache/encoders.py). Not part of
+# local-search: the default model does not need them.
+local-search-fastembed = ["fastembed>=0.9"]
+local-search-model2vec = ["model2vec>=0.3"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",

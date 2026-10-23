@@ -33,13 +33,16 @@ from synap_integrations_common import SynapIntegrationError
 def _make_response(formatted: str | None, available: bool):
     """Build a stand-in ContextForPromptResponse object (duck-typed).
 
-    The adapter reads only ``available`` + ``formatted_context``, so a
-    MagicMock with those attributes is sufficient and avoids importing
-    the pydantic model (which would change shape independently).
+    ``formatted`` is the compaction (``context_block``). ``formatted_context``
+    is what the server sends beside it: the compaction AND the recent turns,
+    which the graph already sends, so it must never reach the model.
     """
     resp = MagicMock()
     resp.available = available
-    resp.formatted_context = formatted
+    resp.context_block = formatted
+    resp.history_block = None
+    resp.recent_messages = []
+    resp.formatted_context = f"{formatted}\nRECENT-TURNS-DUPLICATE" if formatted else None
     return resp
 
 

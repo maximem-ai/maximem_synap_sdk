@@ -97,3 +97,15 @@ __all__ = [
     "stop_words",
     "suffixes",
 ]
+
+
+@lru_cache(maxsize=1)
+def history_search_params() -> Dict[str, Any]:
+    """Local search over a conversation's earlier turns (cache/history_search.py)."""
+    return contract()["history_search"]
+
+
+@lru_cache(maxsize=1)
+def semantic_match_params() -> Dict[str, Any]:
+    """Matching fetch queries to prefetched items by meaning (cache/anticipation_cache.py)."""
+    return contract()["semantic_match"]

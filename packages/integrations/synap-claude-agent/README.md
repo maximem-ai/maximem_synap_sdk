@@ -16,7 +16,9 @@ Requires `claude-agent-sdk>=0.1`, `maximem-synap>=0.2.0`.
 
 ### 1. Hooks — automatic context injection
 
-`create_synap_hooks(...)` installs a `UserPromptSubmit` hook that fetches Synap context for each prompt and injects it via `additionalContext`. Optionally records the user prompt to conversation history for future recall.
+`create_synap_hooks(...)` installs hooks that fetch Synap context for each prompt and inject it via `additionalContext`, record the user's prompt and the agent's reply (the `Stop` hook's `last_assistant_message`), and report tool calls and results.
+
+The first hook to fire opens the gRPC stream (`sdk.instance.listen()`) if you have not, and everything goes on it. `SYNAP_AUTO_LISTEN=false` turns that off and the two turns go over REST.
 
 ```python
 from claude_agent_sdk import query, ClaudeAgentOptions
@@ -47,6 +49,22 @@ options = ClaudeAgentOptions(
     allowed_tools=["mcp__synap__synap_search", "mcp__synap__synap_remember"],
 )
 ```
+
+### 3. Session store: resume from Synap's compaction
+
+Claude Code owns its transcript, and a hook can add context to a prompt but not remove what the transcript holds. The one place the SDK lets you decide what a *resumed* session starts from is `session_store`:
+
+```python
+from synap_claude_agent import create_synap_session_store
+
+options = ClaudeAgentOptions(
+    resume=session_id,
+    session_store=create_synap_session_store(sdk),
+    hooks=create_synap_hooks(sdk, user_id="alice"),
+)
+```
+
+Once Synap has compacted the conversation, the resumed session starts from Synap's compaction and the turns after it instead of the stored transcript. Before that, or if Synap cannot answer, it resumes from the transcript unchanged. Inside a running session Claude Code still compacts its own transcript; the `PreCompact` hook gives its summarizer Synap's compaction to build on.
 
 Use both together for the full experience: automatic context injection plus agent-initiated read/write.
 
