@@ -100,18 +100,19 @@ function reporter(sdk: unknown, options = {}) {
 
 // ── the reporter ─────────────────────────────────────────────────────────────
 
-describe('silent for a caller who never opened a stream', () => {
-  it('reports nothing at all when isListening says no', async () => {
+describe('a caller whose stream cannot carry the turn', () => {
+  it('writes the turn over REST and sends nothing on the stream when isListening says no', async () => {
     const { sdk, calls } = streamingSdk({ listening: false });
     const parts = [textPart('where is my order')];
     const sent = await reporter(sdk).report(message('user', parts), {
       threadId: THREAD, role: 'user', text: textOf(parts),
     });
     expect(calls).toEqual([]);
-    expect(sent).toBe(false);
+    expect(sent).toBe(true);
+    expect(recordMessage(sdk)).toHaveBeenCalledTimes(1);
   });
 
-  it('reports nothing when the sdk has no instance namespace', async () => {
+  it('writes the turn over REST when the sdk has no instance namespace', async () => {
     // The shape of an older SDK, or of a user's own stub.
     const plain = makeSdk();
     const parts = [textPart('hi')];
@@ -119,7 +120,33 @@ describe('silent for a caller who never opened a stream', () => {
       await reporter(plain).report(message('user', parts), {
         threadId: THREAD, role: 'user', text: 'hi',
       }),
-    ).toBe(false);
+    ).toBe(true);
+    expect(recordMessage(plain)).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends the stream-only events nowhere', async () => {
+    const { sdk, calls } = streamingSdk({ listening: false });
+    const parts = [
+      reasoningPart('thinking'),
+      toolPart({ state: 'result', toolCallId: 'c1', toolName: 'search', args: {}, result: 'r' }),
+      textPart('done'),
+    ];
+    await reporter(sdk).report(message('assistant', parts), {
+      threadId: THREAD, role: 'assistant', text: 'done',
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it('does not write a re-saved message to REST twice', async () => {
+    // The REST path had no de-duplication: Mastra re-saves an assistant message
+    // when a tool result is filled in, and each re-save was a second write.
+    const sdk = makeSdk();
+    const r = reporter(sdk);
+    const m = message('assistant', [textPart('it shipped')]);
+    const info = { threadId: THREAD, role: 'assistant', text: 'it shipped' };
+    expect(await r.report(m, info)).toBe(true);
+    expect(await r.report(m, info)).toBe(true);
+    expect(recordMessage(sdk)).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -423,8 +450,8 @@ describe('Mastra re-saves a message it has already saved', () => {
       (c.options as Record<string, unknown>)['content'])).toEqual(['it', 'it shipped']);
   });
 
-  it('does not suppress a turn whose send failed, so the retry still goes out', async () => {
-    // Remembering a key before the send succeeded would lose the turn twice
+  it('does not suppress a turn whose write failed, so the retry still goes out', async () => {
+    // Remembering a key before the write succeeded would lose the turn twice
     // over: once to the failure, once to the de-duplication.
     const calls: StreamCall[] = [];
     let failNext = true;
@@ -441,6 +468,8 @@ describe('Mastra re-saves a message it has already saved', () => {
         }),
       },
     };
+    sdk.conversation.record_message = vi.fn(async () => { throw new Error('rest is down too'); });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     const r = reporter(sdk);
     const m = message('assistant', [textPart('it shipped')]);
     const info = { threadId: THREAD, role: 'assistant', text: 'it shipped' };
@@ -448,6 +477,7 @@ describe('Mastra re-saves a message it has already saved', () => {
     expect(await r.report(m, info)).toBe(false);
     expect(await r.report(m, info)).toBe(true);
     expect(calls).toHaveLength(1);
+    vi.restoreAllMocks();
   });
 
   it('a message with no id is reported every time, because nothing identifies it', async () => {
@@ -542,7 +572,6 @@ describe('SynapMemory.saveMessages with a stream open', () => {
       role: 'user',
       content: 'hi',
       user_id: 'alice',
-      customer_id: '',
     });
   });
 
@@ -564,7 +593,7 @@ describe('SynapMemory.saveMessages with a stream open', () => {
 });
 
 describe('SynapMemory.saveMessages for someone who never opted in', () => {
-  it('is exactly the REST write it has always been', async () => {
+  it('is the REST write, minus the empty customer_id a B2C instance refuses', async () => {
     const sdk = makeSdk();
     const m = message('user', [textPart('where is my order')]);
     const result = await memoryOver(sdk).saveMessages({ messages: [m] });
@@ -575,7 +604,6 @@ describe('SynapMemory.saveMessages for someone who never opted in', () => {
       role: 'user',
       content: 'where is my order',
       user_id: 'alice',
-      customer_id: '',
     });
     expect(result).toEqual({ messages: [m] });
   });

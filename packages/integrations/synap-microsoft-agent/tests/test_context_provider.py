@@ -592,13 +592,13 @@ class TestMessageToRoleText:
         assert role == "assistant"
         assert text == "Reply"
 
-    def test_system_role_returns_correctly(self):
+    def test_system_role_is_not_a_turn(self):
+        """`record_message` takes user or assistant only; a system message
+        raised ValueError in the SDK and was dropped with an error log."""
         msg = MagicMock()
         msg.role = "system"
         msg.text = "You are helpful"
-        role, text = SynapContextProvider._message_to_role_text(msg)
-        assert role == "system"
-        assert text == "You are helpful"
+        assert SynapContextProvider._message_to_role_text(msg) == (None, "")
 
     def test_tool_role_rejected(self):
         msg = MagicMock()

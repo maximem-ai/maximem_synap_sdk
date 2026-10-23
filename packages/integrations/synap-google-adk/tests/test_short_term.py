@@ -37,7 +37,12 @@ from synap_integrations_common import SynapIntegrationError
 def _make_response(formatted: str | None, available: bool) -> MagicMock:
     resp = MagicMock()
     resp.available = available
-    resp.formatted_context = formatted
+    # `formatted_context` is the compaction plus the turns after it. The
+    # instruction takes only the compaction (`context_block`): ADK already sends
+    # those turns.
+    resp.formatted_context = f"{formatted}\nuser: the recent turn" if formatted else formatted
+    resp.context_block = formatted
+    resp.history_block = None
     return resp
 
 
@@ -50,6 +55,23 @@ def _fake_sdk(
         return_value=_make_response(formatted, available)
     )
     return sdk
+
+
+class TestNoDuplicateTurns:
+    @pytest.mark.asyncio
+    async def test_the_recent_turns_in_formatted_context_are_not_sent(self):
+        sdk = _fake_sdk(formatted="## Conversation so far (compacted)\nTrip to Lisbon.")
+        out = await synap_st_instruction(sdk, "conv_abc", instruction="sys")(MagicMock())
+        assert "Trip to Lisbon." in out
+        assert "the recent turn" not in out
+
+    @pytest.mark.asyncio
+    async def test_before_the_first_compaction_nothing_is_added(self):
+        sdk = _fake_sdk(formatted=None)
+        sdk.conversation.context.get_context_for_prompt.return_value.formatted_context = (
+            "user: hi\nassistant: hello")
+        out = await synap_st_instruction(sdk, "conv_abc", instruction="sys")(MagicMock())
+        assert out == "sys"
 
 
 # ---------------------------------------------------------------------------

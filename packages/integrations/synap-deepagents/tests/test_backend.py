@@ -6,7 +6,7 @@ import pytest
 from deepagents.backends.protocol import FILE_NOT_FOUND
 from synap_integrations_common import SynapIntegrationError
 
-from synap_deepagents.backend import SynapBackend, _normalize, _WriteCache
+from synap_deepagents.backend import DEFAULT_RECALL_QUERY, SynapBackend, _normalize, _WriteCache
 
 RECALL = "/AGENTS.md"
 
@@ -47,7 +47,10 @@ def test_defaults(mock_sdk):
     assert backend.recall_filename == "AGENTS.md"
     assert backend.mode == "fast"
     assert backend.grep_mode == "accurate"
-    assert backend.document_type == "document"
+    # The SDK defaults: the old "document" + "fast" pair was never retrievable on staging.
+    assert backend.document_type == "ai-chat-conversation"
+    assert backend.ingest_mode == "long-range"
+    assert backend.recall_query == DEFAULT_RECALL_QUERY
     assert backend.include_conversation_context is False
 
 
@@ -89,11 +92,29 @@ async def test_aread_recall_returns_formatted_context(mock_sdk):
     assert result.file_data["encoding"] == "utf-8"
 
 
-async def test_aread_recall_uses_no_search_query(mock_sdk):
+async def test_aread_recall_asks_a_real_question(mock_sdk):
+    """Synap returns nothing for a fetch with no query, so the recall file must ask one."""
     backend = make_backend(mock_sdk)
     await backend.aread(RECALL)
-    assert mock_sdk.fetch.await_args.kwargs["search_query"] is None
+    assert mock_sdk.fetch.await_args.kwargs["search_query"] == [DEFAULT_RECALL_QUERY]
     assert mock_sdk.fetch.await_args.kwargs["mode"] == "fast"
+
+
+async def test_a_custom_recall_query_is_used(mock_sdk):
+    backend = make_backend(mock_sdk, recall_query="What are this user's coding preferences?")
+    await backend.aread(RECALL)
+    assert mock_sdk.fetch.await_args.kwargs["search_query"] == ["What are this user's coding preferences?"]
+
+
+async def test_startup_download_also_asks_a_real_question(mock_sdk):
+    backend = make_backend(mock_sdk)
+    await backend.adownload_files([RECALL])
+    assert mock_sdk.fetch.await_args.kwargs["search_query"] == [DEFAULT_RECALL_QUERY]
+
+
+def test_requires_a_non_empty_recall_query(mock_sdk):
+    with pytest.raises(ValueError, match="recall_query"):
+        make_backend(mock_sdk, recall_query="   ")
 
 
 async def test_aread_sets_valid_pagination_window(mock_sdk):
@@ -255,8 +276,8 @@ async def test_awrite_calls_memories_create(mock_sdk):
     kwargs = mock_sdk.memories.create.await_args.kwargs
     assert kwargs["document"] == "User ships on Fridays"
     assert kwargs["user_id"] == "alice"
-    assert kwargs["document_type"] == "document"
-    assert kwargs["mode"] == "fast"
+    assert kwargs["document_type"] == "ai-chat-conversation"
+    assert kwargs["mode"] == "long-range"
 
 
 async def test_awrite_raises_on_sdk_failure(failing_sdk):
@@ -520,7 +541,7 @@ async def test_custom_recall_filename(mock_sdk):
     backend = make_backend(mock_sdk, recall_filename="MEMORY.md")
     result = await backend.aread("/MEMORY.md")
     assert result.error is None
-    assert mock_sdk.fetch.await_args.kwargs["search_query"] is None
+    assert mock_sdk.fetch.await_args.kwargs["search_query"] == [DEFAULT_RECALL_QUERY]
 
 
 async def test_custom_ingest_settings(mock_sdk):

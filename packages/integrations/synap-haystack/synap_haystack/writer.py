@@ -7,7 +7,11 @@ failure policy (see ``store.py``).
 Semantics:
 
 - Accepts ``Document``s where ``content`` is the message text and
-  ``meta["role"]`` is ``"user"`` or ``"assistant"``.
+  ``meta["role"]`` is ``"user"`` or ``"assistant"``, and/or ``ChatMessage``s on
+  ``messages``. Connect an agent's or generator's ``messages`` / ``replies`` to
+  ``messages`` and tool calls, tool results and reasoning reach Synap's stream
+  with the turns; a ``Document`` is text and role only, so it can carry none of
+  that.
 - Tracks ``written_count`` / ``failed_count`` / ``skipped_count`` separately and
   exposes all three plus ``first_error`` so downstream components can branch on
   partial failures.
@@ -84,9 +88,14 @@ class SynapMemoryWriter:
         skipped_count=int,
         first_error=Optional[str],
     )
-    def run(self, documents: List[Document]) -> Dict[str, object]:
-        messages: List[ChatMessage] = []
+    def run(
+        self,
+        documents: Optional[List[Document]] = None,
+        messages: Optional[List[ChatMessage]] = None,
+    ) -> Dict[str, object]:
+        chat_messages: List[ChatMessage] = list(messages or [])
         skipped = 0
+        documents = documents or []
         for doc in documents:
             role = doc.meta.get("role", "user")
             if role not in _VALID_ROLES:
@@ -98,16 +107,16 @@ class SynapMemoryWriter:
                 )
                 continue
             if role == "user":
-                messages.append(ChatMessage.from_user(doc.content or ""))
+                chat_messages.append(ChatMessage.from_user(doc.content or ""))
             else:
-                messages.append(ChatMessage.from_assistant(doc.content or ""))
+                chat_messages.append(ChatMessage.from_assistant(doc.content or ""))
 
         # add_memories raises SynapIntegrationError on 100% failure — propagate.
         results = (
             self.store.add_memories(
-                messages=messages, conversation_id=self.conversation_id
+                messages=chat_messages, conversation_id=self.conversation_id
             )
-            if messages
+            if chat_messages
             else []
         )
 

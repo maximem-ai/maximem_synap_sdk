@@ -21,6 +21,9 @@ from nat.memory.interfaces import MemoryEditor
 from nat.memory.models import MemoryItem
 
 from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common.testing import (
+    make_emotion, make_episode, make_fact, make_preference, make_temporal_event, make_unified_response,
+)
 from synap_nemo_agent_toolkit.editor import SynapMemoryEditor
 
 
@@ -120,12 +123,60 @@ class TestSearch:
 
     @pytest.mark.asyncio
     async def test_maps_facts_to_memory_items(self, editor):
+        # The default response holds a fact AND a preference; both must come back.
         items = await editor.search("coffee", top_k=3, user_id="u1")
-        assert len(items) == 1
-        assert isinstance(items[0], MemoryItem)
-        assert items[0].memory == "User is an engineer"
-        assert items[0].user_id == "u1"
-        assert items[0].similarity_score == 0.9
+        assert [i.memory for i in items] == ["User is an engineer", "Prefers dark mode"]
+        assert all(isinstance(i, MemoryItem) for i in items)
+        fact = items[0]
+        assert fact.user_id == "u1"
+        assert fact.similarity_score == 0.9
+        assert fact.metadata["synap_type"] == "fact"
+
+    @pytest.mark.asyncio
+    async def test_a_stored_preference_comes_back(self, mock_sdk):
+        """The reported bug: preferences were dropped, so a stored preference never returned."""
+        mock_sdk.fetch.return_value = make_unified_response(
+            facts=[], preferences=[make_preference("p1", "Prefers window seats", 0.8)]
+        )
+        items = await SynapMemoryEditor(sdk=mock_sdk).search("seats", top_k=5, user_id="u1")
+        assert [i.memory for i in items] == ["Prefers window seats"]
+        assert items[0].similarity_score == 0.8
+        assert items[0].metadata["synap_type"] == "preference"
+
+    @pytest.mark.asyncio
+    async def test_every_memory_type_is_returned_with_its_score(self, mock_sdk):
+        mock_sdk.fetch.return_value = make_unified_response(
+            facts=[make_fact("f1", "A fact", 0.5)],
+            preferences=[make_preference("p1", "A preference", 0.6)],
+            episodes=[make_episode("e1", "An episode summary", 0.7)],
+            emotions=[make_emotion("m1", "joy", "after the launch", 0.8)],
+            temporal_events=[make_temporal_event("t1", "A dated event")],
+        )
+        items = await SynapMemoryEditor(sdk=mock_sdk).search("anything", top_k=10, user_id="u1")
+        by_type = {i.metadata["synap_type"]: i for i in items}
+        assert set(by_type) == {"fact", "preference", "episode", "emotion", "temporal_event"}
+        assert by_type["episode"].memory == "An episode summary" and by_type["episode"].similarity_score == 0.7
+        assert by_type["emotion"].memory == "joy: after the launch" and by_type["emotion"].similarity_score == 0.8
+        assert by_type["temporal_event"].memory == "A dated event" and by_type["temporal_event"].similarity_score == 0.9
+
+    @pytest.mark.asyncio
+    async def test_results_are_ranked_by_score_across_types_and_capped_at_top_k(self, mock_sdk):
+        mock_sdk.fetch.return_value = make_unified_response(
+            facts=[make_fact("f1", "low fact", 0.2)],
+            preferences=[make_preference("p1", "top preference", 0.95)],
+            episodes=[make_episode("e1", "mid episode", 0.6)],
+            emotions=[], temporal_events=[],
+        )
+        items = await SynapMemoryEditor(sdk=mock_sdk).search("q", top_k=2, user_id="u1")
+        assert [i.memory for i in items] == ["top preference", "mid episode"]
+
+    @pytest.mark.asyncio
+    async def test_tag_filter_applies_to_every_type(self, mock_sdk):
+        pref = make_preference("p1", "tagged preference", 0.8)
+        pref.metadata = {"tags": ["travel"]}
+        mock_sdk.fetch.return_value = make_unified_response(facts=[make_fact()], preferences=[pref])
+        items = await SynapMemoryEditor(sdk=mock_sdk).search("q", top_k=5, user_id="u1", tag_filter=["travel"])
+        assert [i.memory for i in items] == ["tagged preference"]
 
     @pytest.mark.asyncio
     async def test_fetch_args(self, editor, mock_sdk):
