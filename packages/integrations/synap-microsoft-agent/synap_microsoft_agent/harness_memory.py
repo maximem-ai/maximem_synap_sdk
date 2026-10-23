@@ -33,7 +33,7 @@ import uuid
 from typing import Any, List, Optional, Sequence
 
 from maximem_synap import MaximemSynapSDK
-from synap_integrations_common import wrap_sdk_errors_async
+from synap_integrations_common import fetch_compacted_history, wrap_sdk_errors_async
 
 from synap_microsoft_agent._harness_compat import require_harness
 from synap_microsoft_agent.stream import (
@@ -100,6 +100,11 @@ class SynapMemoryContextProvider(MemoryContextProvider):
         **kwargs: Passed straight to ``MemoryContextProvider`` — ``recent_turns``,
             ``selection_limit``, ``consolidation_interval``, and the rest.
     """
+
+    #: `SynapContextProvider` reads these: this provider owns the transcript, in
+    #: Synap, so it neither adds the compaction middleware nor writes turns twice.
+    SYNAP_HISTORY = True
+    SYNAP_LOADS_HISTORY = True
 
     def __init__(
         self,
@@ -168,6 +173,27 @@ class SynapMemoryContextProvider(MemoryContextProvider):
         finally:
             if token is not None:
                 store.reset_recall_query(token)
+        await self._add_compaction(context, state)
+
+    async def _add_compaction(self, context: Any, state: Any) -> None:
+        """Give the model Synap's compaction when it is given the transcript.
+
+        The inherited ``before_run`` selects the last ``recent_turns`` turns from
+        ``get_messages`` and keeps only whole turns, so the compaction block
+        ``get_messages`` leads with never reaches the model. With
+        ``recent_turns=0`` the caller asked for no transcript, and none is added.
+        """
+        if not self.recent_turns:
+            return
+        history = await fetch_compacted_history(
+            self.sdk,
+            session_conversation_id(
+                getattr(context, "session_id", None),
+                owner=self._owner_from_state(state if isinstance(state, dict) else None),
+            ),
+        )
+        if history is not None:
+            context.extend_instructions(self.source_id, history.preamble)
 
     def _owner_from_state(self, state: Optional[dict]) -> str:
         if isinstance(state, dict):
@@ -219,6 +245,15 @@ class SynapMemoryContextProvider(MemoryContextProvider):
             return []
 
         messages: List[Message] = []
+        # The compaction block stands in for the turns it covers: `recent_messages`
+        # holds only the turns after it. Older SDKs send neither field.
+        preamble = "\n\n".join(
+            part for part in (getattr(response, "context_block", None),
+                              getattr(response, "history_block", None))
+            if isinstance(part, str) and part
+        )
+        if preamble:
+            messages.append(Message(role="system", contents=[preamble]))
         for recorded in getattr(response, "recent_messages", None) or []:
             role = getattr(recorded, "role", None)
             content = getattr(recorded, "content", None)

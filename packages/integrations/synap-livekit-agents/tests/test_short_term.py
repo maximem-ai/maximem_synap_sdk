@@ -159,6 +159,122 @@ class TestRefresh:
         assert len(ctx.items) == 0
 
 
+def _turns_ctx() -> ChatContext:
+    ctx = ChatContext()
+    for role, text in (("user", "turn-1"), ("assistant", "reply-1"), ("user", "now")):
+        ctx.add_message(role=role, content=text)
+    return ctx
+
+
+def _uncompacted_sdk(extra=None):
+    """Synap holds turn-1, reply-1, now (and `extra`), and has not compacted."""
+    from types import SimpleNamespace
+
+    recent = [("user", "turn-1"), ("assistant", "reply-1"), ("user", "now")]
+    if extra:
+        recent.insert(0, extra)
+    sdk = _fake_sdk()
+    sdk.conversation.context.get_context_for_prompt = AsyncMock(
+        return_value=SimpleNamespace(
+            available=True,
+            formatted_context="\n".join(f"{r}: {t}" for r, t in recent),
+            context_block="",
+            history_block="",
+            recent_messages=[SimpleNamespace(role=r, content=t) for r, t in recent],
+            compaction_id=None,
+        )
+    )
+    return sdk
+
+
+def _compacted_sdk():
+    from types import SimpleNamespace
+
+    sdk = _fake_sdk(formatted="ST block with turn-1 and reply-1")
+    sdk.conversation.context.get_context_for_prompt = AsyncMock(
+        return_value=SimpleNamespace(
+            available=True,
+            formatted_context="ST block with turn-1 and reply-1",
+            context_block="SUMMARY: refund",
+            history_block="",
+            recent_messages=[SimpleNamespace(role="user", content="turn-3")],
+            compaction_id="c1",
+        )
+    )
+    return sdk
+
+
+class TestNeverSendsATurnTwice:
+    """The ST block carries recent turns. Beside a context that already holds
+    them, that is every turn sent twice."""
+
+    @pytest.mark.asyncio
+    async def test_refresh_adds_no_block_to_a_context_that_holds_the_turns(self):
+        ctx = _turns_ctx()
+        msg = await refresh_synap_st(ctx, _uncompacted_sdk(), conversation_id="c1")
+        assert msg is None
+        assert [m.text_content for m in ctx.items] == ["turn-1", "reply-1", "now"]
+
+    @pytest.mark.asyncio
+    async def test_refresh_drops_a_block_left_from_before_the_turns_arrived(self):
+        ctx = _empty_chat_ctx()
+        await preload_synap_st(ctx, _uncompacted_sdk(), conversation_id="c1")
+        for role, text in (("user", "turn-1"), ("assistant", "reply-1"), ("user", "now")):
+            ctx.add_message(role=role, content=text)
+        await refresh_synap_st(ctx, _uncompacted_sdk(), conversation_id="c1")
+        assert [m.text_content for m in ctx.items] == ["turn-1", "reply-1", "now"]
+
+    @pytest.mark.asyncio
+    async def test_the_block_lands_after_the_instructions_not_before_them(self):
+        ctx = ChatContext()
+        ctx.add_message(role="system", content="be nice")
+        await preload_synap_st(ctx, _uncompacted_sdk(), conversation_id="c1")
+        texts = [m.text_content for m in ctx.items]
+        assert texts[0] == "be nice" and texts[1].startswith(_ST_MARKER)
+
+    @pytest.mark.asyncio
+    async def test_a_resumed_conversation_still_gets_the_turns_the_context_lacks(self):
+        ctx = _empty_chat_ctx()
+        await preload_synap_st(ctx, _uncompacted_sdk(), conversation_id="c1")
+        assert len(ctx.items) == 1 and "turn-1" in ctx.items[0].text_content
+        # A live turn arrives; the block keeps only what the context lacks.
+        ctx.add_message(role="user", content="turn-1")
+        ctx.add_message(role="assistant", content="reply-1")
+        await refresh_synap_st(ctx, _uncompacted_sdk(extra=("user", "from last week")),
+                               conversation_id="c1")
+        block = [m for m in ctx.items if m.text_content.startswith(_ST_MARKER)]
+        assert len(block) == 1
+        assert "from last week" in block[0].text_content
+        assert "reply-1" not in block[0].text_content
+
+    @pytest.mark.asyncio
+    async def test_once_compacted_refresh_swaps_the_earlier_turns_for_the_compaction(self):
+        ctx = _turns_ctx()
+        msg = await refresh_synap_st(ctx, _compacted_sdk(), conversation_id="c1")
+        texts = [m.text_content for m in ctx.items]
+        assert msg is not None and msg.text_content.startswith("<synap_conversation_history>")
+        assert texts[0] == msg.text_content
+        assert "turn-1" not in texts and "reply-1" not in texts
+        assert texts[-1] == "now"
+        assert not any(_ST_MARKER in t for t in texts)
+
+    @pytest.mark.asyncio
+    async def test_refreshing_twice_keeps_one_compaction(self):
+        ctx = _turns_ctx()
+        await refresh_synap_st(ctx, _compacted_sdk(), conversation_id="c1")
+        await refresh_synap_st(ctx, _compacted_sdk(), conversation_id="c1")
+        texts = [m.text_content for m in ctx.items]
+        assert sum(t.startswith("<synap_conversation_history>") for t in texts) == 1
+
+    @pytest.mark.asyncio
+    async def test_preload_on_a_populated_context_splices_instead_of_stacking(self):
+        ctx = _turns_ctx()
+        await preload_synap_st(ctx, _compacted_sdk(), conversation_id="c1")
+        texts = [m.text_content for m in ctx.items]
+        assert "turn-1" not in texts
+        assert not any(_ST_MARKER in t for t in texts)
+
+
 def test_public_surface_exports():
     import synap_livekit_agents
     assert hasattr(synap_livekit_agents, "preload_synap_st")

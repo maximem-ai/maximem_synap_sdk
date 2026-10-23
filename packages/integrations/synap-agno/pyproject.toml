@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maximem-synap-agno"
-version = "0.2.1"
+version = "0.2.3"
 description = "Synap memory integration for Agno — user memories backed by Synap"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,8 +16,8 @@ keywords = ["synap", "memory", "agno", "ai", "agents"]
 
 dependencies = [
     "maximem-synap>=0.5.3",
-    "maximem-synap-integrations-common>=0.2.1",
-    "agno>=2.0",
+    "maximem-synap-integrations-common>=0.2.3",
+    "agno>=2.5",
 ]
 
 [project.optional-dependencies]

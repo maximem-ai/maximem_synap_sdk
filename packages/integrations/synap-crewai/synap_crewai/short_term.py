@@ -9,7 +9,10 @@ So this adapter is **best-effort, one-shot**: :func:`build_synap_st_backstory`
 fetches Synap short-term context **once** and returns a combined
 backstory string. The user passes the result to
 ``Agent(backstory=...)``. The ST is a snapshot at agent-creation time —
-to refresh it, re-create the agent.
+to refresh it, re-create the agent. A live :class:`SynapCrewAIListener`
+replaces the snapshot with Synap's current history on the first model call
+once the conversation has been compacted (see ``synap_crewai.stream``), so the
+two never both reach the model.
 
 For multi-turn use cases that need refreshed ST, prefer one of the
 framework adapters that supports per-step injection (LangGraph,

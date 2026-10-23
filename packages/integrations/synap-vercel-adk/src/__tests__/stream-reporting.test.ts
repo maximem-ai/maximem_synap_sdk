@@ -159,30 +159,30 @@ describe('a streaming call', () => {
   });
 });
 
-describe('the memory write', () => {
+describe('the turn write over REST', () => {
   const originalFetch = globalThis.fetch;
   beforeEach(() => { vi.restoreAllMocks(); });
   afterEach(() => { globalThis.fetch = originalFetch; });
 
+  const noStream = async () => null;
+  const creds = { api_key: 'k', client_id: 'c', instance_id: 'i' };
+
   it('posts to a route that exists', async () => {
-    // It posted to /v1/memories/ingest, which is not a route, and never looked
-    // at the response — so every write 404'd silently.
+    // The old transcript write posted to /v1/memories/ingest, which is not a
+    // route, and never looked at the response, so every write 404'd silently.
     const calls: string[] = [];
     globalThis.fetch = vi.fn(async (url: unknown) => {
       calls.push(String(url));
       return { ok: true, status: 200, statusText: 'OK' } as Response;
     }) as never;
 
-    const { writeMemory } = await import('../memory/writer.js');
-    await writeMemory({
-      credentials: { api_key: 'k', client_id: 'c', instance_id: 'i' },
-      modelOptions: { userId: 'u1', conversationId: 'c1' },
-      messages: [{ role: 'user', content: 'hi' }],
-      assistantResponse: 'hello',
-      baseUrl: 'https://example.test',
+    const { recordTurn } = await import('../memory/turns.js');
+    await recordTurn({
+      credentials: creds, modelOptions: { userId: 'u1', conversationId: 'c1' },
+      role: 'assistant', content: 'hello', getStream: noStream, baseUrl: 'https://example.test',
     });
 
-    expect(calls[0]).toBe('https://example.test/api/v1/memories/create');
+    expect(calls[0]).toBe('https://example.test/v1/conversations/messages');
   });
 
   it('warns when the write is refused instead of swallowing it', async () => {
@@ -191,15 +191,13 @@ describe('the memory write', () => {
       { ok: false, status: 404, statusText: 'Not Found' } as Response
     )) as never;
 
-    const { writeMemory } = await import('../memory/writer.js');
-    await writeMemory({
-      credentials: { api_key: 'k', client_id: 'c', instance_id: 'i' },
-      modelOptions: { userId: 'u1' },
-      messages: [{ role: 'user', content: 'hi' }],
-      assistantResponse: 'hello',
-      baseUrl: 'https://example.test',
+    const { recordTurn } = await import('../memory/turns.js');
+    const ok = await recordTurn({
+      credentials: creds, modelOptions: { userId: 'u1', conversationId: 'c1' },
+      role: 'assistant', content: 'hello', getStream: noStream, baseUrl: 'https://example.test',
     });
 
+    expect(ok).toBe(false);
     expect(warn).toHaveBeenCalled();
   });
 
@@ -211,15 +209,14 @@ describe('the memory write', () => {
       return { ok: true, status: 200, statusText: 'OK' } as Response;
     }) as never;
 
-    const { writeMemory } = await import('../memory/writer.js');
-    await writeMemory({
-      credentials: { api_key: 'k', client_id: 'c', instance_id: 'i' },
-      modelOptions: { userId: 'u1' },
-      messages: [{ role: 'user', content: 'hi' }],
-      assistantResponse: 'hello',
-      baseUrl: 'https://example.test',
+    const { recordTurn } = await import('../memory/turns.js');
+    await recordTurn({
+      credentials: creds, modelOptions: { userId: 'u1', conversationId: 'c1' },
+      role: 'user', content: 'hi', getStream: noStream, baseUrl: 'https://example.test',
     });
 
     expect('customer_id' in body).toBe(false);
+    expect(body['role']).toBe('user');
+    expect(body['conversation_id']).toBe('c1');
   });
 });

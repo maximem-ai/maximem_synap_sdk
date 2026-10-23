@@ -18,14 +18,24 @@ export function rawItemToContextItem(raw: RawContextItem): ContextItem {
 
 // ─── Build system prompt block from fetched context ───────────────────────────
 
-export function buildContextSystemBlock(ctx: FetchedContext): string {
-  const sections: string[] = [];
+export interface ContextBlockOptions {
+  /** The compaction summary. Default true. */
+  includeSummary?: boolean;
+  /** The last turns of the conversation. Default true. The AI SDK caller
+   *  already sends them, so the middleware turns this off. */
+  includeRecentTurns?: boolean;
+}
 
-  if (ctx.conversationContext?.summary) {
+export function buildContextSystemBlock(ctx: FetchedContext, opts: ContextBlockOptions = {}): string {
+  const sections: string[] = [];
+  const includeSummary = opts.includeSummary ?? true;
+  const includeRecentTurns = opts.includeRecentTurns ?? true;
+
+  if (includeSummary && ctx.conversationContext?.summary) {
     sections.push(`## Conversation Summary\n${ctx.conversationContext.summary}`);
   }
 
-  if (ctx.conversationContext?.recentTurns.length) {
+  if (includeRecentTurns && ctx.conversationContext?.recentTurns.length) {
     const turns = ctx.conversationContext.recentTurns
       .slice(-6)
       .map(t => `${t.role}: ${t.content}`)
@@ -62,8 +72,9 @@ export function buildContextSystemBlock(ctx: FetchedContext): string {
 export function injectContextIntoPrompt(
   prompt: LanguageModelV1Prompt,
   ctx: FetchedContext,
+  opts: ContextBlockOptions = {},
 ): LanguageModelV1Prompt {
-  const block = buildContextSystemBlock(ctx);
+  const block = buildContextSystemBlock(ctx, opts);
   if (!block) return prompt;
 
   const hasSystem = prompt.some(m => m.role === 'system');

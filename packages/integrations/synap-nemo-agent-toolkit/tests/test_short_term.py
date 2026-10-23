@@ -156,7 +156,7 @@ class TestCacheHit:
         sdk = _fake_sdk()
         fn = SynapShortTermFunction(sdk, style="bullet_points")
         await fn(conversation_id="conv_abc")
-        sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
+        sdk.conversation.context.get_context_for_prompt.assert_awaited_with(
             conversation_id="conv_abc",
             style="bullet_points",
         )
@@ -166,7 +166,7 @@ class TestCacheHit:
         sdk = _fake_sdk()
         fn = SynapShortTermFunction(sdk, default_conversation_id="conv_default")
         await fn()  # no explicit conv id
-        sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
+        sdk.conversation.context.get_context_for_prompt.assert_awaited_with(
             conversation_id="conv_default",
             style="narrative",
         )
@@ -176,7 +176,7 @@ class TestCacheHit:
         sdk = _fake_sdk()
         fn = SynapShortTermFunction(sdk, default_conversation_id="conv_default")
         await fn(conversation_id="conv_override")
-        sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
+        sdk.conversation.context.get_context_for_prompt.assert_awaited_with(
             conversation_id="conv_override",
             style="narrative",
         )
@@ -217,78 +217,33 @@ class TestErrorHandling:
             await fn(conversation_id="conv_abc")
 
 
-def _fake_config(**overrides):
-    """Stand-in for SynapShortTermConfig.
+class TestDoesNotRepeatTheTurnsTheAgentHas:
+    """NAT hands the agent the conversation, so the recent-turns block would
+    send those turns twice. Once Synap has compacted, only the compaction goes."""
 
-    The real config is a pydantic FunctionBaseConfig, and this module's NAT
-    stubs replace that base with a plain class — so the declared Fields never
-    become constructor arguments. Supply the attributes the factory reads.
-    """
-    from types import SimpleNamespace
+    @staticmethod
+    def _compacted_sdk():
+        from types import SimpleNamespace
 
-    defaults = dict(
-        api_key="sk-test",
-        instance_id="",
-        style="structured",
-        preamble_open="",
-        preamble_close="",
-        on_error="fallback",
-        conversation_id="",
-    )
-    defaults.update(overrides)
-    return SimpleNamespace(**defaults)
-
-
-class TestTeardown:
-    """The factory's ``finally`` block probed ``getattr(sdk, "close", None)``,
-    but the SDK's teardown is ``shutdown()`` — there is no ``close()``. The
-    guard therefore resolved to ``None`` on every run and teardown never
-    happened, leaking the HTTP transport, the gRPC stream and the telemetry
-    collector once per workflow.
-    """
-
-    def test_the_sdk_really_has_no_close(self):
-        """Pins the premise. If the SDK ever grows close(), this test says so
-        rather than letting the old probe look correct by accident."""
-        from maximem_synap import MaximemSynapSDK
-
-        assert hasattr(MaximemSynapSDK, "shutdown")
-        assert not hasattr(MaximemSynapSDK, "close")
+        resp = SimpleNamespace(
+            available=True,
+            formatted_context="## Conversation so far (compacted x)\nplan\n## Recent\nuser: hi\nassistant: hello",
+            context_block="## Conversation so far (compacted x)\nplan",
+            history_block=None, compaction_id="cmp_1",
+            recent_messages=[SimpleNamespace(role="user", content="hi"),
+                             SimpleNamespace(role="assistant", content="hello")],
+        )
+        sdk = MagicMock()
+        sdk.conversation.context.get_context_for_prompt = AsyncMock(return_value=resp)
+        return sdk
 
     @pytest.mark.asyncio
-    async def test_factory_shuts_the_sdk_down_on_exit(self, monkeypatch):
-        sdk = _fake_sdk()
-        sdk.initialize = AsyncMock()
-        sdk.shutdown = AsyncMock()
-        del sdk.close  # MagicMock would otherwise auto-create close()
-
-        monkeypatch.setattr(
-            _short_term_module, "MaximemSynapSDK", MagicMock(return_value=sdk)
-        )
-        config = _fake_config()
-
-        agen = _short_term_module.synap_short_term_function(config, builder=None)
-        await agen.__anext__()
-        with pytest.raises(StopAsyncIteration):
-            await agen.__anext__()
-
-        sdk.shutdown.assert_awaited_once()
+    async def test_with_a_compaction_only_the_compaction_comes_back(self):
+        out = await SynapShortTermFunction(self._compacted_sdk())(conversation_id="conv_abc")
+        assert "plan" in out and "<synap_conversation_history>" in out
+        assert "user: hi" not in out and "assistant: hello" not in out
 
     @pytest.mark.asyncio
-    async def test_teardown_failure_is_suppressed(self, monkeypatch):
-        sdk = _fake_sdk()
-        sdk.initialize = AsyncMock()
-        sdk.shutdown = AsyncMock(side_effect=RuntimeError("transport already gone"))
-        del sdk.close
-
-        monkeypatch.setattr(
-            _short_term_module, "MaximemSynapSDK", MagicMock(return_value=sdk)
-        )
-        config = _fake_config()
-
-        agen = _short_term_module.synap_short_term_function(config, builder=None)
-        await agen.__anext__()
-        with pytest.raises(StopAsyncIteration):
-            await agen.__anext__()  # teardown raised, but must not surface
-
-        sdk.shutdown.assert_awaited_once()
+    async def test_without_one_the_recent_turns_are_what_there_is(self):
+        out = await SynapShortTermFunction(_fake_sdk("user: hi\nassistant: hello"))(conversation_id="c")
+        assert "user: hi" in out

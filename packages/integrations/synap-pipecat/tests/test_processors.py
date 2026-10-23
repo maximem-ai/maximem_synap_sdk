@@ -12,6 +12,7 @@ Error-handling contracts (from processors.py docstring):
 from __future__ import annotations
 
 import logging
+import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -28,7 +29,7 @@ from pipecat.frames.frames import (
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection
 
-from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common import SynapIntegrationError, set_auto_listen
 from synap_pipecat.processors import (
     _SYSTEM_MEMORY_PREAMBLE,
     SynapMemoryProcessor,
@@ -41,12 +42,26 @@ from synap_pipecat.processors import (
 # ---------------------------------------------------------------------------
 
 
+def _assert_sdk_valid_uuid(value):
+    """The default id must pass the SDK's own validator (UUID-only)."""
+    try:
+        from maximem_synap.utils.validators import validate_conversation_id
+    except ImportError:  # older SDK without the validator
+        validate_conversation_id = None
+    if validate_conversation_id is not None:
+        validate_conversation_id(value)
+    assert str(uuid.UUID(value)) == value
+
+
 def _sdk(formatted: str | None = "User is on Pro plan.") -> MagicMock:
     """Build a minimal SDK mock with a successful sdk.fetch."""
     sdk = MagicMock()
     sdk.fetch = AsyncMock(return_value=MagicMock(formatted_context=formatted))
     sdk.conversation = MagicMock()
     sdk.conversation.record_message = AsyncMock(return_value={"message_id": "m1"})
+    # These tests are about the REST path; the stream is covered below.
+    sdk.instance.is_listening = False
+    set_auto_listen(sdk, False)
     return sdk
 
 
@@ -370,10 +385,10 @@ class TestSynapRecorderValidation:
         assert rec.customer_id == ""
 
     def test_conversation_id_auto_generated_when_absent(self):
-        """Auto-generated conversation_id starts with 'pipecat-'."""
+        """Auto-generated conversation_id is a UUID the SDK accepts."""
         sdk = _sdk()
         rec = SynapRecorder(sdk, user_id="u1")
-        assert rec.conversation_id.startswith("pipecat-")
+        _assert_sdk_valid_uuid(rec.conversation_id)
 
     def test_auto_generated_conversation_ids_are_unique(self):
         """Two recorders without explicit conversation_id get different IDs."""
@@ -539,7 +554,8 @@ class TestSynapRecorderHappyPaths:
 
     @pytest.mark.asyncio
     async def test_default_empty_customer_id_forwarded(self):
-        """Default customer_id='' is forwarded to record_message unchanged."""
+        """An empty customer_id is left out of the write: a B2C instance
+        rejects the field, and the server reads an absent one as customer-less."""
         sdk = _sdk()
         rec = SynapRecorder(sdk, user_id="u")  # No customer_id
         rec._user_buffer = "hi"
@@ -548,7 +564,7 @@ class TestSynapRecorderHappyPaths:
         await rec._flush()
 
         for call in sdk.conversation.record_message.call_args_list:
-            assert call.kwargs["customer_id"] == ""
+            assert "customer_id" not in call.kwargs
 
     @pytest.mark.asyncio
     async def test_uses_shared_mock_sdk_fixture(self, mock_sdk):
@@ -681,6 +697,8 @@ class TestSynapRecorderFailurePaths:
 def _streaming_sdk(is_listening: bool):
     sdk = MagicMock()
     sdk.instance.is_listening = is_listening
+    if not is_listening:
+        set_auto_listen(sdk, False)  # "no stream" means no stream, not "open one"
     sdk.instance.send_message = AsyncMock()
     sdk.instance.record_thinking = AsyncMock()
     sdk.instance.record_tool_call = AsyncMock()

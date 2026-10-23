@@ -3,7 +3,9 @@
 import asyncio
 import logging
 import os
+import ipaddress
 import random
+import socket
 import uuid
 from collections import deque, OrderedDict
 from pathlib import Path
@@ -27,6 +29,52 @@ from ..models.errors import (
 from ..auth.models import AuthContext
 from ..utils.correlation import generate_correlation_id
 from .outbox_journal import OutboxJournal
+
+_PROXY_ENV = ("grpc_proxy", "https_proxy", "http_proxy", "GRPC_PROXY", "HTTPS_PROXY", "HTTP_PROXY")
+
+
+async def _system_resolved_target(host: str, port: int, use_tls: bool) -> Tuple[str, List[Tuple[str, Any]]]:
+    """The channel target, resolved by the operating system rather than by gRPC.
+
+    gRPC resolves names with its own c-ares resolver, which on some networks
+    takes 2 to 5 s or times out where the system resolver answers at once
+    (measured against synap-cloud-prod: by name 0.12 s to TIMEOUT, by address
+    0.07 to 0.17 s every time). That alone failed a first ``listen()`` under the
+    5 s connect timeout. ``GRPC_DNS_RESOLVER=native`` fixes it only if set before
+    anything imports grpc, which an SDK cannot promise.
+
+    So the SDK resolves the name itself and dials the addresses, keeping the
+    real host as the TLS name and the ``:authority``. Left to gRPC when a proxy
+    is configured (its proxy support works from the name), when the caller chose
+    a resolver, for an address or localhost, and whenever resolution fails.
+    """
+    plain = f"{host}:{port}"
+    if os.environ.get("GRPC_DNS_RESOLVER") or any(os.environ.get(k) for k in _PROXY_ENV):
+        return plain, []
+    if host in ("localhost",) or host.startswith("unix:"):
+        return plain, []
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        return plain, []
+    except ValueError:
+        pass
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except Exception:  # noqa: BLE001 - gRPC can still try the name itself
+        return plain, []
+    v4 = list(dict.fromkeys(i[4][0] for i in infos if i[0] == socket.AF_INET))
+    v6 = list(dict.fromkeys(i[4][0] for i in infos if i[0] == socket.AF_INET6))
+    if v4:
+        target = "ipv4:" + ",".join(f"{ip}:{port}" for ip in v4)
+    elif v6:
+        target = "ipv6:" + ",".join(f"[{ip}]:{port}" for ip in v6)
+    else:
+        return plain, []
+    authority = host if (use_tls and port == 443) or (not use_tls and port == 80) else plain
+    options: List[Tuple[str, Any]] = [("grpc.default_authority", authority)]
+    if use_tls:
+        options.append(("grpc.ssl_target_name_override", host))
+    return target, options
 
 
 logger = logging.getLogger("synap.sdk.transport.grpc")
@@ -196,6 +244,7 @@ class GRPCTransport:
         on_message: Optional[Callable[[Dict[str, Any]], None]] = None,
         telemetry_callback: Optional[Callable[[Dict], None]] = None,
         storage_path: Optional[str] = None,
+        on_conversation_state: Optional[Callable[[str, int], None]] = None,
     ):
         self.instance_id = instance_id
         self.host = host or self.DEFAULT_HOST
@@ -207,6 +256,9 @@ class GRPCTransport:
         self.on_reconnect = on_reconnect
         self.on_disconnect = on_disconnect
         self.on_message = on_message
+        # (conversation_id, message_count), sent by the server after it has
+        # written a streamed message. See ConversationState in the proto.
+        self.on_conversation_state = on_conversation_state
         self.telemetry_callback = telemetry_callback
 
         # State
@@ -371,7 +423,10 @@ class GRPCTransport:
                 ("grpc.keepalive_permit_without_calls", True),
                 ("grpc.http2.min_time_between_pings_ms", 30000),
             ]
-            target = f"{self.host}:{self.port}"
+            target, resolved_options = await _system_resolved_target(
+                self.host, self.port, self.use_tls
+            )
+            channel_options.extend(resolved_options)
 
             if self.use_tls:
                 credentials = grpc.ssl_channel_credentials()
@@ -488,6 +543,17 @@ class GRPCTransport:
 
                 if payload_type == "signal":
                     self._handle_signal(message.signal)
+                    continue
+
+                if payload_type == "conversation_state":
+                    if self.on_conversation_state:
+                        state = message.conversation_state
+                        try:
+                            self.on_conversation_state(
+                                state.conversation_id, int(state.message_count)
+                            )
+                        except Exception as e:
+                            logger.warning(f"Conversation state handler error: {e}")
                     continue
 
                 if payload_type == "context_bundle":
@@ -1009,6 +1075,7 @@ class GRPCTransport:
         served_item_ids: Optional[List[str]] = None,
         scope: str = "",
         source_bundle_ids: Optional[List[str]] = None,
+        query_count: int = 0,
     ) -> None:
         """Emit a ContextUsedEvent over the Listen stream.
 
@@ -1034,6 +1101,7 @@ class GRPCTransport:
             timestamp_ms=now_ms,
             scope=scope or "",
             source_bundle_ids=list(source_bundle_ids or []),
+            query_count=max(0, int(query_count or 0)),
         )
         event = synap_service_pb2.StreamEvent(context_used=used)
         async with self._write_lock:
@@ -1084,9 +1152,26 @@ class GRPCTransport:
                     "entity_id": item.entity_id,
                     "created_at": item.created_at,
                     "event_date": item.event_date or None,
+                    "said_at": item.said_at or None,
                     "valid_until": item.valid_until or None,
                     "temporal_category": item.temporal_category or None,
                     "temporal_confidence": item.temporal_confidence,
+                    # The score the server ranked the item by. Presence matters:
+                    # a stub or a server that predates the field leaves it
+                    # unset, and that reads as "not ranked", never as 0.0.
+                    "rank_score": (
+                        item.rank_score
+                        if "rank_score" in type(item).DESCRIPTOR.fields_by_name
+                        and item.HasField("rank_score")
+                        else None
+                    ),
+                    # The questions the memory answers, which the anticipation
+                    # cache matches against; empty from a server that predates them.
+                    "questions": (
+                        list(item.questions)
+                        if "questions" in type(item).DESCRIPTOR.fields_by_name
+                        else []
+                    ),
                 }
                 for item in item_list.items
             ]
@@ -1107,6 +1192,12 @@ class GRPCTransport:
                 "compaction_id": cc.compaction_id or None,
                 "compacted_at": cc.compacted_at or None,
                 "conversation_id": cc.conversation_id or None,
+                # `getattr` because a stub built from an older proto has no
+                # such field. 0 means the server did not say.
+                "compacted_message_count": int(getattr(cc, "compacted_message_count", 0) or 0),
+                "total_message_count": int(getattr(cc, "total_message_count", 0) or 0),
+                # Compaction v3's framed block; "" from a server before v3.
+                "context_block": getattr(cc, "context_block", "") or None,
             }
 
         return {

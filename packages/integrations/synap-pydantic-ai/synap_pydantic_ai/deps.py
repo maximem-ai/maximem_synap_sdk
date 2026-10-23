@@ -46,7 +46,12 @@ class SynapDeps:
 def register_synap_tools(agent) -> None:
     """Register search_memory and store_memory tools on a Pydantic AI Agent.
 
-    Also registers a system prompt that auto-injects memory context.
+    Also registers a system prompt that auto-injects memory context, and
+    installs the history processor that puts Synap's compaction in place of the
+    earlier turns (see :func:`synap_history_processor`). The system prompt is
+    re-evaluated on every run, including runs given a ``message_history``,
+    which would otherwise keep the first run's text. It carries memories only:
+    the conversation itself is the processor's job, so it is not sent twice.
     The system_prompt path remains best-effort (empty string on failure)
     because a prompt-enrichment outage should not crash the agent, but
     failures are now logged at ``ERROR`` instead of ``DEBUG``.
@@ -54,6 +59,10 @@ def register_synap_tools(agent) -> None:
     :class:`SynapIntegrationError`.
     """
     from pydantic_ai import RunContext
+
+    from synap_pydantic_ai.history import install_synap_history
+
+    install_synap_history(agent)
 
     @agent.tool
     async def search_memory(ctx: RunContext[SynapDeps], query: str) -> str:
@@ -86,7 +95,7 @@ def register_synap_tools(agent) -> None:
             )
         return f"Memory stored (ingestion_id: {result.ingestion_id})"
 
-    @agent.system_prompt
+    @agent.system_prompt(dynamic=True)
     async def inject_memory_context(ctx: RunContext[SynapDeps]) -> str:
         """Auto-inject memory context. Best-effort; logs at ERROR on failure."""
         deps = ctx.deps
@@ -95,6 +104,7 @@ def register_synap_tools(agent) -> None:
                 conversation_id=deps.conversation_id,
                 user_id=deps.user_id,
                 customer_id=deps.customer_id or None,
+                include_conversation_context=False,
             )
             if response.formatted_context:
                 return f"Relevant user context:\n{response.formatted_context}"
