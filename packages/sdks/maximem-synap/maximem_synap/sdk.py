@@ -981,7 +981,10 @@ class MaximemSynapSDK:
         self.instance_id = instance_id or os.environ.get("SYNAP_INSTANCE_ID", "")
         validate_instance_id(self.instance_id)
         self._api_key = api_key
-        self._config = config or SDKConfig()
+        # A copy: the env fallbacks below fill fields in, and they used to fill
+        # them into the caller's object, so a config shared between clients
+        # changed after the first one was built.
+        self._config = config.model_copy(deep=True) if config is not None else SDKConfig()
         # Env-var fallbacks for transport endpoints. Priority:
         # explicit SDKConfig field > env var > hardcoded transport default.
         # Lets clients point a fresh SDK at staging/dev without instantiating
@@ -1093,7 +1096,7 @@ class MaximemSynapSDK:
         Args:
             storage_path: Override default cache storage path
             cache_backend: "sqlite" or None
-            session_timeout_minutes: Session timeout (5-1440)
+            session_timeout_minutes: Accepted (5-1440) for compatibility; has no effect
             timeouts: TimeoutConfig or dict
             retry_policy: RetryPolicy, dict, or None to disable
             log_level: "DEBUG", "INFO", "WARNING", "ERROR"

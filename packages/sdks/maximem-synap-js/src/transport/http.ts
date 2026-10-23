@@ -78,7 +78,11 @@ export function isGatedPath(method: string, path: string): boolean {
 }
 
 export interface TimeoutConfig {
-  /** Seconds. Mirrors TimeoutConfig in the Python SDK. */
+  /**
+   * Seconds. Same fields as TimeoutConfig in the Python SDK, but only `read`
+   * is applied here: it limits the whole request. `connect` and `write` are
+   * accepted so a config round-trips between the SDKs, and have no effect.
+   */
   connect: number;
   read: number;
   write: number;
@@ -306,7 +310,9 @@ export class HttpTransport {
     let attempt = 0;
     let last: AttemptOutcome | null = null;
 
-    while (attempt < this.retryPolicy.maxAttempts) {
+    // At least one attempt: maxAttempts 0 used to send nothing and throw
+    // "Request failed with no recorded error".
+    while (attempt < Math.max(1, this.retryPolicy.maxAttempts)) {
       attempt += 1;
       try {
         const result = await this.attempt<T>(name, options, correlationId);
