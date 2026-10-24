@@ -2,18 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CONTRACT, RECALL_PATTERNS, THRESHOLDS, isRecallQuery, STOP_WORDS, SUFFIXES } from '../behavior/contract.js';
+import { CONTRACT, THRESHOLDS, STOP_WORDS, SUFFIXES } from '../behavior/contract.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-// CONTRACT/ exists only in the monorepo; the public mirror (maximem_synap_sdk)
-// does not ship it. Skip there, but inside the monorepo a missing corpus fails
-// loudly instead of quietly switching the parity check off.
-// skipIf alone is not enough: vitest still runs a skipped suite's body to
-// collect it, so each guarded body also returns before reading the corpus.
-const inPublicMirror = !existsSync(path.resolve(here, '../../../CONTRACT'));
 const vendored = path.resolve(here, '../behavior/anticipation.json');
 const canonical = path.resolve(here, '../../../CONTRACT/behavior/anticipation.json');
-const corpusPath = path.resolve(here, '../../../CONTRACT/conformance/recall_queries.json');
 
 describe('behavior contract', () => {
   // Mirrors the established proto-parity pattern: the vendored copy must match
@@ -28,16 +21,11 @@ describe('behavior contract', () => {
     expect(THRESHOLDS.bm25).toBe(1.5);
     expect(THRESHOLDS.novelTerm).toBe(0.45);
     expect(THRESHOLDS.minCorpusForNovelGate).toBe(200);
-    expect(RECALL_PATTERNS.length).toBe(CONTRACT.recall_bypass.patterns.length);
-    expect(RECALL_PATTERNS.length).toBeGreaterThan(0);
+    // The recall-phrase bypass is gone (23 Oct): no list of phrases decides
+    // whether the cache may answer.
+    expect('recall_bypass' in CONTRACT).toBe(false);
     expect(STOP_WORDS.size).toBeGreaterThan(50);
     expect(SUFFIXES.length).toBeGreaterThan(0);
-  });
-
-  it('never compiles a global regex', () => {
-    // A `g` regex keeps lastIndex between calls, so a shared instance matches
-    // on one query then misses on the next. Intermittent and traffic-dependent.
-    for (const p of RECALL_PATTERNS) expect(p.global).toBe(false);
   });
 
   it('keeps suffixes ordered longest-first', () => {
@@ -46,30 +34,5 @@ describe('behavior contract', () => {
     for (let i = 1; i < SUFFIXES.length; i++) {
       expect(SUFFIXES[i]!.length).toBeLessThanOrEqual(SUFFIXES[i - 1]!.length);
     }
-  });
-
-  // The golden corpus is the actual cross-language guarantee: Python runs the
-  // identical file and must produce the identical verdicts.
-  describe.skipIf(inPublicMirror)('recall-bypass conformance corpus', () => {
-    if (inPublicMirror) return;
-    const cases = JSON.parse(readFileSync(corpusPath, 'utf8')).cases as {
-      query: string; expected: boolean; why: string;
-    }[];
-
-    it.each(cases)('$why -- "$query"', ({ query, expected }) => {
-      expect(isRecallQuery([query])).toBe(expected);
-    });
-
-    it('handles null, empty and mixed arrays like Python', () => {
-      expect(isRecallQuery(null)).toBe(false);
-      expect(isRecallQuery(undefined)).toBe(false);
-      expect(isRecallQuery([])).toBe(false);
-      expect(isRecallQuery([null, undefined, ''])).toBe(false);
-      expect(isRecallQuery(['book a ride', 'remind me of my address'])).toBe(true);
-    });
-
-    it('is stable across repeated calls with the same instance', () => {
-      for (let i = 0; i < 3; i++) expect(isRecallQuery(['what is my email'])).toBe(true);
-    });
   });
 });

@@ -283,6 +283,9 @@ class ConversationContextModel(BaseModel):
     compaction_id: Optional[str] = None
     compacted_at: Optional[str] = None
     conversation_id: Optional[str] = None
+    # Filled only by a conversation fetch without a query: the same text
+    # ``get_context_for_prompt`` returns, ready for a prompt.
+    formatted_context: Optional[str] = None
 
 
 # User Profile (C3) + Conversation Summary (C4) typed models
@@ -468,6 +471,63 @@ RESPONSE_SHAPES = ("by_type", "ranked")
 
 # The memory types, in the order the by-type response lists them.
 MEMORY_TYPES = ("facts", "preferences", "episodes", "emotions", "temporal_events")
+
+def has_query(search_query: Any) -> bool:
+    """Whether a fetch names something to search for.
+
+    None, an empty list and a list of blank strings are no query. Without one
+    the server embedded an empty string and ranked memories against it, so the
+    answer was close to arbitrary; a fetch with no query now answers with the
+    state of what it was asked about instead (see conversation_state_context
+    and profile_context).
+    """
+    if isinstance(search_query, str):
+        return bool(search_query.strip())
+    return any(isinstance(q, str) and q.strip() for q in (search_query or []))
+
+
+def conversation_state_context(prompt: Dict[str, Any], conversation_id: str) -> Dict[str, Any]:
+    """The answer to a conversation fetch without a query, in the fetch's wire shape.
+
+    ``prompt`` is what ``get_context_for_prompt`` returned (as a dict). The
+    summary is its framed compaction block, the recent turns are the turns
+    after it, and ``formatted_context`` is its ready-to-use text. No memories:
+    there was nothing to search for. Shared with the JS SDK through
+    CONTRACT/conformance/no_query_fetch.json.
+    """
+    turns = [
+        {"role": m.get("role"), "content": m.get("content"), "timestamp": m.get("timestamp")}
+        for m in (prompt.get("recent_messages") or [])
+        if isinstance(m, dict)
+    ]
+    return {
+        **{t: [] for t in MEMORY_TYPES},
+        "conversation_context": {
+            "conversation_id": conversation_id,
+            "summary": prompt.get("context_block") or None,
+            "recent_turns": turns,
+            "compaction_id": prompt.get("compaction_id") or None,
+            "formatted_context": prompt.get("formatted_context") or None,
+        },
+    }
+
+
+def profile_context(profile: Any) -> Optional[Dict[str, Any]]:
+    """The answer to a user fetch without a query, or None when there is no profile.
+
+    ``profile`` is the profile document, flat or wrapped in ``{"profile": ...}``.
+    A document with no attributes and no overview counts as no profile, so the
+    caller falls back to the fetch it always made.
+    """
+    if not isinstance(profile, dict):
+        return None
+    doc = profile
+    if "attributes" not in doc and isinstance(doc.get("profile"), dict):
+        doc = doc["profile"]
+    if not (doc.get("attributes") or doc.get("overview")):
+        return None
+    return {**{t: [] for t in MEMORY_TYPES}, "profile": doc}
+
 
 # The type of a chunk in a ranked response: a quote from a source document,
 # not an extracted memory. A by-type response files it under "facts".

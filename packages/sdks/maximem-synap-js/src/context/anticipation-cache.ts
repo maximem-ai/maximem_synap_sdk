@@ -11,8 +11,11 @@
  * the SDK's cache would mean two retrieval behaviors under one brand, which is
  * gotcha G-C. Every gate here exists because a specific eval failed without it:
  *
- *  - **Recall bypass** runs BEFORE scoring. The measured false hit scored 2.86
- *    at coverage 1.00, so no score-side gate could ever have caught it.
+ *  - **Matching by meaning** (CONTRACT semantic_match) decides a hit when a
+ *    model is loaded, with a close match raced against the server. It replaced
+ *    a hard-coded list of recall phrases that sent those questions to the
+ *    server: a measured false hit scored 2.86 at coverage 1.00, which no
+ *    word-score gate could catch.
  *  - **The novel-term gate** is suppressed below a 200-stem corpus, because at
  *    cold start ordinary English trips it on nearly every query.
  *  - **The per-query threshold** scales down for short queries, which otherwise
@@ -24,7 +27,7 @@
  */
 
 import { BM25, tokenize } from '../cache/bm25.js';
-import { CONTRACT, SEMANTIC_MATCH, THRESHOLDS, isRecallQuery } from '../behavior/contract.js';
+import { CONTRACT, SEMANTIC_MATCH, THRESHOLDS } from '../behavior/contract.js';
 import type { Encoder } from '../cache/history-search.js';
 import { getEnv, getEnvFlag, getEnvFloat } from '../util/env.js';
 
@@ -190,6 +193,31 @@ function itemQuestions(item: BundleItem): string[] {
   return Array.isArray(qs) ? qs.filter((q): q is string => typeof q === 'string' && q.trim() !== '').map((q) => q.trim()) : [];
 }
 
+/**
+ * The copy of a stored item a hit hands out: the server's date label in front
+ * of the content, and the item's `matched_queries` when a per-query share
+ * decided them. Python: `as_served`.
+ *
+ * The label is the one the server prints when it answers the fetch itself
+ * (`ContextItemProto.date_prefix`), so a memory reads "(said May 11, 2023) ..."
+ * whichever side answered. Not written into the stored item: the cache matches
+ * queries against that text, and the dates are not what a query is about. Left
+ * alone when the content already opens with it, and when there is none: a
+ * server that predates the field sends "". The `date_prefix` key itself is not
+ * handed out.
+ */
+export function asServed(item: BundleItem, matchedQueries: readonly string[] | null = null): BundleItem {
+  if (!('date_prefix' in item) && matchedQueries === null) return item;
+  // Served inside the content, not beside it: a caller seeing both could add it twice.
+  const { date_prefix: raw, ...rest } = item as BundleItem & { date_prefix?: unknown };
+  const label = typeof raw === 'string' ? raw : '';
+  const out: BundleItem = { ...rest };
+  if (matchedQueries !== null) out['matched_queries'] = [...matchedQueries];
+  const content = typeof out.content === 'string' ? out.content : '';
+  if (label !== '' && !content.startsWith(label)) out.content = label + content;
+  return out;
+}
+
 export const MATCHERS = ['bm25', 'semantic'] as const;
 export type Matcher = (typeof MATCHERS)[number];
 
@@ -252,6 +280,16 @@ export interface LookupParams {
   scopeRung?: string | null;
   maxItems?: number;
   /**
+   * Each query's share of the `maxItems` places, by the server's rule
+   * (`reservePerQuery`). Served items then carry `matched_queries`.
+   */
+  maxResultsPerQuery?: number | null;
+  /**
+   * For each of `queryVectors`, the query it is a form of (the query as asked,
+   * or its third-person form), from `lookupAsync`.
+   */
+  queryOwners?: readonly string[] | null;
+  /**
    * The search queries' vectors under the cache's encoder, from `lookupAsync`.
    * With them (and matcher "semantic") the lookup matches by meaning.
    */
@@ -260,7 +298,6 @@ export interface LookupParams {
 
 export type ExitReason =
   | 'empty'
-  | 'recall_bypass'
   | 'no_query_tokens'
   | 'novel_term_gate'
   | 'empty_corpus'
@@ -344,6 +381,75 @@ export interface AnticipationCacheOptions {
 
 const DEFAULT_TTL_SECONDS = 1800;
 const DEFAULT_MAX_BUNDLES = 50;
+
+/**
+ * The queries a per-query share is counted over, as the server counts them:
+ * distinct, in the order sent, empty strings dropped. Python: `distinct_queries`.
+ */
+export function distinctQueries(searchQuery: readonly (string | null | undefined)[] | null | undefined): string[] {
+  return [...new Set((searchQuery ?? []).filter((q): q is string => typeof q === 'string' && q !== ''))];
+}
+
+/** The queries to share places between, or null for one ranked cut. Python: `_shares`. */
+function sharesOf(searchQuery: readonly (string | null | undefined)[] | null | undefined, perQuery: number | null | undefined): string[] | null {
+  if (!perQuery || perQuery <= 0) return null;
+  const queries = distinctQueries(searchQuery);
+  return queries.length > 1 ? queries : null;
+}
+
+/**
+ * The server's per-query share (`_reserve_per_query`), on a cache hit.
+ *
+ * `ranked` is best first and `matched[i]` names the queries item `i` answers.
+ * The queries take turns in the order the caller sent them, each taking its
+ * best item not yet taken, until it has `perQuery` or nothing is left. `budget`
+ * (`max_results`) is never exceeded. An item several queries found counts
+ * against each and takes one place. Items no query accounts for fill what room
+ * is left, best first. The result keeps the order the items came in. Python:
+ * `reserve_per_query`.
+ */
+export function reservePerQuery<T>(
+  ranked: readonly T[],
+  budget: number,
+  perQuery: number,
+  queries: readonly string[],
+  matched: readonly (readonly string[])[],
+): { kept: T[]; matched: string[][] } {
+  if (budget <= 0) return { kept: [], matched: [] };
+  const byQuery = new Map(queries.map((q) => [q, ranked.map((_, i) => i).filter((i) => matched[i]!.includes(q))] as const));
+  const cursor = new Map<string, number>(queries.map((q) => [q, 0]));
+  const taken = new Map<string, number>(queries.map((q) => [q, 0]));
+  const picked: number[] = [];
+  const pickedSet = new Set<number>();
+
+  let progressed = true;
+  while (picked.length < budget && progressed) {
+    progressed = false;
+    for (const q of queries) {
+      if (picked.length >= budget) break;
+      if (taken.get(q)! >= perQuery) continue;
+      const candidates = byQuery.get(q)!;
+      let j = cursor.get(q)!;
+      while (j < candidates.length && pickedSet.has(candidates[j]!)) j++;
+      if (j >= candidates.length) { cursor.set(q, j); continue; }
+      const i = candidates[j]!;
+      cursor.set(q, j + 1);
+      picked.push(i);
+      pickedSet.add(i);
+      for (const owner of matched[i]!) if (taken.has(owner)) taken.set(owner, taken.get(owner)! + 1);
+      progressed = true;
+    }
+  }
+  for (let i = 0; i < ranked.length; i++) {
+    if (picked.length >= budget) break;
+    if (!pickedSet.has(i) && !matched[i]!.some((q) => queries.includes(q))) {
+      picked.push(i);
+      pickedSet.add(i);
+    }
+  }
+  const keep = [...picked].sort((a, b) => a - b);
+  return { kept: keep.map((i) => ranked[i]!), matched: keep.map((i) => [...matched[i]!]) };
+}
 
 export class AnticipationCache {
   private readonly ttlSeconds: number;
@@ -507,16 +613,18 @@ export class AnticipationCache {
       .filter((q): q is string => typeof q === 'string' && q.trim() !== '')
       .map((q) => q.trim())
       .slice(0, SEMANTIC_MATCH.max_queries);
-    const recall = getEnvFlag(CONTRACT.recall_bypass.env_flag) && isRecallQuery(params.searchQuery ?? null);
-    if (!this.semantic || encoder === null || queries.length === 0 || recall || this.items.length === 0) {
+    if (!this.semantic || encoder === null || queries.length === 0 || this.items.length === 0) {
       return this.lookup(params);
     }
     // The query as asked, and/or with the asker's pronouns in the third person
     // the memories are written in (canonical_query). Python: the same.
+    const asked = [...queries];
+    let owners = [...asked];
     if (this.canonical === 'canon' || this.canonical === 'both') {
       const canon = queries.map(canonicalQuery);
       const changed = canon.filter((c, i) => c !== queries[i]);
       queries = this.canonical === 'both' ? [...queries, ...changed] : canon;
+      if (this.canonical === 'both') owners = [...asked, ...asked.filter((q, i) => canon[i] !== q)];
     }
     let queryVectors: number[][] | null = null;
     try {
@@ -524,15 +632,16 @@ export class AnticipationCache {
     } catch {
       queryVectors = null;
     }
-    return this.lookup({ ...params, queryVectors });
+    return this.lookup({ ...params, queryVectors, queryOwners: owners });
   }
 
   lookup(params: LookupParams): LookupResult | null {
     const {
       searchQuery = null, entityId = null, customerId = null,
       clientId = null, conversationId = null, scopeRung = null, maxItems = 10,
-      queryVectors = null,
+      queryVectors = null, queryOwners = null, maxResultsPerQuery = null,
     } = params;
+    const shares = sharesOf(searchQuery, maxResultsPerQuery);
 
     this.evictExpired();
 
@@ -558,17 +667,12 @@ export class AnticipationCache {
       );
     }
 
-    // Recall bypass fires BEFORE scoring: a stale false-hit on a recall-shaped
-    // question makes the agent deny a fact the store holds, and the measured
-    // failure cleared every score-side gate.
-    if (getEnvFlag(CONTRACT.recall_bypass.env_flag) && isRecallQuery(searchQuery)) {
-      return this.miss(telemetry, 'recall_bypass');
-    }
-
     const queryTokens = (searchQuery ?? []).flatMap((q) => tokenize(q));
     telemetry.bm25QueryTokens = queryTokens;
     if (this.semantic && queryVectors !== null && queryVectors.length > 0) {
-      return this.semanticLookup(queryTokens, queryVectors, accepted, conversationId, scopeRung ?? null, maxItems, telemetry);
+      return this.semanticLookup(
+        queryTokens, queryVectors, accepted, conversationId, scopeRung ?? null, maxItems, telemetry,
+        shares, maxResultsPerQuery, queryOwners);
     }
     if (queryTokens.length === 0) {
       return this.miss(telemetry, 'no_query_tokens');
@@ -632,7 +736,15 @@ export class AnticipationCache {
     }
 
     picked.sort((a, b) => b.score - a.score);
-    const top = picked.slice(0, maxItems);
+    let top = picked.slice(0, maxItems);
+    let matched: string[][] | null = null;
+    if (shares !== null) {
+      const perQ = this.bm25PerQuery(shares);
+      const indexOf = new Map(this.items.map((it, i) => [it, i] as const));
+      const credit = picked.map(({ item }) =>
+        shares.filter((q) => perQ.get(q)!.scores[indexOf.get(item)!]! >= perQ.get(q)!.bar));
+      ({ kept: top, matched } = reservePerQuery(picked, maxItems, maxResultsPerQuery!, shares, credit));
+    }
 
     const pickedStems = new Set<string>();
     for (const { item } of top) for (const t of item.tokens) pickedStems.add(t);
@@ -650,7 +762,7 @@ export class AnticipationCache {
       return this.miss(telemetry, 'coverage_gate');
     }
 
-    return this.serve(top, telemetry, coverage, 'bm25_score');
+    return this.serve(top, telemetry, coverage, 'bm25_score', matched);
   }
 
   /**
@@ -667,6 +779,9 @@ export class AnticipationCache {
     scopeRung: string | null,
     maxItems: number,
     telemetry: LookupTelemetry,
+    shares: string[] | null = null,
+    maxResultsPerQuery: number | null = null,
+    queryOwners: readonly string[] | null = null,
   ): LookupResult | null {
     const model = this.encoder?.model ?? '';
     if (queryTokens.length > 0 && (this.bm25Dirty || this.bm25 === null) && this.items.length > 0) {
@@ -737,7 +852,33 @@ export class AnticipationCache {
       (c) => c.score >= this.serveMinCosine || (hitBundles.has(c.item.bundleId) && c.score >= this.bundleServeMinCosine),
     );
     served.sort((a, b) => b.score - a.score);
-    const top = [...picked, ...served].slice(0, maxItems);
+    const candidates = [...picked, ...served];
+    let top = candidates.slice(0, maxItems);
+    let matched: string[][] | null = null;
+    if (shares !== null) {
+      // Each query's own best cosine to the item, the asked form and its
+      // third-person form together; an item not embedded yet is credited by
+      // each query's own BM25 score, as the BM25 path credits it. Python: the same.
+      const owners = queryOwners ?? queryVectors.map((_, i) => telemetry.searchQuery[i] ?? '');
+      const bar = Math.min(this.minCosine, this.serveMinCosine, this.bundleServeMinCosine);
+      const perQ = this.bm25PerQuery(shares);
+      const indexOf = new Map(this.items.map((it, i) => [it, i] as const));
+      const credit = candidates.map(({ item }) => {
+        if (item.vec !== null && item.vecModel === model) {
+          const vecs = [item.vec, ...item.qvecs];
+          const best = new Map<string, number>();
+          queryVectors.forEach((qv, j) => {
+            const c = Math.max(...vecs.map((v) => cosine(qv, v)));
+            const owner = owners[j] ?? '';
+            best.set(owner, Math.max(best.get(owner) ?? -1, c));
+          });
+          return shares.filter((q) => (best.get(q.trim()) ?? -1) >= bar);
+        }
+        const idx = indexOf.get(item)!;
+        return shares.filter((q) => perQ.get(q)!.scores[idx]! >= perQ.get(q)!.bar);
+      });
+      ({ kept: top, matched } = reservePerQuery(candidates, maxItems, maxResultsPerQuery!, shares, credit));
+    }
 
     // A question for a kind of value (a number to call, an amount, a date) is
     // not answered by items on its topic that hold no such value.
@@ -747,11 +888,27 @@ export class AnticipationCache {
         return this.miss(telemetry, 'asked_kind_missing');
       }
     }
-    const hit = this.serve(top, telemetry, null, 'cosine');
+    const hit = this.serve(top, telemetry, null, 'cosine', matched);
     // Below the sure bar a hit is borderline: the caller may still ask the
     // server, with a short deadline, and serve this only if it is late.
     hit.band = picked[0]!.score >= this.sureMinCosine ? 'sure' : 'borderline';
     return hit;
+  }
+
+  /** Each query's own BM25 scores over every cached item, and its bar. Python: `_bm25_per_query`. */
+  private bm25PerQuery(queries: string[]): Map<string, { scores: number[]; bar: number }> {
+    if ((this.bm25Dirty || this.bm25 === null) && this.items.length > 0) {
+      this.bm25 = new BM25(this.items.map((i) => i.tokens));
+      this.bm25Dirty = false;
+    }
+    const out = new Map<string, { scores: number[]; bar: number }>();
+    for (const q of queries) {
+      const toks = tokenize(q);
+      const scores = toks.length > 0 && this.bm25 ? this.bm25.scores(toks) : this.items.map(() => 0);
+      const bar = Math.max(EFFECTIVE_FLOOR, Math.min(THRESHOLDS.bm25, QUERY_TOKEN_SCALE * Math.max(toks.length, 1)));
+      out.set(q, { scores, bar: toks.length > 0 ? bar : Infinity });
+    }
+    return out;
   }
 
   /** A hit: renew the leases of the bundles used, report, merge the items. */
@@ -760,13 +917,18 @@ export class AnticipationCache {
     telemetry: LookupTelemetry,
     coverage: number | null,
     scoreKey: 'bm25_score' | 'cosine',
+    matched: string[][] | null = null,
   ): LookupResult {
+    // With a per-query share each item carries `matched_queries`, set on a
+    // copy (`asServed`) with the date label: the stored item dicts are shared
+    // by every later lookup.
     const itemsByType: Record<string, BundleItem[]> = {};
     const bundleIds = new Set<string>();
-    for (const { item } of top) {
-      (itemsByType[item.itemType] ??= []).push(item.itemDict);
+    top.forEach(({ item }, i) => {
+      const dict = asServed(item.itemDict, matched === null ? null : matched[i]!);
+      (itemsByType[item.itemType] ??= []).push(dict);
       bundleIds.add(item.bundleId);
-    }
+    });
 
     // Honouring a TTL hint also means a hit stops renewing the lease, otherwise
     // a hinted bundle under steady traffic would outlive its hint.
