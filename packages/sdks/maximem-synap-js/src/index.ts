@@ -29,6 +29,9 @@ export {
   FORGET_MODES, type ForgetOptions, type ForgetResult, type ForgetCandidate,
   type ForgetMode, type ForgetStatus,
 } from './memories/interface.js';
+export {
+  DATA_SCOPES, type DataInterface, type DataScope, type DeleteDataOptions, type DeleteDataResult,
+} from './data/interface.js';
 export type {
   ConversationNamespace, RecordMessageOptions, IngestTranscriptOptions,
   CompactOptions, TranscriptTurn, CompactionCallback, WriteInvalidator,
