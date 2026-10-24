@@ -1,15 +1,15 @@
 # Maximem Synap: agent rules (single-file edition)
 
-**Self-sufficient**: copy this file alone into `AGENTS.md`, `.cursor/rules/synap.mdc` or `.clinerules`. The full skill (`npx skills add maximem-ai/maximem_synap_sdk --skill synap -y`) has more detail and wins.
+Copy this file alone into `AGENTS.md`, `.cursor/rules/synap.mdc` or `.clinerules`. The full skill (`npx skills add maximem-ai/maximem_synap_sdk --skill synap -y`) has more detail and wins.
 
 **Never guess. If anything is unclear, stop and ask the human. Never ask the human to paste a key into chat.**
 
 ## Start (ask which applies)
 
-- **One-time code** (`syn_ob_...` in the prompt): from step 1. **No code:** a fresh dashboard prompt, or `<cli> auth login` once, then step 2.
-- **Already has an instance and a runtime key, or reuses one from step 2b:** skip sign-in, use-case, create and wait (unless still being built); read the key from the environment or `.env` (none: step 10, with its setup-key limit). Read B2C or B2B from whoami (`equals_customer` is B2C, `strict` is B2B), then Step 0, identity, depth, integrate, verify.
+- **One-time code** (`syn_ob_...`): from step 1. **Public prompt** (`Source:` line): `reference/public-start.md`, ending in `<cli> auth login --purpose onboarding`. **Neither:** a fresh dashboard prompt or `<cli> auth login`, then step 2.
+- **Already has an instance and a runtime key, or reuses one from step 2b:** skip sign-in, use-case, create and wait (unless still being built); read the key from the environment or `.env` (none: step 10, with its setup-key limit). Read B2C or B2B from whoami, then Step 0, identity, depth, integrate, verify.
 
-`<cli>` means `maximem-synap` from PATH if `maximem-synap --version` is 0.3.3 or newer (the session commands do not exist before), else `npx @maximem/synap-cli@latest` (Node and Python 3.10+). If the prompt names an environment add `--env <name>` to every command. Put `--json` before the subcommand. If `SYNAP_API_KEY` is set in your shell run CLI commands with `env -u SYNAP_API_KEY`.
+`<cli>` means `maximem-synap` from PATH if `maximem-synap --version` is 0.3.3 or newer, else `npx @maximem/synap-cli@latest` (Node and Python 3.10+). If the prompt names an environment add `--env <name>` to every command. Put `--json` before the subcommand. If `SYNAP_API_KEY` is set in your shell run CLI commands with `env -u SYNAP_API_KEY`.
 
 ## The steps
 
@@ -48,4 +48,4 @@ An **instance** is the memory space Synap built for one agent; a key opens exact
 
 ## Where the detail is
 
-Raw files (`https://raw.githubusercontent.com/maximem-ai/maximem_synap_sdk/main/skills/synap/`): `reference/` `onboarding-details.md`, `onboarding-ask-rules.md`, `instances-explained.md`, `integration-checklist.md`, `final-report-template.md`, `sdk-setup.md`, `streaming.md`, `frameworks/<name>.md`; `scripts/` `verify_synap.py`, `check_integration_wiring.py`, `cleanup_test_data.py`.
+Raw files (`https://raw.githubusercontent.com/maximem-ai/maximem_synap_sdk/main/skills/synap/`): `reference/` `public-start.md`, `onboarding-details.md`, `onboarding-ask-rules.md`, `instances-explained.md`, `integration-checklist.md`, `final-report-template.md`, `sdk-setup.md`, `streaming.md`, `frameworks/<name>.md`; `scripts/` `verify_synap.py`, `check_integration_wiring.py`, `cleanup_test_data.py`.
