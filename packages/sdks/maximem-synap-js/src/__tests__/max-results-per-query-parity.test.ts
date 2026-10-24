@@ -82,12 +82,13 @@ describe('the unified fetch threads it to every branch', () => {
     expect(client).toMatch(/max_results_per_query\?: number;/);
   });
 
-  it('never serves a request that names a share from the prefetch cache', () => {
-    // A prefetched bundle was not assembled under a share, and its items do
-    // not say which query found them.
-    expect(src('client.ts')).toContain(
-      "if (o['max_results_per_query'] ?? o['maxResultsPerQuery']) return null;",
-    );
+  it('hands a share to the prefetch cache, which applies it on a hit', () => {
+    // It used to skip the cache. The hit now applies the share by the
+    // server's rule (reservePerQuery; cache-result-limits.test.ts replays it
+    // against Python), so a multi-query caller can be served locally.
+    const client = src('client.ts');
+    expect(client).not.toContain("if (o['max_results_per_query'] ?? o['maxResultsPerQuery']) return null;");
+    expect(client).toContain("maxResultsPerQuery: (o['max_results_per_query'] ?? o['maxResultsPerQuery'] ?? null)");
   });
 });
 

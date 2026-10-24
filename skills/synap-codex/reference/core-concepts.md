@@ -9,7 +9,7 @@ The minimum mental model needed to write correct Synap code. If you've already r
 ```
 Client (your org)              cli_<hex16>   one per Synap account
   └─ Instance (one agent)      inst_<hex16>  one per agent deployment, has its own MACA + storage
-       └─ memories             scoped to one of: user / customer / client / world
+       └─ memories             scoped to one of: user / customer / client
 ```
 
 The SDK talks to one **instance** at a time. Multiple agents = multiple instances = multiple SDK constructions (each with its own `instance_id`).
@@ -47,7 +47,6 @@ Memories live at one scope. Retrieval searches narrower-to-broader and merges wi
 | **User** | `user_id` alone on B2C; `user_id` + `customer_id` on B2B | only that user | personal prefs, individual history |
 | **Customer** | `customer_id` only, B2B instances only | all users in that org | company policies, shared org context |
 | **Client** | implicit (no ids) | all users across all customers in your app | product docs, feature announcements |
-| **World** | global | every Synap instance | rarely used by app developers; managed by Synap |
 
 **The single most common mistake:** ingesting at the wrong scope. On B2B, passing only `user_id` is an error, passing only `customer_id` makes the memory org-shared and visible to everyone in that org, and passing both makes it user-scoped (the narrower wins) with the customer association recorded for filtering. On B2C there is no such choice to make: `user_id` alone is the only user-scoped write, and adding a `customer_id` fails with HTTP 400 instead of widening anything.
 
