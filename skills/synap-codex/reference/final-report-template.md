@@ -18,7 +18,7 @@ Synap setup report
 - Sensitive data: never-store list <...>; redaction tested with <samples>; fields that pass through: <...>; instance policy <approved | NOT approved, open item>; consent screen discloses third-party storage: <yes | no, flagged>
 - Operational: ON/OFF log line <yes>; variables the deployed app needs: <list> (integration is silently OFF without them); SDK pinned to <version>; CLI used <version>; .env.example/README updated <yes/no>
 - Tests: <names and what they cover>; wiring check: <paste of check_integration_wiring.py output>
-- Test data: removed <N> memories for ids <test_user_... list>; could not remove: <the residue list the cleanup script printed | nothing>. Result line: <RESULT: CLEAN | INCOMPLETE>. Cleanup output pasted below the verify output.
+- Test data: deleted ids <test_user_... list>; could not remove: <the residue list the cleanup script printed | nothing>. Result line: <RESULT: CLEAN | INCOMPLETE>. Cleanup output pasted below the verify output.
 - Files created (left untracked): <every new file>. Files changed (left uncommitted): <every modified file, including .gitignore if the CLI added .env to it>. Skill files added (.agents/, .claude/, skills-lock.json): commit or ignore? Your call.
 - Skipped, and why: <...>
 - Decisions waiting on you: <...>

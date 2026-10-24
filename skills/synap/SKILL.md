@@ -15,7 +15,9 @@ allowed-tools: Read, Write, Edit, Bash
 
 # Maximem Synap — Agent Memory Skill
 
-Synap is a managed memory layer for AI agents: facts, preferences, episodes and entities remembered across sessions, users and tenants, with no vector DB, extraction pipeline or ranker to run. This skill helps you decide whether Synap fits and wire it into the user's agent framework (`reference/frameworks/`). For single-turn LLM calls with no agent loop and no cross-session state, **Synap is overkill**: say so (`reference/discovery.md`).
+Synap is a managed memory layer for AI agents: facts, preferences, episodes and entities remembered across sessions, users and tenants, with no vector DB, extraction pipeline or ranker to run. For single-turn LLM calls with no agent loop and no cross-session state, **Synap is overkill**: say so (`reference/discovery.md`).
+
+**Public prompt** (a `Source:` line, no code): follow `reference/public-start.md` first; on yes it runs `<cli> auth login --purpose onboarding`, then step 2.
 
 ## Procedure: onboarding a project end to end
 
@@ -53,4 +55,4 @@ Hard rules: the human never has to return to the dashboard; never guess; `not st
 
 ## Docs map and limits
 
-Full docs list (CLI, production, errors, several instances): `reference/docs-map.md` (`docs.maximem.ai`, `.md` for clean text); other references: the README in `reference/`. The docs-reading rules in Step 0 and the checkpoint are NOT optional. Not covered: deciding B2C vs B2B, compliance or what to store (only the human decides); configuring MACA by hand (generated from the approved use-case, /concepts/memory-architecture); migrating from another vendor (/migrations/overview). `https://docs.maximem.ai` is the source of truth: if this skill conflicts with it, the docs win (index: /llms.txt).
+Full docs list (CLI, production, errors, several instances): `reference/docs-map.md` (`docs.maximem.ai`, `.md` for clean text). The docs-reading rules in Step 0 and the checkpoint are NOT optional. Not covered: deciding B2C vs B2B, compliance or what to store (only the human decides); configuring MACA by hand (generated from the approved use-case, /concepts/memory-architecture); migrating from another vendor (/migrations/overview). `https://docs.maximem.ai` is the source of truth: if this skill conflicts with it, the docs win.

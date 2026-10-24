@@ -63,7 +63,7 @@ skills/synap/
 │   └── multi-tenant-scoping.md # Scoping patterns + verification
 └── scripts/
     ├── verify_synap.py         # Real write-then-recall check — run as the final step
-    ├── cleanup_test_data.py    # Removes the test_user_* memories the agent created, before sign-out
+    ├── cleanup_test_data.py    # Deletes the test_user_* users the agent created (sdk.data.delete), before sign-out
     └── check_integration_wiring.py  # Does the project read as well as write? Dead read helpers?
 ```
 

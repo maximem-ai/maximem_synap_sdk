@@ -87,7 +87,7 @@ Full detail: `reference/streaming.md`.
 
 - [ ] PII / sensitive data flow understood — what's being ingested, who can read it via scope retrieval, retention policy.
 - [ ] User deletion path implemented — `sdk.memories.delete()` is irreversible; have a tested procedure.
-- [ ] If GDPR / right-to-be-forgotten matters, document how a user's memories are purged: enumerate via `sdk.user.context.fetch()` (or custom listing) and `delete()` each.
+- [ ] If GDPR / right-to-be-forgotten matters, document how a user's data is purged: `sdk.data.delete(scope="user", ...)` (maximem-synap 0.6.9+; `dry_run=True` first, then `confirm=<user_id>`; check `fully_removed`).
 
 ## Deployment
 
