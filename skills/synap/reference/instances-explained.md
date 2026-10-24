@@ -14,9 +14,10 @@ must not say" below).
 
 ## What an instance is
 
-An **instance** is one memory brain for one agent. It has its own private memory store, its own settings (built
-from the use-case file you uploaded), its own API keys and its own list of people. Memory in one instance is
-never visible from another. Its id looks like `inst_a1b2c3d4e5f67890`. An API key belongs to exactly one
+An **instance** is one memory brain for one agent. It has its own memory store, its own settings (built
+from the use-case file you uploaded), its own API keys and its own list of people. But unless an Instance
+Visibility policy is set, instances of the same workspace and customer can read each other's memories when they
+retrieve (/guides/instance-visibility decides; the policy is set in the dashboard, not by you). Its id looks like `inst_a1b2c3d4e5f67890`. An API key belongs to exactly one
 instance, so the key you use decides which instance the app talks to (memory-scopes, "What is an Instance?").
 
 Say it like this: "An instance is the memory space Synap built for your agent. Your app's key opens exactly that
@@ -57,6 +58,7 @@ own instance each (agent-topologies, "Separate Instance per agent").
 | `onboard report` | `in_progress`, `done`, `failed`, `cleared` | Only for the dashboard checklist; do not repeat these words to the human. |
 | HTTP 409 | `instance_not_ready` | The memory design is still being built, so memory calls are refused for now. Your app will see it too until the build ends. |
 | HTTP 409 | `instance_name_taken` | An instance with that name already exists in your workspace. Ask the human: use that one (only if it is for this agent) or pick another name. |
+| HTTP 409 | `instance_limit_reached` | The workspace (or this setup session) is at its instance limit. Stop, tell the human the limit and count, ask whether to reuse an existing instance or contact support. Never retry, delete instances to make room, or work around it. 429 `instance_create_rate_limited` is the same: stop and ask. |
 | HTTP 409 | `instance_build_failed` | The build gave up; I will start it again. |
 | a rebuild | `rebuild` | Run the build again from the same approved file. Allowed at most 3 times in 24 hours. |
 | `maca`, MACA | memory architecture | The memory design Synap generates from your use-case file: what to remember, how to store and find it. |

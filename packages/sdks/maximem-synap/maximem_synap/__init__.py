@@ -58,6 +58,7 @@ from .models.errors import (
     TransientError,
 )
 from .scoping import CustomerIdNotAcceptedError
+from .data import DeleteDataResult
 from .memories.models import (
     BatchCreateRequest,
     BatchCreateResponse,
@@ -163,5 +164,6 @@ __all__ = [
     "ForgetStatus",
     "ForgetCandidate",
     "ForgetResponse",
+    "DeleteDataResult",
     "UpdateMemoryRequest",
 ]

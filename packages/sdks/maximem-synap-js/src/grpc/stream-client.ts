@@ -55,6 +55,14 @@ const SEND_QUEUE_MAX_DEPTH = 100;
 // half-close. Matches Python's CLOSE_GRACE.
 const CLOSE_GRACE_MS = 2_000;
 const SEND_QUEUE_MAX_AGE_MS = 5 * 60 * 1_000;
+
+// Cache hits reported while the stream was down (context_used), sent on
+// reconnect. Their own queue: the server acknowledges conversation events,
+// never these. Kept longer than conversation events because a late report is
+// still a correct count and a correct charge (both idempotent on instance,
+// bundle and the hit's time). Python: GRPCTransport.HIT_QUEUE_*.
+const HIT_QUEUE_MAX_DEPTH = 500;
+const HIT_QUEUE_MAX_AGE_MS = 30 * 60 * 1_000;
 // How long disconnect() waits for the buffer to go out. Short: a shutdown path
 // that blocks is worse than a lost event.
 const CLOSE_FLUSH_TIMEOUT_MS = 2_000;
@@ -284,6 +292,8 @@ export class GrpcStreamClient {
   #shutdownRequested = false;
   // Events that could not be written because there was no stream.
   #sendQueue: Array<{ queuedAt: number; event: ConversationEventInput }> = [];
+  /** Cache-hit reports waiting for a stream. See HIT_QUEUE_*. */
+  #pendingHits: Array<{ queuedAt: number; event: Record<string, unknown> }> = [];
   // Events written to a live stream that the server has not acknowledged. The
   // queue above covers "the stream was down"; this covers the half that
   // actually loses sessions — the write succeeded, the stream broke before the
@@ -601,8 +611,45 @@ export class GrpcStreamClient {
     this.#write({ session_control: { ...input } });
   }
 
+  /**
+   * Report a fetch served from the anticipation cache. It is the only report
+   * of that fetch, so it is held while the stream is down and sent on
+   * reconnect, with the time the hit happened (the caller's `timestamp_ms`),
+   * never dropped. Python: `GRPCTransport.send_context_used`.
+   */
   sendContextUsed(event: Record<string, unknown>): void {
-    this.#write({ context_used: { ...event } });
+    const stamped = { ...event, timestamp_ms: event['timestamp_ms'] ?? Date.now() };
+    if (!this.isConnected || this.#call === null) {
+      this.#queueHit(stamped);
+      return;
+    }
+    this.#write({ context_used: stamped });
+  }
+
+  #queueHit(event: Record<string, unknown>): void {
+    const cutoff = Date.now() - HIT_QUEUE_MAX_AGE_MS;
+    while (this.#pendingHits.length > 0 && (this.#pendingHits[0]?.queuedAt ?? 0) < cutoff) {
+      this.#pendingHits.shift();
+    }
+    if (this.#pendingHits.length >= HIT_QUEUE_MAX_DEPTH) {
+      this.#pendingHits.shift();
+      console.warn(`[synap] cache-hit report queue full (max=${HIT_QUEUE_MAX_DEPTH}); dropping the oldest`);
+    }
+    this.#pendingHits.push({ queuedAt: Date.now(), event });
+  }
+
+  #flushPendingHits(): void {
+    const cutoff = Date.now() - HIT_QUEUE_MAX_AGE_MS;
+    const held = this.#pendingHits;
+    this.#pendingHits = [];
+    for (const h of held) {
+      if (h.queuedAt >= cutoff) this.#write({ context_used: h.event });
+    }
+  }
+
+  /** How many cache-hit reports are waiting for a stream. */
+  get pendingHitReports(): number {
+    return this.#pendingHits.length;
   }
 
   sendContextAssembled(event: Record<string, unknown>): void {
@@ -743,8 +790,9 @@ export class GrpcStreamClient {
     this.#reconnectAttempts = 0;
     this.#lastPongAt = Date.now();
     // Before anything else on the new stream: the turns that happened while
-    // there was not one.
+    // there was not one, then the cache hits.
     this.#replayBuffered();
+    this.#flushPendingHits();
   }
 
   #handleMessage(msg: Record<string, unknown>): void {

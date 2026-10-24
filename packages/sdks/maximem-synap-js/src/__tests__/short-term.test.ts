@@ -158,6 +158,10 @@ describe('overlay budgeting', () => {
 
 describe('read-your-writes, end to end', () => {
   /** Server answers every fetch with a conversation_context missing the new turn. */
+  // The search path: its server answer is the one modelled below. A fetch with
+  // no query answers with the conversation state instead (no-query-fetch.test.ts).
+  const SEARCH = ['travel plans'];
+
   function client(serverTurns: unknown[] = []) {
     return new SynapClient({
       apiKey: 'k',
@@ -185,7 +189,7 @@ describe('read-your-writes, end to end', () => {
     await c.conversation.record_message({
       conversation_id: UUID, user_id: 'u1', customer_id: 'c1', role: 'user', content: 'I fly from Berlin',
     });
-    const ctx = await c.conversation.context.fetch({ conversation_id: UUID });
+    const ctx = await c.conversation.context.fetch({ conversation_id: UUID, search_query: SEARCH });
     const turns = (ctx.conversation_context?.['recent_turns'] ?? []) as Array<{ content: string }>;
     // Without the overlay this is empty and the agent looks like it forgot.
     expect(turns.map((t) => t.content)).toEqual(['I fly from Berlin']);
@@ -197,7 +201,7 @@ describe('read-your-writes, end to end', () => {
     await c.conversation.record_message({
       conversation_id: UUID, user_id: 'u1', customer_id: 'c1', role: 'user', content: 'x',
     });
-    const ctx = await c.conversation.context.fetch({ conversation_id: UUID });
+    const ctx = await c.conversation.context.fetch({ conversation_id: UUID, search_query: SEARCH });
     expect(ctx.conversation_context?.['summary']).toBe('server summary');
     expect(ctx.conversation_context?.['compaction_id']).toBe('server-comp');
     await c.shutdown();
@@ -209,7 +213,7 @@ describe('read-your-writes, end to end', () => {
     await c.conversation.record_message({
       conversation_id: UUID, user_id: 'u1', customer_id: 'c1', role: 'user', content: 'local only',
     });
-    const ctx = await c.conversation.context.fetch({ conversation_id: UUID });
+    const ctx = await c.conversation.context.fetch({ conversation_id: UUID, search_query: SEARCH });
     const turns = (ctx.conversation_context?.['recent_turns'] ?? []) as Array<{ content: string }>;
     expect(turns.map((t) => t.content)).toEqual(['only what the server has']);
     await c.shutdown();
@@ -228,7 +232,7 @@ describe('read-your-writes, end to end', () => {
     await c.conversation.record_message({
       conversation_id: UUID, user_id: 'u1', customer_id: 'c1', role: 'user', content: 'never landed',
     }).catch(() => {});
-    const ctx = await c.conversation.context.fetch({ conversation_id: UUID });
+    const ctx = await c.conversation.context.fetch({ conversation_id: UUID, search_query: SEARCH });
     // Surfacing a message that does not exist server-side would be worse than
     // briefly missing one.
     expect(ctx.conversation_context).toBeUndefined();

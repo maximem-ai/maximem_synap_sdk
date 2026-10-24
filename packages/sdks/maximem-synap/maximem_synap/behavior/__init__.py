@@ -14,10 +14,9 @@ vendored copy matches the canonical one.
 from __future__ import annotations
 
 import json
-import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Pattern, Tuple
+from typing import Any, Dict, List, Tuple
 
 _CONTRACT_PATH = Path(__file__).with_name("anticipation.json")
 
@@ -26,30 +25,6 @@ _CONTRACT_PATH = Path(__file__).with_name("anticipation.json")
 def contract() -> Dict[str, Any]:
     """The parsed behavior contract. Cached; the file never changes at runtime."""
     return json.loads(_CONTRACT_PATH.read_text(encoding="utf-8"))
-
-
-_PY_FLAGS = {"i": re.I, "m": re.M, "s": re.S}
-
-
-def _compile(pattern: str, flags: str = "") -> Pattern[str]:
-    bits = 0
-    for ch in flags:
-        if ch not in _PY_FLAGS:
-            raise ValueError(
-                f"Unsupported regex flag {ch!r} in behavior contract. Flags must "
-                f"be valid in both Python and ECMAScript."
-            )
-        bits |= _PY_FLAGS[ch]
-    return re.compile(pattern, bits)
-
-
-@lru_cache(maxsize=1)
-def recall_query_patterns() -> Tuple[Pattern[str], ...]:
-    """Compiled recall-bypass patterns, in contract order."""
-    return tuple(
-        _compile(p["pattern"], p.get("flags", ""))
-        for p in contract()["recall_bypass"]["patterns"]
-    )
 
 
 @lru_cache(maxsize=1)
@@ -90,7 +65,6 @@ def suffixes() -> Tuple[str, ...]:
 
 __all__ = [
     "contract",
-    "recall_query_patterns",
     "bm25_params",
     "thresholds",
     "telemetry_limits",

@@ -35,7 +35,6 @@ import {
   BM25,
   tokenize,
   stem,
-  isRecallQuery,
   flattenContextItems,
   DEFAULT_DOCUMENT_TYPE,
   DEFAULT_INGEST_MODE,
@@ -478,8 +477,6 @@ await check('typed cache and BM25', async () => {
   const bm25 = new BM25([tokenize('refund policy'), tokenize('seat preference')]);
   const score: number = bm25.score(tokenize('refund'), 0);
   const stemmed: string = stem('running');
-  const recall: boolean = isRecallQuery(['what did I say earlier']);
-  assert(recall, 'should be recognised as a recall query');
   cache.clear();
   return `score=${score.toFixed(3)} stem=${stemmed} items=${hit.bundleIds.length}`;
 });

@@ -30,7 +30,7 @@ import {
   isSynapError,
   // Building blocks
   AnticipationCache, BM25, HttpTransport,
-  tokenize, stem, isRecallQuery, flattenContextItems, shouldRetry, isOutcomeUnknown,
+  tokenize, stem, flattenContextItems, shouldRetry, isOutcomeUnknown,
   resolvePath, ENDPOINTS, CONTRACT, THRESHOLDS, ANY_SCOPE,
   DOCUMENT_TYPES, INGEST_MODES, DEFAULT_DOCUMENT_TYPE, DEFAULT_INGEST_MODE,
   DEFAULT_BASE_URL, DEFAULT_TIMEOUTS, DEFAULT_RETRY_POLICY, SDK_VERSION,
@@ -363,16 +363,6 @@ await check('tokenize / stem', async () => {
   return `${tokens.length} tokens: ${tokens.slice(0, 5).join(', ')}`;
 });
 
-await check('isRecallQuery', async () => {
-  // Takes the search_query ARRAY, not a single string, matching the shape the
-  // retrieval path actually holds.
-  assert(isRecallQuery(['what did I tell you earlier']) === true, 'should be a recall query');
-  assert(isRecallQuery(['book me a flight to Berlin']) === false, 'should not be a recall query');
-  assert(isRecallQuery([]) === false, 'an empty array is not a recall query');
-  assert(isRecallQuery(null) === false, 'null is not a recall query');
-  return 'recall bypass detected on the query array';
-});
-
 await check('BM25', async () => {
   const bm25 = new BM25([
     tokenize('refund policy takes five days'),
@@ -388,14 +378,12 @@ await check('CONTRACT / THRESHOLDS', async () => {
   // values cannot drift between languages. Both SDKs read this same JSON.
   assert(typeof CONTRACT === 'object' && CONTRACT !== null, 'no contract');
   assert(typeof CONTRACT.version === 'number', 'contract has no version');
-  const patterns = CONTRACT.recall_bypass.patterns;
-  assert(Array.isArray(patterns) && patterns.length > 0, 'no recall patterns');
   assert(Array.isArray(CONTRACT.bm25.stop_words), 'no stop words');
   assert(Array.isArray(CONTRACT.bm25.suffixes), 'no stemmer suffixes');
   for (const key of ['bm25', 'novelTerm', 'minCorpusForNovelGate', 'effectiveFloor', 'queryTokenScale']) {
     assert(key in THRESHOLDS, `THRESHOLDS is missing ${key}`);
   }
-  return `v${CONTRACT.version} recall=${patterns.length} stopwords=${CONTRACT.bm25.stop_words.length} ` +
+  return `v${CONTRACT.version} stopwords=${CONTRACT.bm25.stop_words.length} ` +
     `suffixes=${CONTRACT.bm25.suffixes.length} thresholds=${Object.keys(THRESHOLDS).length}`;
 });
 

@@ -353,3 +353,34 @@ describe('connect() failure semantics', () => {
     await client.disconnect();
   });
 });
+
+describe('a cache hit reported while the stream is down', () => {
+  // A hit never reaches a fetch route, so the context_used report is the only
+  // count of it. Dropped, the hit rate undercounts and the hit goes unbilled.
+  // Python: GRPCTransport.send_context_used / _flush_pending_hits.
+  it('is held, then sent on connect with the time of the hit', async () => {
+    const server = await startServer();
+    const client = new GrpcStreamClient(CREDS, new AnticipationCache(), {
+      outboxPath: '', host: '127.0.0.1', port: server.port, useTls: false,
+    });
+    try {
+      client.sendContextUsed({ bundle_id: 'b-held', served_item_ids: ['i1'], timestamp_ms: 1_700_000_000_000 });
+      expect(client.pendingHitReports).toBe(1);
+
+      await client.connect();
+      await server.clientConnected;
+      const deadline = Date.now() + 3000;
+      while (!server.received.some((m) => m['context_used'])) {
+        if (Date.now() > deadline) throw new Error('the held report never arrived');
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      const used = server.received.find((m) => m['context_used'])!['context_used'] as Record<string, unknown>;
+      expect(used['bundle_id']).toBe('b-held');
+      expect(Number(used['timestamp_ms'])).toBe(1_700_000_000_000);
+      expect(client.pendingHitReports).toBe(0);
+    } finally {
+      await client.disconnect();
+      await server.stop();
+    }
+  });
+});
