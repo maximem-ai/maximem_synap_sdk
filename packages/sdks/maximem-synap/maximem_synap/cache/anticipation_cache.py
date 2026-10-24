@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from ..behavior import recall_query_patterns, semantic_match_params, thresholds
+from ..behavior import semantic_match_params, thresholds
 from .bm25 import BM25, tokenize
 
 logger = logging.getLogger("synap.sdk.cache.anticipation")
@@ -55,47 +55,6 @@ def _honor_ttl_hint_enabled() -> bool:
     (global TTL only, LRU refresh on hit)."""
     return os.environ.get("SYNAP_SDK_CACHE_HONOR_TTL_HINT", "false").lower() in ("true", "1", "yes")
 
-def recall_bypass_enabled() -> bool:
-    """WS4 of the playground query-hygiene plan: when on, queries that are
-    explicitly asking the agent to RECALL something from memory ("remind me…",
-    "what do you have on file…", "where am I located again?") never serve from
-    the anticipation cache — they always fall through to a fresh fetch.
-
-    Rationale: for a recall-shaped question, a stale bundle false-hit is
-    catastrophic (the agent answers "I don't see that" while the store holds
-    the fact — the BZQR6J eval's cross-session failure mode), while the cost
-    of bypassing is only cold-fetch latency on a turn the user expects the
-    agent to go look something up. Stem coverage can't gate this (measured
-    false hits at coverage=1.00). Default OFF — lookup behavior is
-    byte-identical to today."""
-    return os.environ.get("SYNAP_SDK_CACHE_RECALL_BYPASS", "false").lower() in ("true", "1", "yes")
-
-
-# Conservative markers of a recall-shaped question. Matched case-insensitively
-# against each raw query string. Deliberately phrase-level (not single words)
-# so ordinary task queries ("book me a ride again") don't over-bypass; "again"
-# alone is NOT a marker. Over-matching costs one cloud fetch of latency;
-# under-matching risks a wrong "I don't have that" answer -- so ties break
-# toward including a pattern.
-#
-# The patterns themselves, and the dated eval-failure note behind each one,
-# live in the shared behavior contract and are loaded at import time. Adding
-# a pattern here instead of there changes Python's behavior without changing
-# JS's, which is precisely the drift this contract exists to prevent.
-_RECALL_QUERY_PATTERNS = recall_query_patterns()
-
-
-def is_recall_query(search_query: Optional[List[str]]) -> bool:
-    """True when any query string looks like an explicit memory-recall ask."""
-    for q in search_query or []:
-        if not q:
-            continue
-        for pat in _RECALL_QUERY_PATTERNS:
-            if pat.search(q):
-                return True
-    return False
-
-
 # The novel-term gate only fires once the corpus has enough vocabulary
 # for the ratio to be statistically meaningful. Below this size, BM25's
 # own threshold is the right filter — the novel-term ratio is dominated
@@ -109,6 +68,72 @@ def is_recall_query(search_query: Optional[List[str]]) -> bool:
 _MIN_CORPUS_FOR_NOVEL_GATE = thresholds()["min_corpus_for_novel_gate"]
 _EFFECTIVE_FLOOR = thresholds()["effective_floor"]
 _QUERY_TOKEN_SCALE = thresholds()["query_token_scale"]
+
+
+def distinct_queries(search_query: Optional[List[str]]) -> List[str]:
+    """The queries a per-query share is counted over, as the server counts them
+    (``retrieval_manager``: ``dict.fromkeys(q for q in queries if q)``)."""
+    return list(dict.fromkeys(q for q in (search_query or []) if q))
+
+
+def reserve_per_query(
+    ranked: List[Tuple[float, Any]],
+    budget: int,
+    per_query: int,
+    queries: List[str],
+    matched: List[List[str]],
+) -> Tuple[List[Tuple[float, Any]], List[List[str]]]:
+    """The server's per-query share (``_reserve_per_query``), on a cache hit.
+
+    ``ranked`` is best first and ``matched[i]`` names the queries item ``i``
+    answers. The queries take turns in the order the caller sent them, each
+    taking its best item not yet taken, until it has ``per_query`` or nothing
+    is left. ``budget`` (``max_results``) is never exceeded. An item several
+    queries found counts against each and takes one place. Items no query
+    accounts for fill what room is left, best first. The result keeps the
+    order the items came in. Returns the kept items and their ``matched``.
+    """
+    if budget <= 0:
+        return [], []
+    by_query = {q: [i for i in range(len(ranked)) if q in matched[i]] for q in queries}
+    cursor = {q: 0 for q in queries}
+    taken = {q: 0 for q in queries}
+    picked: List[int] = []
+    picked_set: Set[int] = set()
+
+    progressed = True
+    while len(picked) < budget and progressed:
+        progressed = False
+        for q in queries:
+            if len(picked) >= budget:
+                break
+            if taken[q] >= per_query:
+                continue
+            candidates = by_query[q]
+            j = cursor[q]
+            while j < len(candidates) and candidates[j] in picked_set:
+                j += 1
+            if j >= len(candidates):
+                cursor[q] = j
+                continue
+            i = candidates[j]
+            cursor[q] = j + 1
+            picked.append(i)
+            picked_set.add(i)
+            for owner in matched[i]:
+                if owner in taken:
+                    taken[owner] += 1
+            progressed = True
+
+    for i in range(len(ranked)):
+        if len(picked) >= budget:
+            break
+        if i not in picked_set and not any(q in queries for q in matched[i]):
+            picked.append(i)
+            picked_set.add(i)
+
+    keep = sorted(picked)
+    return [ranked[i] for i in keep], [matched[i] for i in keep]
 
 # Hook callable signatures (optional; default no-op).
 #
@@ -288,6 +313,33 @@ def canonical_query(query: str) -> str:
 def _item_questions(item_dict: Dict) -> List[str]:
     qs = item_dict.get("questions") if isinstance(item_dict, dict) else None
     return [q.strip() for q in qs if isinstance(q, str) and q.strip()] if isinstance(qs, list) else []
+
+
+def as_served(item_dict: Dict, matched_queries: Optional[List[str]] = None) -> Dict:
+    """The copy of a stored item a hit hands out: the server's date label in
+    front of the content, and the item's ``matched_queries`` when a per-query
+    share decided them.
+
+    The label is the one the server prints when it answers the fetch itself
+    (``ContextItemProto.date_prefix``), so a memory reads "(said May 11, 2023)
+    ..." whichever side answered. Not written into the stored item: the cache
+    matches queries against that text, and the dates are not what a query is
+    about. Left alone when the content already opens with it, and when there is
+    none: a server that predates the field sends "". The ``date_prefix`` key
+    itself is not handed out.
+    """
+    if not isinstance(item_dict, dict) or ("date_prefix" not in item_dict and matched_queries is None):
+        return item_dict
+    out = dict(item_dict)
+    # Served inside the content, not beside it: a caller seeing both could add it twice.
+    raw = out.pop("date_prefix", None)
+    label = raw if isinstance(raw, str) else ""
+    if matched_queries is not None:
+        out["matched_queries"] = list(matched_queries)
+    content = out.get("content") if isinstance(out.get("content"), str) else ""
+    if label and not content.startswith(label):
+        out["content"] = label + content
+    return out
 
 
 class AnticipationCache:
@@ -618,8 +670,15 @@ class AnticipationCache:
         customer_id: Optional[str] = None,
         client_id: Optional[str] = None,
         scope_rung: Optional[str] = None,
+        max_results_per_query: Optional[int] = None,
     ) -> Optional[Dict]:
         """Find cached items matching the query.
+
+        ``max_items`` is the caller's ``max_results``: a hit serves up to that
+        many, as the server would. ``max_results_per_query`` gives each of
+        several queries a share of those places, by the server's rule
+        (``reserve_per_query``); each served item then carries
+        ``matched_queries``, the queries it answers.
 
         Funnel scope (mirrors RetrievalManager's narrow-to-broad pattern):
 
@@ -681,47 +740,10 @@ class AnticipationCache:
         if not has_query:
             return self._freshness_lookup(entity_id, conversation_id, scope_rung=scope_rung)
 
-        # WS4 recall bypass: an explicit memory-recall question must never be
-        # answered from a pre-fetched bundle — a stale false-hit here makes the
-        # agent deny a fact the store holds. Fires BEFORE BM25 scoring: the
-        # measured failure mode hit at score 2.86 / coverage 1.00, so no
-        # score-side gate can catch it.
-        if recall_bypass_enabled() and is_recall_query(search_query):
-            logger.info(
-                "Cache BYPASS (recall-shaped query): query=%s",
-                [q[:80] for q in search_query if q][:3],
-            )
-            self._fire_lookup_hook({
-                "search_query": list(search_query or []),
-                "entity_id": entity_id,
-                "customer_id": customer_id,
-                "client_id": client_id,
-                "conversation_id": conversation_id,
-                "cache_state": self._snapshot_state(),
-                "scope_filter_request": {
-                    "entity_id": entity_id,
-                    "customer_id": customer_id,
-                    "client_id": client_id,
-                    "conversation_id": conversation_id,
-                    "scope_rung": scope_rung,
-                },
-                "scope_filter_accepted": sorted(
-                    self._build_accepted_scope(entity_id, customer_id, client_id)
-                ),
-                "novel_term_ratio": None,
-                "bm25_threshold": None,
-                "bm25_query_tokens": [],
-                "items_picked": [],
-                "items_rejected": [],
-                "hit": False,
-                "exit_reason": "recall_bypass",
-            })
-            return None
-
         return self._item_lookup(
             search_query, entity_id, conversation_id, max_items,
             customer_id=customer_id, client_id=client_id,
-            scope_rung=scope_rung,
+            scope_rung=scope_rung, per_query=max_results_per_query,
         )
 
     def _item_lookup(
@@ -735,6 +757,7 @@ class AnticipationCache:
         client_id: Optional[str] = None,
         scope_rung: Optional[str] = None,
         lexical_only: bool = False,
+        per_query: Optional[int] = None,
     ) -> Optional[Dict]:
         # Pre-build the telemetry skeleton — the hook fires on every exit
         # path. Most fields are filled below; we never reach `return None`
@@ -772,7 +795,8 @@ class AnticipationCache:
         if semantic:
             return self._semantic_lookup(
                 search_query, query_tokens, hook_payload, entity_id, conversation_id,
-                max_items, customer_id=customer_id, client_id=client_id, scope_rung=scope_rung)
+                max_items, customer_id=customer_id, client_id=client_id, scope_rung=scope_rung,
+                per_query=per_query)
         if not query_tokens:
             hook_payload["exit_reason"] = "no_query_tokens"
             self._fire_lookup_hook(hook_payload)
@@ -883,7 +907,19 @@ class AnticipationCache:
             return None
 
         scored_items.sort(key=lambda x: -x[0])
-        top_items = scored_items[:max_items]
+        shares = self._shares(search_query, per_query)
+        matched: Optional[List[List[str]]] = None
+        if shares:
+            index_of = {id(item): i for i, item in enumerate(self._items)}
+            per_q = self._bm25_per_query(shares)
+            matched = [
+                [q for q in shares if per_q[q][0][index_of[id(item)]] >= per_q[q][1]]
+                for _, item in scored_items
+            ]
+            top_items, matched = reserve_per_query(
+                scored_items, max_items, int(per_query), shares, matched)
+        else:
+            top_items = scored_items[:max_items]
 
         # Coverage: fraction of the query's stems present in the picked
         # items. A bundle can clear the BM25 threshold on one shared token
@@ -920,7 +956,8 @@ class AnticipationCache:
                 self._fire_lookup_hook(hook_payload)
                 return None
 
-        return self._serve(top_items, hook_payload, search_query, effective_threshold, coverage)
+        return self._serve(top_items, hook_payload, search_query, effective_threshold, coverage,
+                           matched=matched)
 
     def _serve(
         self,
@@ -930,12 +967,21 @@ class AnticipationCache:
         threshold: float,
         coverage: Optional[float],
         score_key: str = "bm25_score",
+        matched: Optional[List[List[str]]] = None,
     ) -> Dict:
         """A hit: renew the leases of the bundles used, report, and merge the
-        picked items into one response."""
+        picked items into one response.
+
+        ``matched``, given with a per-query share, is each item's
+        ``matched_queries``. Set on copies (``as_served``), with the date label:
+        the stored item dicts are shared by every later lookup."""
+        dicts = [
+            as_served(item.item_dict, None if matched is None else matched[i])
+            for i, (_, item) in enumerate(top_items)
+        ]
         items_by_type: Dict[str, list] = {}
-        for score, item in top_items:
-            items_by_type.setdefault(item.item_type, []).append(item.item_dict)
+        for (score, item), d in zip(top_items, dicts):
+            items_by_type.setdefault(item.item_type, []).append(d)
 
         bundle_ids_used = {item.bundle_id for _, item in top_items}
 
@@ -991,7 +1037,7 @@ class AnticipationCache:
         return {
             "bundle_id": f"anticipation_merged_{int(time.monotonic())}",
             "items_by_type": items_by_type,
-            "items": [item.item_dict for _, item in top_items],
+            "items": dicts,
             "cache_hit": True,
             "source": "anticipation_cache",
             "search_queries": base_entry.search_queries if base_entry else [],
@@ -1015,6 +1061,7 @@ class AnticipationCache:
         customer_id: Optional[str] = None,
         client_id: Optional[str] = None,
         scope_rung: Optional[str] = None,
+        per_query: Optional[int] = None,
     ) -> Optional[Dict]:
         """Match by meaning: a lookup is a hit when an item's cosine to a query
         reaches ``min_cosine``, and the hit also serves the items at
@@ -1044,7 +1091,8 @@ class AnticipationCache:
             logger.warning("anticipation_cache: query embedding failed; BM25 only", exc_info=True)
             return self._item_lookup(
                 search_query, entity_id, conversation_id, max_items,
-                customer_id=customer_id, client_id=client_id, scope_rung=scope_rung, lexical_only=True)
+                customer_id=customer_id, client_id=client_id, scope_rung=scope_rung, lexical_only=True,
+                per_query=per_query)
 
         if query_tokens and (self._bm25_dirty or self._bm25 is None) and self._items:
             self._bm25 = BM25([item.tokens for item in self._items])
@@ -1121,7 +1169,34 @@ class AnticipationCache:
                       if c >= self._serve_min_cosine
                       or (it.bundle_id in hit_bundles and c >= self._bundle_serve_min_cosine)]
         companions.sort(key=lambda x: -x[0])
-        top_items = (picked + companions)[:max_items]
+        candidates = picked + companions
+        shares = self._shares(search_query, per_query)
+        matched: Optional[List[List[str]]] = None
+        if shares:
+            # Each query's own best cosine to the item, the asked form and its
+            # third-person form together; an item not embedded yet is credited
+            # by each query's own BM25 score, as the BM25 path credits it.
+            owners = list(asked)
+            if self._canonical == "both":
+                owners += [q for q, c in zip(asked, [canonical_query(q) for q in asked]) if c != q]
+            bar = min(self._min_cosine, self._serve_min_cosine, self._bundle_serve_min_cosine)
+            index_of = {id(item): i for i, item in enumerate(self._items)}
+            per_q = self._bm25_per_query(shares)
+            matched = []
+            for _, item in candidates:
+                if item.vec is not None and item.vec_model == model:
+                    best: Dict[str, float] = {}
+                    for owner, qv in zip(owners, qvecs):
+                        c = max(_cosine(qv, v) for v in [item.vec, *item.qvecs])
+                        best[owner] = max(best.get(owner, -1.0), c)
+                    matched.append([q for q in shares if best.get(q.strip(), -1.0) >= bar])
+                else:
+                    idx = index_of[id(item)]
+                    matched.append([q for q in shares if per_q[q][0][idx] >= per_q[q][1]])
+            top_items, matched = reserve_per_query(
+                candidates, max_items, int(per_query), shares, matched)
+        else:
+            top_items = candidates[:max_items]
 
         # A question for a kind of value (a number to call, an amount, a date)
         # is not answered by items on its topic that hold no such value.
@@ -1132,11 +1207,34 @@ class AnticipationCache:
                 self._fire_lookup_hook(hook_payload)
                 return None
 
-        served = self._serve(top_items, hook_payload, search_query, self._min_cosine, None, score_key="cosine")
+        served = self._serve(top_items, hook_payload, search_query, self._min_cosine, None, score_key="cosine",
+                             matched=matched)
         # Below the sure bar a hit is borderline: the caller may still ask the
         # server, with a short deadline, and serve this only if it is late.
         served["_match_band"] = "sure" if picked[0][0] >= self._sure_min_cosine else "borderline"
         return served
+
+    @staticmethod
+    def _shares(search_query: Optional[List[str]], per_query: Optional[int]) -> Optional[List[str]]:
+        """The queries to share places between, or None for one ranked cut:
+        the server applies a share only to more than one distinct query."""
+        if not per_query or per_query <= 0:
+            return None
+        queries = distinct_queries(search_query)
+        return queries if len(queries) > 1 else None
+
+    def _bm25_per_query(self, queries: List[str]) -> Dict[str, Tuple[List[float], float]]:
+        """Each query's own BM25 scores over every cached item, and its bar."""
+        if (self._bm25_dirty or self._bm25 is None) and self._items:
+            self._bm25 = BM25([item.tokens for item in self._items])
+            self._bm25_dirty = False
+        out: Dict[str, Tuple[List[float], float]] = {}
+        for q in queries:
+            toks = tokenize(q)
+            scores = [float(x) for x in self._bm25.scores(toks)] if (toks and self._bm25) else [0.0] * len(self._items)
+            bar = max(_EFFECTIVE_FLOOR, min(self._bm25_threshold, _QUERY_TOKEN_SCALE * max(len(toks), 1)))
+            out[q] = (scores, bar if toks else math.inf)
+        return out
 
     def _build_accepted_scope(
         self,

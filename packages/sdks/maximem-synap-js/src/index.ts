@@ -29,6 +29,9 @@ export {
   FORGET_MODES, type ForgetOptions, type ForgetResult, type ForgetCandidate,
   type ForgetMode, type ForgetStatus,
 } from './memories/interface.js';
+export {
+  DATA_SCOPES, type DataInterface, type DataScope, type DeleteDataOptions, type DeleteDataResult,
+} from './data/interface.js';
 export type {
   ConversationNamespace, RecordMessageOptions, IngestTranscriptOptions,
   CompactOptions, TranscriptTurn, CompactionCallback, WriteInvalidator,
@@ -76,7 +79,7 @@ export type {
 } from './tool/as-tool.js';
 
 export { BM25, tokenize, stem } from './cache/bm25.js';
-export { isRecallQuery, THRESHOLDS, CONTRACT } from './behavior/contract.js';
+export { THRESHOLDS, CONTRACT } from './behavior/contract.js';
 
 export {
   HttpTransport, DEFAULT_BASE_URL, DEFAULT_TIMEOUTS, isOutcomeUnknown,

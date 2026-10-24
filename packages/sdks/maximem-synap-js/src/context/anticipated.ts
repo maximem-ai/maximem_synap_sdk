@@ -21,6 +21,8 @@ export interface AnticipationLookupParams {
   // an absent key from one set to undefined, and callers build these by
   // spreading optionals.
   searchQuery?: readonly string[] | null | undefined;
+  /** Each query's share of the places, applied on a hit as the server applies it. */
+  maxResultsPerQuery?: number | null | undefined;
   /** The user. Absent for customer- and client-scope fetches. */
   entityId?: string | null | undefined;
   customerId?: string | null | undefined;
@@ -46,17 +48,17 @@ export function scopeLookupParams(
   scope: Scope,
   params: AnticipationLookupParams,
 ): AnticipationLookupParams {
-  const { searchQuery, entityId, customerId, clientId, conversationId, scopeRung } = params;
+  const { searchQuery, entityId, customerId, clientId, conversationId, scopeRung, maxResultsPerQuery } = params;
   switch (scope) {
     case 'conversation':
-      return { searchQuery, entityId, customerId, clientId, conversationId, scopeRung };
+      return { searchQuery, entityId, customerId, clientId, conversationId, scopeRung, maxResultsPerQuery };
     case 'user':
       // No conversationId: a user-scope fetch is not bound to one thread.
-      return { searchQuery, entityId, customerId, clientId, scopeRung };
+      return { searchQuery, entityId, customerId, clientId, scopeRung, maxResultsPerQuery };
     case 'customer':
-      return { searchQuery, entityId: null, customerId, clientId, scopeRung };
+      return { searchQuery, entityId: null, customerId, clientId, scopeRung, maxResultsPerQuery };
     case 'client':
-      return { searchQuery, entityId: null, customerId: null, clientId, scopeRung };
+      return { searchQuery, entityId: null, customerId: null, clientId, scopeRung, maxResultsPerQuery };
   }
 }
 
@@ -117,6 +119,7 @@ export async function tryServeFromCache(
       conversationId: scoped.conversationId ?? null,
       scopeRung: scoped.scopeRung ?? null,
       maxItems,
+      maxResultsPerQuery: scoped.maxResultsPerQuery ?? null,
     });
     if (hit === null) return { response: null, hit: null };
     return { response: buildAnticipationResponse(hit), hit };

@@ -1,98 +1,6 @@
 {
   "$comment": "SOURCE OF TRUTH for anticipation-cache behavior, shared by the Python and JS/TS SDKs. Do not duplicate these values into either SDK's source. See ../README.md. Regexes are restricted to the intersection of Python 're' and ECMAScript; both SDKs have a parity test.",
   "version": 1,
-  "recall_bypass": {
-    "note": "WS4 of the playground query-hygiene plan. A recall-shaped question never serves from the anticipation cache. Asymmetric cost is why: a stale false-hit makes the agent answer 'I don't see that' while the store holds the fact (the BZQR6J cross-session failure), whereas bypassing costs only cold-fetch latency on a turn where the user already expects a lookup. Stem coverage cannot gate this \u2014 false hits were measured at coverage=1.00. Ties break toward INCLUDING a pattern.",
-    "env_flag": "SYNAP_SDK_CACHE_RECALL_BYPASS",
-    "default": false,
-    "patterns": [
-      {
-        "pattern": "\\bremind me\\b",
-        "flags": "i",
-        "note": "Original set (WS4, playground query-hygiene plan)."
-      },
-      {
-        "pattern": "\\bon file\\b",
-        "flags": "i",
-        "note": "Original set (WS4)."
-      },
-      {
-        "pattern": "\\b(your|my|the) records\\b",
-        "flags": "i",
-        "note": "Original set (WS4)."
-      },
-      {
-        "pattern": "\\bdo you (have|know|remember|recall|see)\\b",
-        "flags": "i",
-        "note": "Original set (WS4)."
-      },
-      {
-        "pattern": "\\bwhat (do|did) (i|you) (say|tell|mention|have)\\b",
-        "flags": "i",
-        "note": "Original set (WS4)."
-      },
-      {
-        "pattern": "\\bwhat('s| is) my\\b",
-        "flags": "i",
-        "note": "Original set (WS4)."
-      },
-      {
-        "pattern": "\\bwhere (am i|do i live)\\b",
-        "flags": "i",
-        "note": "Original set (WS4)."
-      },
-      {
-        "pattern": "\\bhow long have i\\b",
-        "flags": "i",
-        "note": "Original set (WS4)."
-      },
-      {
-        "pattern": "\\bwhich of my\\b",
-        "flags": "i",
-        "note": "Original set (WS4)."
-      },
-      {
-        "pattern": "\\bwhat .{0,40}\\b(again|earlier|last time|previously|yesterday)\\b",
-        "flags": "i",
-        "note": "Original set (WS4). 'again' alone is deliberately NOT a marker: 'book me a ride again' is a task query, not a recall query."
-      },
-      {
-        "pattern": "\\bwill you use to (contact|reach|notify)\\b",
-        "flags": "i",
-        "note": "Original set (WS4)."
-      },
-      {
-        "pattern": "\\b(confirm|verify|double.?check)\\b.{0,40}\\bmy\\b",
-        "flags": "i",
-        "note": "2026-07-16 eval register issue #11: 'can you confirm my email address?' served a stale bundle. Also catches 'confirm my booking' \u2014 an intentional over-match, costing one cloud fetch."
-      },
-      {
-        "pattern": "\\b(linked to|associated with|registered (to|on|with)) my\\b",
-        "flags": "i",
-        "note": "2026-07-16 eval register issue #11: 'what name is linked to my Uber account?' served a stale bundle."
-      },
-      {
-        "pattern": "\\b(best|preferred) way to (reach|contact|update|notify) me\\b",
-        "flags": "i",
-        "note": "2026-07-16 eval register issue #11: 'best way to contact me with updates' served a stale bundle."
-      },
-      {
-        "pattern": "\\bhow (do|will|can|should) you (reach|contact|notify) me\\b",
-        "flags": "i",
-        "note": "2026-07-16 eval register issue #11, sibling phrasing of the above."
-      },
-      {
-        "pattern": "\\bwhich .{0,40}\\b(are|will) you (going to )?(use|using)\\b",
-        "flags": "i",
-        "note": "2026-07-16 eval register issue #11: 'which email are you going to use?' served a stale bundle."
-      },
-      {
-        "pattern": "\\bon (my|the) account\\b",
-        "flags": "i",
-        "note": "2026-07-16 eval register issue #11."
-      }
-    ]
-  },
   "thresholds": {
     "bm25": {
       "value": 1.5,
@@ -217,14 +125,6 @@
   },
   "env_flags": {
     "$comment": "Read at CALL time, never at module load. Python does os.environ.get inside the function bodies; JS must do the same or late process.env mutation stops working and the flag looks broken. See gotcha G-S.",
-    "SYNAP_SDK_CACHE_RECALL_BYPASS": {
-      "default": false,
-      "truthy": [
-        "true",
-        "1",
-        "yes"
-      ]
-    },
     "SYNAP_SDK_CACHE_HONOR_TTL_HINT": {
       "default": false,
       "truthy": [

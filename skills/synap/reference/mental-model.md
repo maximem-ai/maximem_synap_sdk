@@ -65,8 +65,8 @@ before you finish.
 **Four scope levels — wider scopes are visible to narrower ones, never the reverse:**
 
 ```
-USER   →  CUSTOMER  →  CLIENT  →  WORLD
-private    org-wide      app-wide   global
+USER   →  CUSTOMER  →  CLIENT
+private    org-wide      app-wide
 ```
 
 Decide scoping at ingestion time by which `*_id` you pass. On B2C: `user_id` → user-scoped, nothing → client-scoped, and that is the whole set. On B2B: `user_id` + `customer_id` → user-scoped, `customer_id` only → org-shared, nothing → client-scoped.
