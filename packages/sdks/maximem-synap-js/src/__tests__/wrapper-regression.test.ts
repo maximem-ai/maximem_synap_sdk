@@ -55,8 +55,9 @@ describe('no regression against the 0.3.x wrapper', () => {
         return new Response('{"context":{}}');
       }) as unknown as typeof fetch,
     });
-    await c.user.context.fetch({ user_id: 'u1' });
-    await c.user.context.fetch({ userId: 'u1' });
+    // With a query: without one the fetch reads the profile first, a GET.
+    await c.user.context.fetch({ user_id: 'u1', search_query: ['q'] });
+    await c.user.context.fetch({ userId: 'u1', searchQuery: ['q'] });
     expect(calls[0]).toBe(calls[1]);
   });
 

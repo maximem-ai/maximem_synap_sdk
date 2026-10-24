@@ -154,7 +154,7 @@ export SYNAP_GRPC_USE_TLS="true"
 ⚠ **An API key belongs to exactly one instance (the instance is resolved from the key). If the project will have more
 than one Synap instance (several agents, the customer's own dev, test and live versions of the app, tenants with
 an instance each), or you are not sure, ask the human, and mint each key with the CLI flag `--env-suffix NAME`
-(CLI 0.3.2 and newer; if `api-keys create --help` does not list it, use `npx @maximem/synap-cli@latest`):
+(CLI 0.3.3 and newer; if `api-keys create --help` does not list it, use `npx @maximem/synap-cli@latest`):
 
 ```sh
 <cli> api-keys create -i <support_inst_id> --write-env --env-suffix SUPPORT_BOT

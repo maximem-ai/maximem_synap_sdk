@@ -231,6 +231,13 @@ class GRPCTransport:
     # either limit is exceeded.
     SEND_QUEUE_MAX_DEPTH = 100
     SEND_QUEUE_MAX_AGE = timedelta(minutes=5)
+    # Cache hits reported while the stream was down (context_used), sent on
+    # reconnect. Their own queue: the server acknowledges conversation events,
+    # never these, so they cannot ride the acked send queue above. Kept longer
+    # than conversation events because a late report is still a correct count
+    # and a correct charge (both are idempotent on instance, bundle, time).
+    HIT_QUEUE_MAX_DEPTH = 500
+    HIT_QUEUE_MAX_AGE = timedelta(minutes=30)
 
     # Instance still building (server signal `throttle` with metadata code
     # `instance_not_ready`). The held events are probed again after the server's
@@ -309,6 +316,8 @@ class GRPCTransport:
         # (timestamp_queued, payload_dict).
         self._send_queue: Deque[Tuple[datetime, Dict[str, Any]]] = deque()
         self._send_queue_lock = asyncio.Lock()
+        # Cache hits (context_used) waiting for a stream. See HIT_QUEUE_*.
+        self._pending_hits: Deque[Tuple[datetime, Dict[str, Any]]] = deque()
         # Written to a live stream, not yet acknowledged by the server.
         #
         # The send queue above covers "the stream was down when we tried". This
@@ -423,6 +432,7 @@ class GRPCTransport:
                 await self._drain_send_queue()
             except Exception as e:  # noqa: BLE001 — never fail listen()
                 logger.warning("Restored-event drain failed: %s", e)
+        await self._flush_pending_hits()
 
         logger.info(f"gRPC stream connected for instance {self.instance_id}")
 
@@ -759,6 +769,7 @@ class GRPCTransport:
                     await self._drain_send_queue()
                 except Exception as e:
                     logger.warning("Send-queue drain failed: %s", e)
+                await self._flush_pending_hits()
 
                 if self.on_reconnect:
                     self.on_reconnect(self._reconnect_attempts)
@@ -1166,36 +1177,85 @@ class GRPCTransport:
         scope: str = "",
         source_bundle_ids: Optional[List[str]] = None,
         query_count: int = 0,
+        timestamp_ms: Optional[int] = None,
     ) -> None:
-        """Emit a ContextUsedEvent over the Listen stream.
+        """Report a fetch served from the anticipation cache (ContextUsedEvent).
 
-        Fire-and-forget telemetry: the SDK calls this after fetch() is served
-        from the anticipation cache so the server can attribute outcomes back
-        to the originating prefetch and update per-pattern hit rates.
+        It is the only report of that fetch: a hit never reaches a fetch route.
+        The server counts it toward the hit rate, charges it, and feeds the
+        learning loop. So it is not dropped when the stream is down: it waits
+        in a bounded queue and goes out on reconnect, with the time the hit
+        happened (``timestamp_ms``, fixed here), so a late report counts at
+        the right time and is charged once. Never raises.
 
         Privacy: this method MUST NOT be called with raw user prompt content.
-        The proto only carries ids and scope.
+        The proto only carries ids, scope and a query count.
         """
-        if not self._stream:
-            raise ServiceUnavailableError("gRPC stream not connected")
+        payload = {
+            "bundle_id": bundle_id or "",
+            "conversation_id": conversation_id or "",
+            "user_id": user_id or "",
+            "customer_id": customer_id or "",
+            "served_item_ids": list(served_item_ids or []),
+            "timestamp_ms": int(timestamp_ms or datetime.now(timezone.utc).timestamp() * 1000),
+            "scope": scope or "",
+            "source_bundle_ids": list(source_bundle_ids or []),
+            "query_count": max(0, int(query_count or 0)),
+        }
+        if self._state != StreamState.CONNECTED or self._stream is None:
+            self._queue_hit(payload)
+            return
+        try:
+            await self._write_context_used(payload)
+        except Exception as e:  # noqa: BLE001 — telemetry never fails a fetch
+            logger.debug("context_used write failed, queued for reconnect: %s", e)
+            self._queue_hit(payload)
 
+    async def _write_context_used(self, payload: Dict[str, Any]) -> None:
         from .proto import synap_service_pb2
 
-        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-        used = synap_service_pb2.ContextUsedEvent(
-            bundle_id=bundle_id,
-            conversation_id=conversation_id or "",
-            user_id=user_id or "",
-            customer_id=customer_id or "",
-            served_item_ids=list(served_item_ids or []),
-            timestamp_ms=now_ms,
-            scope=scope or "",
-            source_bundle_ids=list(source_bundle_ids or []),
-            query_count=max(0, int(query_count or 0)),
-        )
+        used = synap_service_pb2.ContextUsedEvent(**payload)
         event = synap_service_pb2.StreamEvent(context_used=used)
         async with self._write_lock:
             await self._stream.write(event)
+
+    def _queue_hit(self, payload: Dict[str, Any]) -> None:
+        """Hold a cache-hit report for the next stream, dropping the oldest
+        past the depth or age limit."""
+        now = datetime.now(timezone.utc)
+        cutoff = now - self.HIT_QUEUE_MAX_AGE
+        while self._pending_hits and self._pending_hits[0][0] < cutoff:
+            self._pending_hits.popleft()
+        if len(self._pending_hits) >= self.HIT_QUEUE_MAX_DEPTH:
+            self._pending_hits.popleft()
+            logger.warning(
+                "Cache-hit report queue full (max=%d); dropping the oldest",
+                self.HIT_QUEUE_MAX_DEPTH,
+            )
+        self._pending_hits.append((now, payload))
+
+    async def _flush_pending_hits(self) -> int:
+        """Send the cache-hit reports held while the stream was down, oldest
+        first. Stops, keeping the rest, if the stream breaks again."""
+        sent = 0
+        cutoff = datetime.now(timezone.utc) - self.HIT_QUEUE_MAX_AGE
+        while self._pending_hits:
+            queued_at, payload = self._pending_hits[0]
+            if queued_at < cutoff:
+                self._pending_hits.popleft()
+                continue
+            if self._state != StreamState.CONNECTED or self._stream is None:
+                break
+            try:
+                await self._write_context_used(payload)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("context_used replay failed, kept for next reconnect: %s", e)
+                break
+            self._pending_hits.popleft()
+            sent += 1
+        if sent:
+            logger.info("Sent %d cache-hit report(s) held while the stream was down", sent)
+        return sent
 
     def _handle_signal(self, signal) -> None:
         """Handle a StreamSignal from the server.
@@ -1421,6 +1481,14 @@ class GRPCTransport:
                         list(item.questions)
                         if "questions" in type(item).DESCRIPTOR.fields_by_name
                         else []
+                    ),
+                    # The server's date label, put in front of the content
+                    # when the cache serves this item; "" from a server that
+                    # predates it.
+                    "date_prefix": (
+                        item.date_prefix
+                        if "date_prefix" in type(item).DESCRIPTOR.fields_by_name
+                        else ""
                     ),
                 }
                 for item in item_list.items

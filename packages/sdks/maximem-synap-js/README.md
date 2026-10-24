@@ -118,7 +118,7 @@ Importing the SDK on Edge is safe: gRPC lives behind the
 | `retryPolicy` | 3 attempts | |
 
 Environment flags are read at call time, so you can toggle them at runtime:
-`SYNAP_SDK_CACHE_RECALL_BYPASS`, `SYNAP_SDK_CACHE_HONOR_TTL_HINT`,
+`SYNAP_SDK_CACHE_HONOR_TTL_HINT`,
 `SYNAP_SDK_CACHE_INVALIDATE_ON_WRITE`, `SYNAP_SDK_CACHE_COVERAGE_MIN`,
 `SYNAP_SDK_CACHE_MAX_ENTRY_AGE`.
 
@@ -132,7 +132,7 @@ npm run typecheck
 npm run sync-behavior   # after changing synap/sdk/CONTRACT/**
 ```
 
-Retrieval behavior (recall-bypass patterns, BM25 thresholds, the stemmer) is
+Retrieval behavior (BM25 thresholds, semantic match settings, the stemmer) is
 **not defined in this package**. It lives in `synap/sdk/CONTRACT/`, shared
 byte-identically with the Python SDK, and both SDKs run the same conformance
 corpus. Never edit the vendored copy in `src/behavior/`.

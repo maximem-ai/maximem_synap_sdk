@@ -14,9 +14,10 @@ must not say" below).
 
 ## What an instance is
 
-An **instance** is one memory brain for one agent. It has its own private memory store, its own settings (built
-from the use-case file you uploaded), its own API keys and its own list of people. Memory in one instance is
-never visible from another. Its id looks like `inst_a1b2c3d4e5f67890`. An API key belongs to exactly one
+An **instance** is one memory brain for one agent. It has its own memory store, its own settings (built
+from the use-case file you uploaded), its own API keys and its own list of people. But unless an Instance
+Visibility policy is set, instances of the same workspace and customer can read each other's memories when they
+retrieve (/guides/instance-visibility decides; the policy is set in the dashboard, not by you). Its id looks like `inst_a1b2c3d4e5f67890`. An API key belongs to exactly one
 instance, so the key you use decides which instance the app talks to (memory-scopes, "What is an Instance?").
 
 Say it like this: "An instance is the memory space Synap built for your agent. Your app's key opens exactly that

@@ -362,6 +362,15 @@ message ContextItemProto {
   // compared with the statement that answers it. Empty when none were stored
   // or for an item that is not a memory.
   repeated string questions = 17;
+  // The date label the server prints in front of this memory when it serves it,
+  // "(said May 11, 2023, happened Mar 2023) " with its trailing space, written
+  // by the same code as the HTTP reply. A cache hit puts it in front of
+  // `content`, so a memory reads the same whether the server or the SDK cache
+  // answered. A field of its own, not part of `content`, because the SDK
+  // matches a fetch query against `content` and the dates are not what the
+  // query is about. Empty when the memory has no date, or from a server that
+  // predates this.
+  string date_prefix = 18;
 }
 
 // =============================================================================

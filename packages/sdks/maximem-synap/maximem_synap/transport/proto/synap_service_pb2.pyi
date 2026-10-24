@@ -300,7 +300,7 @@ class ContextItemList(_message.Message):
     def __init__(self, items: _Optional[_Iterable[_Union[ContextItemProto, _Mapping]]] = ...) -> None: ...
 
 class ContextItemProto(_message.Message):
-    __slots__ = ("item_id", "content", "context_type", "source", "similarity_score", "relevance_score", "confidence", "scope", "entity_id", "created_at", "event_date", "valid_until", "temporal_category", "temporal_confidence", "said_at", "rank_score", "questions")
+    __slots__ = ("item_id", "content", "context_type", "source", "similarity_score", "relevance_score", "confidence", "scope", "entity_id", "created_at", "event_date", "valid_until", "temporal_category", "temporal_confidence", "said_at", "rank_score", "questions", "date_prefix")
     ITEM_ID_FIELD_NUMBER: _ClassVar[int]
     CONTENT_FIELD_NUMBER: _ClassVar[int]
     CONTEXT_TYPE_FIELD_NUMBER: _ClassVar[int]
@@ -318,6 +318,7 @@ class ContextItemProto(_message.Message):
     SAID_AT_FIELD_NUMBER: _ClassVar[int]
     RANK_SCORE_FIELD_NUMBER: _ClassVar[int]
     QUESTIONS_FIELD_NUMBER: _ClassVar[int]
+    DATE_PREFIX_FIELD_NUMBER: _ClassVar[int]
     item_id: str
     content: str
     context_type: str
@@ -335,7 +336,8 @@ class ContextItemProto(_message.Message):
     said_at: str
     rank_score: float
     questions: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, item_id: _Optional[str] = ..., content: _Optional[str] = ..., context_type: _Optional[str] = ..., source: _Optional[str] = ..., similarity_score: _Optional[float] = ..., relevance_score: _Optional[float] = ..., confidence: _Optional[float] = ..., scope: _Optional[str] = ..., entity_id: _Optional[str] = ..., created_at: _Optional[str] = ..., event_date: _Optional[str] = ..., valid_until: _Optional[str] = ..., temporal_category: _Optional[str] = ..., temporal_confidence: _Optional[float] = ..., said_at: _Optional[str] = ..., rank_score: _Optional[float] = ..., questions: _Optional[_Iterable[str]] = ...) -> None: ...
+    date_prefix: str
+    def __init__(self, item_id: _Optional[str] = ..., content: _Optional[str] = ..., context_type: _Optional[str] = ..., source: _Optional[str] = ..., similarity_score: _Optional[float] = ..., relevance_score: _Optional[float] = ..., confidence: _Optional[float] = ..., scope: _Optional[str] = ..., entity_id: _Optional[str] = ..., created_at: _Optional[str] = ..., event_date: _Optional[str] = ..., valid_until: _Optional[str] = ..., temporal_category: _Optional[str] = ..., temporal_confidence: _Optional[float] = ..., said_at: _Optional[str] = ..., rank_score: _Optional[float] = ..., questions: _Optional[_Iterable[str]] = ..., date_prefix: _Optional[str] = ...) -> None: ...
 
 class TelemetryEvent(_message.Message):
     __slots__ = ("event_type", "instance_id", "client_id", "correlation_id", "timestamp_ms", "latency_ms", "status", "error_code", "scope", "cache_status", "attempt", "http_method", "http_path", "http_status_code", "metadata", "sdk_version", "batch_id")

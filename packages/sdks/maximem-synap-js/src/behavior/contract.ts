@@ -17,20 +17,8 @@
 
 import contractJson from './anticipation.json' with { type: 'json' };
 
-export interface RecallPattern {
-  pattern: string;
-  flags: string;
-  note: string;
-}
-
 export interface BehaviorContract {
   version: number;
-  recall_bypass: {
-    note: string;
-    env_flag: string;
-    default: boolean;
-    patterns: RecallPattern[];
-  };
   thresholds: {
     bm25: { value: number; note: string };
     novel_term: { value: number; note: string };
@@ -102,33 +90,6 @@ export interface BehaviorContract {
 
 export const CONTRACT = contractJson as unknown as BehaviorContract;
 
-/** ECMAScript flags we accept. Anything else is invalid in Python too. */
-const ALLOWED_FLAGS = new Set(['i', 'm', 's']);
-
-function compile(pattern: string, flags: string): RegExp {
-  for (const ch of flags) {
-    if (!ALLOWED_FLAGS.has(ch)) {
-      throw new Error(
-        `Unsupported regex flag '${ch}' in behavior contract. Flags must be ` +
-          `valid in both Python and ECMAScript.`,
-      );
-    }
-  }
-  return new RegExp(pattern, flags);
-}
-
-/**
- * Compiled recall-bypass patterns, in contract order.
- *
- * Deliberately NOT using the `g` flag: a global RegExp carries `lastIndex`
- * between calls, so a shared instance would match on one query and then miss
- * on the next. That failure is intermittent and traffic-dependent, which is
- * the worst kind to debug.
- */
-export const RECALL_PATTERNS: readonly RegExp[] = CONTRACT.recall_bypass.patterns.map((p) =>
-  compile(p.pattern, p.flags ?? ''),
-);
-
 export const THRESHOLDS = {
   bm25: CONTRACT.thresholds.bm25.value,
   novelTerm: CONTRACT.thresholds.novel_term.value,
@@ -149,14 +110,3 @@ export const ALIAS_TOKEN_SOURCE = CONTRACT.bm25.alias_token.pattern;
 export const HISTORY_SEARCH = CONTRACT.history_search;
 /** Matching fetch queries to prefetched items by meaning (context/anticipation-cache.ts). */
 export const SEMANTIC_MATCH = CONTRACT.semantic_match;
-
-/** True when any query string looks like an explicit memory-recall ask. */
-export function isRecallQuery(searchQuery: readonly (string | null | undefined)[] | null | undefined): boolean {
-  for (const q of searchQuery ?? []) {
-    if (!q) continue;
-    for (const pattern of RECALL_PATTERNS) {
-      if (pattern.test(q)) return true;
-    }
-  }
-  return false;
-}
