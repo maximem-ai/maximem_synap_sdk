@@ -30,6 +30,7 @@ import {
 import {
   createConversationNamespace, CompactionSubscribers, type ConversationNamespace,
 } from './conversation/interface.js';
+import { createDataInterface, type DataInterface } from './data/interface.js';
 import { createUserNamespace, type UserNamespace } from './user/interface.js';
 import { createCreditsNamespace, type CreditsNamespace } from './credits/interface.js';
 import { createCacheNamespace, type CacheNamespace } from './cache/interface.js';
@@ -55,6 +56,7 @@ import { validateConversationId, validateInstanceId } from './util/validators.js
 import {
   mergeScopeResults, formatForPrompt, type UnifiedContext,
 } from './context/unified.js';
+import { conversationStateContext, hasQuery, profileContext } from './context/no-query.js';
 import { buildTool, type AsToolOptions, type ToolDefinition } from './tool/as-tool.js';
 import { checkCustomerId } from './scoping.js';
 
@@ -275,6 +277,7 @@ export class SynapClient {
   readonly client!: ScopedContext;
   readonly conversation!: ConversationNamespace;
   readonly memories!: MemoriesInterface;
+  readonly data!: DataInterface;
   readonly credits!: CreditsNamespace;
   readonly cache!: CacheNamespace;
   readonly instance!: InstanceNamespace;
@@ -416,6 +419,32 @@ export class SynapClient {
       // Python's `_should_skip_server_st`: when this process already holds the
       // conversation's compaction and every turn after it, the server is told
       // not to assemble them again.
+      // A fetch with no query, as Python answers it inside the two scoped
+      // fetches: the conversation's state, or the user's profile when there
+      // is one. A profile read that fails falls back to the fetch as before.
+      withoutQuery: async (scope, options) => {
+        const o = options as Record<string, unknown>;
+        if (scope === 'conversation') {
+          const id = (o['conversation_id'] ?? o['conversationId']) as string;
+          const prompt = await this.conversation.context.get_context_for_prompt({ conversation_id: id });
+          return conversationStateContext(prompt as Json, id);
+        }
+        if (scope === 'user') {
+          try {
+            const customerId = (o['customer_id'] ?? o['customerId']) as string | undefined;
+            const profile = await this.user.get_profile({
+              user_id: (o['user_id'] ?? o['userId']) as string,
+              ...(customerId !== undefined ? { customer_id: customerId } : {}),
+            });
+            return profileContext(profile);
+          } catch {
+            // The caller's input was checked before this point, so any error
+            // here is the profile read's own: no profile, or a failure.
+            return null;
+          }
+        }
+        return null;
+      },
       skipServerShortTerm: (conversationId) => {
         if (!this.#isStAuthoritative()) return false;
         const entry = this.#shortTerm.get(conversationId);
@@ -508,6 +537,25 @@ export class SynapClient {
       for (const id of new Set([userId, customerId])) {
         if (id) this.#anticipationCache.dropEntity(id);
       }
+    });
+    // After a delete, drop this machine's copies of what the server removed.
+    this.data = createDataInterface(this.#transport, ({ scope, userId, customerId, conversationId }) => {
+      const cleared: string[] = [];
+      if (scope === 'conversation') {
+        if (conversationId) {
+          this.#shortTerm.invalidate(conversationId);
+          this.#turnStore.drop(conversationId);
+          cleared.push('short_term_context', 'turns');
+        }
+      } else {
+        for (const id of new Set(scope === 'user' ? [userId, customerId] : [customerId])) {
+          if (id) this.#anticipationCache.dropEntity(id);
+        }
+        // Only the anticipation cache is dropped here; the JS SDK keeps no other
+        // per-entity context cache, so nothing else is claimed.
+        cleared.push('anticipation_cache');
+      }
+      return cleared;
     });
     this.credits = createCreditsNamespace(this.#transport);
     this.cache = createCacheNamespace(this.#anticipationCache);
@@ -861,7 +909,19 @@ export class SynapClient {
     const present = (v: string | null | undefined): v is string =>
       v !== undefined && v !== null && v !== '';
 
-    if (present(conversationId) && wants('conversation')) {
+    // No query: the conversation scope answers with the conversation's state
+    // (get_context_for_prompt, below) instead of searching for nothing; the
+    // user scope answers with the profile when there is one. Summary mode is
+    // its own assembly and is unchanged. The state is added only when
+    // include_conversation_context asks for it: a framework that keeps its own
+    // message history turns it off (pydantic-ai, Mastra), and must not get
+    // those turns twice. Python: sdk.fetch.
+    const conversationState =
+      present(conversationId) && contextMode !== 'conversation-summary'
+      && !hasQuery(searchQuery) && wants('conversation');
+    const withConversationContext = includeConversationContext;
+
+    if (present(conversationId) && wants('conversation') && !conversationState) {
       labels.push('conversation');
       tasks.push(this.conversation.context.fetch({
         conversation_id: conversationId, ...shared,
@@ -894,7 +954,7 @@ export class SynapClient {
       } as FetchOptions));
     }
 
-    if (tasks.length === 0) {
+    if (tasks.length === 0 && !(conversationState && includeConversationContext)) {
       const empty = mergeScopeResults([]);
       return empty;
     }
@@ -919,11 +979,14 @@ export class SynapClient {
       overlayLocalRecentTurns(response, this.#shortTerm, conversationId, this.#stVerbatimOverlay);
     }
 
-    if (includeConversationContext && present(conversationId)) {
+    if (withConversationContext && present(conversationId)) {
       try {
         merged.conversation_context = (await this.conversation.context.get_context_for_prompt({
           conversation_id: conversationId,
         })) as Json;
+        if (conversationState && !merged.scopes_queried.includes('conversation')) {
+          merged.scopes_queried.unshift('conversation');
+        }
       } catch {
         // Non-fatal in Python too: the merged items are still worth returning.
       }
@@ -931,7 +994,7 @@ export class SynapClient {
 
     merged.formatted_context = formatForPrompt(merged, {
       includeScope: includeScopeLabels,
-      includeConversationContext,
+      includeConversationContext: withConversationContext,
     });
     return merged;
   }
