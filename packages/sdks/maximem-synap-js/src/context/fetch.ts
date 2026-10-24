@@ -10,6 +10,7 @@ import type { EndpointName } from '../transport/endpoints.js';
 import type { HttpTransport } from '../transport/http.js';
 import { InvalidInputError } from '../errors.js';
 import { RESPONSE_SHAPES, applyResponseShape } from './ranked.js';
+import { hasQuery } from './no-query.js';
 import type { FetchOptions, Json, RawContext } from './types.js';
 
 export type Scope = 'user' | 'customer' | 'client' | 'conversation';
@@ -175,6 +176,13 @@ export interface FetchHooks {
    * (`include_conversation_context: false`), as Python does on every scope.
    */
   skipServerShortTerm?: (conversationId: string) => boolean;
+  /**
+   * The answer to a fetch with no query, or null to make the fetch as before:
+   * the conversation's state for the conversation scope, the profile for the
+   * user scope. Python answers these inside the two scoped fetches; here the
+   * client holds what they need, so it answers through this hook.
+   */
+  withoutQuery?: (scope: Scope, options: FetchOptions) => Promise<RawContext | null>;
 }
 
 const VALID_CONTEXT_MODES = ['in-conversation', 'conversation-summary'];
@@ -252,6 +260,14 @@ export function retrievalOptionsOf(options: FetchOptions): { mode: string; preci
   return { mode, precisionLevel };
 }
 
+/** Keep local no-query answers subject to the wire request's query contract. */
+function validateSearchQuery(searchQuery: unknown): void {
+  if (searchQuery === undefined || searchQuery === null) return;
+  if (!Array.isArray(searchQuery) || searchQuery.some((query) => typeof query !== 'string')) {
+    throw new InvalidInputError('search_query must be an array of strings when provided');
+  }
+}
+
 /** Fetches and returns the RAW snake_case context, as the namespaced surface does. */
 export async function fetchContext(
   transport: HttpTransport,
@@ -283,11 +299,22 @@ export async function fetchContext(
   const responseShape = responseShapeOf(options);
   retrievalOptionsOf(options);
   const { contextMode } = scopeOptionsOf(scope, options);
+  const searchQuery = opt<unknown>(options, 'search_query', 'searchQuery');
+  validateSearchQuery(searchQuery);
   // Summary mode is a different read: a caller profile and past-conversation
   // summaries, assembled by the server. A prefetched bundle holds neither, and
   // with no search query the cache answered it with the newest bundle, so the
   // call-start read came back without a profile and no request was sent.
   const summaryMode = scope === 'user' && contextMode === 'conversation-summary';
+
+  // No query: there is nothing to search for, and the search the server ran
+  // instead embedded an empty string. Answered before the cache, as Python
+  // answers it before its cache, and without the user-summary splice, which
+  // Python's early return skips too.
+  if (!summaryMode && hooks.withoutQuery && !hasQuery(searchQuery)) {
+    const answer = await hooks.withoutQuery(scope, options);
+    if (answer !== null) return applyResponseShape(answer, responseShape);
+  }
 
   const finish = (response: RawContext): RawContext => {
     hooks.onResponse?.(scope, options, response);

@@ -71,37 +71,14 @@ describe('AnticipationCache', () => {
     });
   });
 
-  describe('recall bypass', () => {
-    it('is off by default, so behaviour is unchanged', () => {
+  describe('recall-shaped questions', () => {
+    it('are matched like any other query, whatever the old variable says', () => {
+      // The hard-coded recall-phrase bypass and SYNAP_SDK_CACHE_RECALL_BYPASS
+      // were removed (23 Oct). Anticipation matching decides.
+      process.env['SYNAP_SDK_CACHE_RECALL_BYPASS'] = 'true';
       const c = new AnticipationCache({ now });
       c.store(bundle());
       expect(c.lookup({ searchQuery: ['what is my email address'], entityId: 'user-1' })).not.toBeNull();
-    });
-
-    it('bypasses a recall-shaped question when enabled', () => {
-      process.env['SYNAP_SDK_CACHE_RECALL_BYPASS'] = 'true';
-      const c = new AnticipationCache({ now });
-      c.store(bundle());
-      // This scores well and would be a HIT. It is refused anyway, because a
-      // stale answer to a recall question is the expensive failure.
-      expect(c.lookup({ searchQuery: ['what is my email address'], entityId: 'user-1' })).toBeNull();
-    });
-
-    it('still serves ordinary task queries when enabled', () => {
-      process.env['SYNAP_SDK_CACHE_RECALL_BYPASS'] = 'true';
-      const c = new AnticipationCache({ now });
-      c.store(bundle());
-      expect(c.lookup({ searchQuery: ['book an aisle seat flights'], entityId: 'user-1' })).not.toBeNull();
-    });
-
-    it('reads the flag at call time, not at import time', () => {
-      const c = new AnticipationCache({ now });
-      c.store(bundle());
-      expect(c.lookup({ searchQuery: ['what is my email'], entityId: 'user-1' })).not.toBeNull();
-      process.env['SYNAP_SDK_CACHE_RECALL_BYPASS'] = '1';
-      expect(c.lookup({ searchQuery: ['what is my email'], entityId: 'user-1' })).toBeNull();
-      process.env['SYNAP_SDK_CACHE_RECALL_BYPASS'] = 'false';
-      expect(c.lookup({ searchQuery: ['what is my email'], entityId: 'user-1' })).not.toBeNull();
     });
   });
 
@@ -311,9 +288,6 @@ describe('AnticipationCache', () => {
       expect(seen.at(-1)!.exitReason).toBe('hit');
       expect(seen.at(-1)!.hit).toBe(true);
 
-      process.env['SYNAP_SDK_CACHE_RECALL_BYPASS'] = 'true';
-      c.lookup({ searchQuery: ['remind me of my email'], entityId: 'user-1' });
-      expect(seen.at(-1)!.exitReason).toBe('recall_bypass');
     });
 
     it('caps the rejected-items payload', () => {

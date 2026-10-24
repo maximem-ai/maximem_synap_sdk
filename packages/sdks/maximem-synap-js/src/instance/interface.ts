@@ -332,8 +332,9 @@ export function createInstanceNamespace(
       onConversationState = handle;
     },
     sendContextUsed(event) {
-      // Fire-and-forget: the stream drops it silently when disconnected, which
-      // is correct for telemetry that must never affect the caller's turn.
+      // Fire-and-forget. A reconnecting stream holds the report and sends it
+      // when it is back; with no stream at all (listen never started, or
+      // stopped) nothing was prefetched, so there is no hit to report.
       client?.sendContextUsed(event);
     },
     sendContextAssembled(event) {
