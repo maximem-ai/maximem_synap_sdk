@@ -30,6 +30,7 @@ import {
 import {
   createConversationNamespace, CompactionSubscribers, type ConversationNamespace,
 } from './conversation/interface.js';
+import { createDataInterface, type DataInterface } from './data/interface.js';
 import { createUserNamespace, type UserNamespace } from './user/interface.js';
 import { createCreditsNamespace, type CreditsNamespace } from './credits/interface.js';
 import { createCacheNamespace, type CacheNamespace } from './cache/interface.js';
@@ -275,6 +276,7 @@ export class SynapClient {
   readonly client!: ScopedContext;
   readonly conversation!: ConversationNamespace;
   readonly memories!: MemoriesInterface;
+  readonly data!: DataInterface;
   readonly credits!: CreditsNamespace;
   readonly cache!: CacheNamespace;
   readonly instance!: InstanceNamespace;
@@ -508,6 +510,25 @@ export class SynapClient {
       for (const id of new Set([userId, customerId])) {
         if (id) this.#anticipationCache.dropEntity(id);
       }
+    });
+    // After a delete, drop this machine's copies of what the server removed.
+    this.data = createDataInterface(this.#transport, ({ scope, userId, customerId, conversationId }) => {
+      const cleared: string[] = [];
+      if (scope === 'conversation') {
+        if (conversationId) {
+          this.#shortTerm.invalidate(conversationId);
+          this.#turnStore.drop(conversationId);
+          cleared.push('short_term_context', 'turns');
+        }
+      } else {
+        for (const id of new Set(scope === 'user' ? [userId, customerId] : [customerId])) {
+          if (id) this.#anticipationCache.dropEntity(id);
+        }
+        // Only the anticipation cache is dropped here; the JS SDK keeps no other
+        // per-entity context cache, so nothing else is claimed.
+        cleared.push('anticipation_cache');
+      }
+      return cleared;
     });
     this.credits = createCreditsNamespace(this.#transport);
     this.cache = createCacheNamespace(this.#anticipationCache);

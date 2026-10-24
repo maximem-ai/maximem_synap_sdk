@@ -50,6 +50,7 @@ from .utils.correlation import generate_correlation_id
 from .utils.validators import validate_conversation_id, validate_instance_id
 from ._version import __version__
 from .memories.interface import MemoriesInterface
+from .data.interface import DataInterface
 from .facade.instance import InstanceController
 from .facade.conversation import ConversationController
 
@@ -1069,6 +1070,7 @@ class MaximemSynapSDK:
         self.instance = InstanceInterface(self)
         self.cache = CacheInterface(self)
         self.memories = MemoriesInterface(self)
+        self.data = DataInterface(self)
 
         # Credits is attached lazily so circular imports don't bite
         # (credits.py imports MaximemSynapSDK via TYPE_CHECKING only).
@@ -2008,6 +2010,37 @@ class MaximemSynapSDK:
                         self._anticipation_cache.invalidate_entity(str(eid))
                     except Exception as e:  # noqa: BLE001
                         logger.warning("forget: could not clear the anticipation cache: %s", e)
+
+    def _evict_deleted(
+        self,
+        scope: str,
+        user_id: Optional[str],
+        customer_id: Optional[str],
+        conversation_id: Optional[str],
+    ) -> List[str]:
+        """Drop this machine's copies after `data.delete` removed data on the server.
+
+        Returns what was cleared. Never raises: a cache problem must not turn a
+        successful delete into an error.
+        """
+        cleared: List[str] = []
+        try:
+            if scope == "user":
+                self._evict_forgotten(user_id, customer_id)
+                cleared += ["context_cache", "anticipation_cache"]
+            elif scope == "customer":
+                if self._cache_manager is not None and customer_id:
+                    self._cache_manager.clear_customer(str(customer_id))
+                self._evict_forgotten(None, customer_id)
+                cleared += ["context_cache", "anticipation_cache"]
+            else:
+                if conversation_id:
+                    self._st_store.invalidate(str(conversation_id))
+                    self._turn_store.drop(str(conversation_id))
+                    cleared += ["short_term_context", "turns"]
+        except Exception as e:  # noqa: BLE001
+            logger.warning("data.delete: could not clear a local copy: %s", e)
+        return cleared
 
     async def _get_auth_context(self, correlation_id: Optional[str] = None):
         """Get auth context for requests."""
