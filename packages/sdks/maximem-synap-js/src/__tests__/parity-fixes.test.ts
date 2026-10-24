@@ -96,7 +96,7 @@ describe('identifier validation, matching Python', () => {
     await expect(c.conversation.ingest_transcript({
       conversation_id: 'free-form-id', user_id: 'u', transcript: 'hello',
     })).resolves.toBeDefined();
-    await expect(c.user.context.fetch({ user_id: 'u', conversation_id: 'free-form-id' }))
+    await expect(c.user.context.fetch({ user_id: 'u', conversation_id: 'free-form-id', search_query: ['q'] }))
       .resolves.toBeDefined();
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });

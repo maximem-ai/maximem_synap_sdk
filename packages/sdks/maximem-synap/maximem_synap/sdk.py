@@ -26,6 +26,9 @@ from .models.context import (
     ResponseMetadata,
     UnifiedContextResponse,
     UserProfileModel,
+    conversation_state_context,
+    has_query,
+    profile_context,
 )
 from .models.conversations import TranscriptIngestResponse, TranscriptTurn
 from .models.enums import CompactionLevel, ContextScope
@@ -50,6 +53,7 @@ from .utils.correlation import generate_correlation_id
 from .utils.validators import validate_conversation_id, validate_instance_id
 from ._version import __version__
 from .memories.interface import MemoriesInterface
+from .data.interface import DataInterface
 from .facade.instance import InstanceController
 from .facade.conversation import ConversationController
 
@@ -904,6 +908,19 @@ def _count_context_items(response: ContextResponse) -> int:
     )
 
 
+def _validate_search_query_input(search_query: Any) -> None:
+    """Reject malformed queries before a no-query response can bypass the API.
+
+    The server accepts an optional list of strings.  The no-query fast path is
+    deliberately local, so it must apply that same shape check itself rather
+    than treating a malformed value as an empty list.
+    """
+    if search_query is None:
+        return
+    if not isinstance(search_query, list) or any(not isinstance(query, str) for query in search_query):
+        raise InvalidInputError("search_query must be an array of strings when provided")
+
+
 class MaximemSynapSDK:
     """Synap SDK - Agentic Context Management.
 
@@ -1069,6 +1086,7 @@ class MaximemSynapSDK:
         self.instance = InstanceInterface(self)
         self.cache = CacheInterface(self)
         self.memories = MemoriesInterface(self)
+        self.data = DataInterface(self)
 
         # Credits is attached lazily so circular imports don't bite
         # (credits.py imports MaximemSynapSDK via TYPE_CHECKING only).
@@ -1753,7 +1771,13 @@ class MaximemSynapSDK:
             conversation_id: Conversation scope identifier (optional)
             user_id: User scope identifier (optional)
             customer_id: Customer scope identifier (optional, required for B2B)
-            search_query: Search queries applied to all scopes
+            search_query: Search queries applied to all scopes. Without one
+                there is nothing to search for: the conversation scope searches
+                nothing and its state comes through ``conversation_context``
+                (the same as ``get_context_for_prompt``) when
+                ``include_conversation_context`` is on, and the user scope
+                answers with the user's profile when there is one. Customer and client scopes,
+                and a user with no profile, run the fetch they always ran.
             max_results: Max results per scope (total may be higher)
             types: Memory types to include (default: all)
             mode: Retrieval mode - "fast" (default) or "accurate"
@@ -1807,13 +1831,29 @@ class MaximemSynapSDK:
             raise InvalidInputError(
                 f"Invalid response_shape '{response_shape}'. Must be one of: {RESPONSE_SHAPES}"
             )
+        _validate_search_query_input(search_query)
         start_time = datetime.now(timezone.utc)
 
         # Build parallel fetch tasks based on provided identifiers and scope filter
         tasks = []
         scope_labels = []
 
-        if conversation_id and (not scopes or "conversation" in scopes):
+        # No query: the conversation scope answers with the conversation's
+        # state (get_context_for_prompt, below) instead of searching for
+        # nothing; the user scope answers with the profile when there is one
+        # (UserContextInterface.fetch). Summary mode is its own assembly and
+        # is unchanged. The state is added only when include_conversation_context
+        # asks for it: a framework that keeps its own message history turns it
+        # off (pydantic-ai, Mastra), and must not get those turns twice.
+        conversation_state = (
+            bool(conversation_id)
+            and context_mode != "conversation-summary"
+            and not has_query(search_query)
+            and (not scopes or "conversation" in scopes)
+        )
+        with_conversation_context = include_conversation_context
+
+        if conversation_id and (not scopes or "conversation" in scopes) and not conversation_state:
             # Section 15: thread user_id into the conversation-scope sub-fetch
             # so the SDK's anticipation cache can apply its strict per-user
             # scope filter. Without this the conversation lookup falls back to
@@ -1887,7 +1927,7 @@ class MaximemSynapSDK:
                 ))
                 scope_labels.append("client")
 
-        if not tasks:
+        if not tasks and not (conversation_state and include_conversation_context):
             # No scopes to query — return empty response
             return UnifiedContextResponse(
                 scopes_queried=[],
@@ -1916,12 +1956,14 @@ class MaximemSynapSDK:
         # Merge and deduplicate across scopes
         merged = UnifiedContextResponse.merge(successful_results)
 
-        if include_conversation_context and conversation_id:
+        if with_conversation_context and conversation_id:
             try:
                 prompt_ctx = await self.conversation.context.get_context_for_prompt(
                     conversation_id=conversation_id,
                 )
                 merged.conversation_context = prompt_ctx
+                if conversation_state and "conversation" not in merged.scopes_queried:
+                    merged.scopes_queried.insert(0, "conversation")
             except Exception as e:
                 logger.debug(
                     "get_context_for_prompt failed in unified fetch (non-fatal): %s", e
@@ -1930,7 +1972,7 @@ class MaximemSynapSDK:
         # Generate formatted context string
         merged.formatted_context = merged.format_for_prompt(
             include_scope=include_scope_labels,
-            include_conversation_context=include_conversation_context,
+            include_conversation_context=with_conversation_context,
         )
 
         # Audit enrichment for the unified fetch — uses a freshly minted
@@ -2008,6 +2050,37 @@ class MaximemSynapSDK:
                         self._anticipation_cache.invalidate_entity(str(eid))
                     except Exception as e:  # noqa: BLE001
                         logger.warning("forget: could not clear the anticipation cache: %s", e)
+
+    def _evict_deleted(
+        self,
+        scope: str,
+        user_id: Optional[str],
+        customer_id: Optional[str],
+        conversation_id: Optional[str],
+    ) -> List[str]:
+        """Drop this machine's copies after `data.delete` removed data on the server.
+
+        Returns what was cleared. Never raises: a cache problem must not turn a
+        successful delete into an error.
+        """
+        cleared: List[str] = []
+        try:
+            if scope == "user":
+                self._evict_forgotten(user_id, customer_id)
+                cleared += ["context_cache", "anticipation_cache"]
+            elif scope == "customer":
+                if self._cache_manager is not None and customer_id:
+                    self._cache_manager.clear_customer(str(customer_id))
+                self._evict_forgotten(None, customer_id)
+                cleared += ["context_cache", "anticipation_cache"]
+            else:
+                if conversation_id:
+                    self._st_store.invalidate(str(conversation_id))
+                    self._turn_store.drop(str(conversation_id))
+                    cleared += ["short_term_context", "turns"]
+        except Exception as e:  # noqa: BLE001
+            logger.warning("data.delete: could not clear a local copy: %s", e)
+        return cleared
 
     async def _get_auth_context(self, correlation_id: Optional[str] = None):
         """Get auth context for requests."""
@@ -2641,7 +2714,11 @@ class ConversationContextInterface:
 
         Args:
             conversation_id: The conversation to fetch context for
-            search_query: Optional search queries
+            search_query: Optional search queries. Without one, the response
+                is the conversation's state instead of a search: its
+                ``conversation_context`` holds the summary, the turns after it
+                and ``formatted_context``, the same as ``get_context_for_prompt``,
+                and the memory lists are empty.
             max_results: Maximum results to return (default 10)
             types: Context types to include (default all)
             mode: Retrieval mode - "fast" (default) or "accurate"
@@ -2685,6 +2762,28 @@ class ConversationContextInterface:
             raise InvalidInputError(
                 f"Invalid response_shape '{response_shape}'. Must be one of: {RESPONSE_SHAPES}"
             )
+        _validate_search_query_input(search_query)
+
+        # No query: the conversation's state, the same answer
+        # get_context_for_prompt gives. There is nothing to search for, and the
+        # search the server ran instead embedded an empty string and ranked
+        # memories against it.
+        if not has_query(search_query):
+            prompt = await self.get_context_for_prompt(conversation_id=conversation_id)
+            state = ContextResponse.from_cloud_response(
+                conversation_state_context(prompt.model_dump(mode="json"), conversation_id),
+                ResponseMetadata(
+                    correlation_id=generate_correlation_id(self._sdk.instance_id),
+                    ttl_seconds=0,
+                    source="conversation_state",
+                    retrieved_at=datetime.now(timezone.utc),
+                ),
+                response_shape=response_shape,
+            )
+            # Read-your-writes, as on the search path below: a turn this
+            # process recorded and the server has not stored yet is not lost.
+            _overlay_local_recent_turns(self._sdk, state, conversation_id)
+            return state
 
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = datetime.now(timezone.utc)
@@ -3505,6 +3604,38 @@ class UserContextInterface:
     def __init__(self, sdk: MaximemSynapSDK):
         self._sdk = sdk
 
+    async def _profile_answer(
+        self, user_id: str, customer_id: Optional[str], response_shape: str,
+    ) -> Optional[ContextResponse]:
+        """A no-query user fetch answered with the profile, or None to fall back.
+
+        None when the user has no profile (404, or profiles are off in MACA and
+        none was ever written), when it is empty, or when the profile read
+        fails: the caller then makes the fetch it always made, so this can only
+        add an answer, never lose one.
+        """
+        # The caller's input was checked before this point, so any error here
+        # is the profile read's own: no profile, or a failure.
+        try:
+            profile = await self._sdk.user.get_profile(user_id=user_id, customer_id=customer_id)
+        except Exception as e:  # noqa: BLE001 — falls back to the search, as before
+            if not isinstance(e, ContextNotFoundError):
+                logger.debug("profile read for a no-query user fetch failed (falling back): %s", e)
+            return None
+        raw = profile_context(profile.raw)
+        if raw is None:
+            return None
+        return ContextResponse.from_cloud_response(
+            raw,
+            ResponseMetadata(
+                correlation_id=generate_correlation_id(self._sdk.instance_id),
+                ttl_seconds=0,
+                source="profile",
+                retrieved_at=datetime.now(timezone.utc),
+            ),
+            response_shape=response_shape,
+        )
+
     async def fetch(
         self,
         user_id: str,
@@ -3546,7 +3677,10 @@ class UserContextInterface:
         Args:
             user_id: The user to fetch context for
             conversation_id: Optional conversation for relevance
-            search_query: Optional search queries
+            search_query: Optional search queries. Without one (and outside
+                summary mode), the response is the user's profile in
+                ``.profile`` when one exists, with empty memory lists. With no
+                profile, the fetch runs as it always did.
             max_results: Maximum results to return
             types: Context types to include
             mode: Retrieval mode - "fast" (default) or "accurate"
@@ -3590,6 +3724,7 @@ class UserContextInterface:
             raise InvalidInputError(
                 f"Invalid response_shape '{response_shape}'. Must be one of: {RESPONSE_SHAPES}"
             )
+        _validate_search_query_input(search_query)
         valid_context_modes = ("in-conversation", "conversation-summary")
         if context_mode not in valid_context_modes:
             raise InvalidInputError(
@@ -3602,6 +3737,13 @@ class UserContextInterface:
             raise InvalidInputError("last_n_conversations must be between 0 and 20")
 
         summary_mode = context_mode == "conversation-summary"
+
+        # No query: the user's profile, when there is one. Otherwise the fetch
+        # this always made. Summary mode is its own assembly and is unchanged.
+        if not summary_mode and not has_query(search_query):
+            answer = await self._profile_answer(user_id, customer_id, response_shape)
+            if answer is not None:
+                return answer
 
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = datetime.now(timezone.utc)
