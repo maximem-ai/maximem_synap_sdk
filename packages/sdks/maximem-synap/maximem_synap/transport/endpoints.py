@@ -11,6 +11,7 @@ ENDPOINTS: Final[Dict[str, Dict[str, object]]] = {
     "memories_create": {"method": "POST", "path": "/api/v1/memories/create", "idempotent": False},
     "memories_batch": {"method": "POST", "path": "/api/v1/memories/batch", "idempotent": False},
     "memories_upload": {"method": "POST", "path": "/api/v1/memories/upload", "idempotent": False},
+    "memories_create_multipart": {"method": "POST", "path": "/api/v1/memories/create-multipart", "idempotent": False},
     "memories_status": {"method": "GET", "path": "/api/v1/memories/status/{ingestion_id}", "idempotent": True},
     "memories_get": {"method": "GET", "path": "/api/v1/memories/{memory_id}", "idempotent": True},
     "memories_update": {"method": "PATCH", "path": "/api/v1/memories/{memory_id}", "idempotent": False},

@@ -75,7 +75,9 @@ from .memories.models import (
     ForgetResponse,
     MergeStrategy,
     UpdateMemoryRequest,
+    AttachmentResult,
 )
+from .memories.parts import OBJECTIVES, FilePart, Objective, TextPart
 
 __all__ = [
     # Main class
@@ -166,4 +168,11 @@ __all__ = [
     "ForgetResponse",
     "DeleteDataResult",
     "UpdateMemoryRequest",
+    "AttachmentResult",
+
+    # Content parts (text and files in memories.create, record_message, send_message)
+    "TextPart",
+    "FilePart",
+    "OBJECTIVES",
+    "Objective",
 ]

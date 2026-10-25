@@ -20,6 +20,11 @@
 import { InvalidInputError } from '../errors.js';
 import type { HttpTransport } from '../transport/http.js';
 import type { Json } from '../context/types.js';
+import {
+  isFilePart, normaliseContent, resolveFile,
+  type AttachmentResult, type FilePart, type Objective, type TextPart, type WireFilePart,
+  type WireTextPart,
+} from './parts.js';
 
 /**
  * What `new Blob([...])` accepts here.
@@ -44,8 +49,23 @@ export type IngestMode = (typeof INGEST_MODES)[number];
 export const DEFAULT_DOCUMENT_TYPE: DocumentType = 'ai-chat-conversation';
 export const DEFAULT_INGEST_MODE: IngestMode = 'long-range';
 
+/**
+ * What `memories.create` takes as `document`. Mirrors Python's
+ * `Union[str, Dict[str, Any], TextPart, FilePart, List[Union[str, TextPart, FilePart]]]`.
+ *
+ * A string, a dict, a `TextPart` or a list with no file in it is sent as JSON
+ * to `/create`, byte for byte as a string always was (a list is joined with
+ * `"\n"`). Any `FilePart` sends the call as multipart to `/create-multipart`.
+ */
+export type CreateDocument =
+  | string
+  | Record<string, unknown>
+  | TextPart
+  | FilePart
+  | Array<string | TextPart | FilePart>;
+
 export interface CreateMemoryOptions {
-  document: string;
+  document: CreateDocument;
   user_id?: string | null;
   userId?: string | null;
   customer_id?: string | null;
@@ -74,6 +94,12 @@ export interface CreateMemoryOptions {
    * narrowed and is ignored gets widened instead.
    */
   scope?: Record<string, string> | null;
+  /**
+   * What this memory is for. One of `OBJECTIVES` (`conversation`, `bootstrap`,
+   * `knowledge-base`, `record`, `profile`) or free text, at most 500
+   * characters. Sent only when set, so a call without it is unchanged.
+   */
+  objective?: Objective | string | null;
 }
 
 /**
@@ -93,6 +119,12 @@ export interface CreateMemoryResult {
   queued_at: string;
   error_message?: string | null;
   memories_created?: number;
+  /**
+   * One per file part, in order, when the call carried files. Absent
+   * otherwise. A file that could not be read is still `failed` here while the
+   * rest of the document was ingested.
+   */
+  attachments?: AttachmentResult[] | null;
   [key: string]: unknown;
 }
 
@@ -108,18 +140,20 @@ function isoOrNull(v: string | Date | null | undefined): string | null {
   return v instanceof Date ? v.toISOString() : v;
 }
 
-/** Byte-for-byte equivalent of Python's `CreateMemoryRequest.model_dump(mode="json")`. */
-export function buildCreateBody(options: CreateMemoryOptions): Json {
-  if (!options.document) throw new InvalidInputError('document is required');
-
+/**
+ * The fields every create carries besides `document`, validated, in the
+ * pydantic model's order. `documentType` is null only for the multipart
+ * manifest, where an unset type is sent as null and the server picks.
+ */
+function createFields(options: CreateMemoryOptions, defaultType: string | null): Json {
   const o = options as unknown as Record<string, unknown>;
-  const documentType = either<string>(o, 'document_type', 'documentType') ?? DEFAULT_DOCUMENT_TYPE;
+  const documentType = either<string>(o, 'document_type', 'documentType') ?? defaultType;
   const mode = (options.mode as string) ?? DEFAULT_INGEST_MODE;
 
   // Validated client-side because Python's enum coercion raises before any
   // request is sent. A silent pass-through would turn a typo into a server
   // error, or worse, a silently different extraction path.
-  if (!(DOCUMENT_TYPES as readonly string[]).includes(documentType)) {
+  if (documentType !== null && !(DOCUMENT_TYPES as readonly string[]).includes(documentType)) {
     throw new InvalidInputError(
       `Invalid document_type '${documentType}'. Expected one of: ${DOCUMENT_TYPES.join(', ')}`,
     );
@@ -129,25 +163,114 @@ export function buildCreateBody(options: CreateMemoryOptions): Json {
       `Invalid mode '${mode}'. Expected one of: ${INGEST_MODES.join(', ')}`,
     );
   }
+  const userId = either<string>(o, 'user_id', 'userId') ?? null;
+  const customerId = either<string>(o, 'customer_id', 'customerId') ?? null;
 
   // Key order matches the pydantic model's field order. Not semantically
   // required, but it makes a captured-body diff against Python readable.
-  return {
-    document: options.document,
+  const fields: Json = {
     document_type: documentType,
     document_id: either<string>(o, 'document_id', 'documentId') ?? null,
     document_created_at: isoOrNull(
       either<string | Date>(o, 'document_created_at', 'documentCreatedAt'),
     ),
-    user_id: either<string>(o, 'user_id', 'userId') ?? null,
-    customer_id: either<string>(o, 'customer_id', 'customerId') ?? null,
+    user_id: userId,
+    customer_id: customerId,
     // null, never `{}`. An empty path is not absence: the server treats one as
     // an error, because a caller asking to be narrowed and being ignored gets
     // widened instead.
-    scope: options.scope ?? null,
+    scope: normaliseCreateScope(options.scope, userId, customerId),
     mode,
     metadata: options.metadata ?? {},
   };
+  // Only when set, so every existing body stays byte-identical.
+  if (options.objective !== undefined && options.objective !== null) {
+    fields['objective'] = options.objective;
+  }
+  return fields;
+}
+
+/**
+ * `scope: { client: "self" }` names the client level, which is what a write
+ * with no user_id and no customer_id already is. Mirrors Python's
+ * `CreateMemoryRequest` validator.
+ *
+ * - On its own, it is sent as `scope: null`, so the body is the one a call
+ *   without it sends.
+ * - With a user_id or customer_id, it is a contradiction, refused.
+ * - `"self"` under any key alongside other entries is refused.
+ * - Every other use of a `client` key is passed through untouched.
+ */
+export function normaliseCreateScope(
+  scope: Record<string, string> | null | undefined,
+  userId: string | null,
+  customerId: string | null,
+): Record<string, string> | null {
+  if (scope === undefined || scope === null) return null;
+  const entries = Object.entries(scope);
+  if (entries.length > 1 && entries.some(([, v]) => v === 'self')) {
+    throw new InvalidInputError(
+      `"self" can only be used alone, as scope={"client": "self"}; got ${JSON.stringify(scope)}`,
+    );
+  }
+  if (entries.length === 1 && entries[0]![0] === 'client' && entries[0]![1] === 'self') {
+    // Python checks `is not None`, so an empty-string id counts as given.
+    if (userId !== null || customerId !== null) {
+      throw new InvalidInputError(
+        'scope={"client": "self"} names the client level, so it ' +
+          'cannot be combined with user_id or customer_id',
+      );
+    }
+    return null;
+  }
+  return scope;
+}
+
+/** What `document` becomes on the JSON route: a string, or a dict untouched. */
+function jsonDocument(document: unknown, where: string): unknown {
+  const n = normaliseContent(document, 'document');
+  if (n === null) return document;
+  if (n.kind === 'parts') {
+    throw new InvalidInputError(
+      `${where} cannot carry a FilePart. memories.create sends files as multipart; ` +
+        'call it once per document that has files.',
+    );
+  }
+  return n.text;
+}
+
+/**
+ * Byte-for-byte equivalent of Python's `CreateMemoryRequest.model_dump(mode="json")`.
+ *
+ * Takes the JSON-route shapes only: a string, a dict, a `TextPart`, or a list
+ * with no file in it (joined with `"\n"`). A `FilePart` throws; it is sent by
+ * `memories.create` as multipart, built by `buildCreateManifest`.
+ */
+export function buildCreateBody(options: CreateMemoryOptions): Json {
+  const document = jsonDocument(options.document, 'This request');
+  if (!document) throw new InvalidInputError('document is required');
+  return { document, ...createFields(options, DEFAULT_DOCUMENT_TYPE) };
+}
+
+/**
+ * The `manifest` form field of a multipart create, before any file is read.
+ *
+ * `document` lists the parts in order; file `i` (counting files only) is the
+ * form field `file_<i>`. `document_type` is null unless the caller set it.
+ */
+export function buildCreateManifest(
+  options: CreateMemoryOptions,
+  parts: Array<TextPart | FilePart>,
+  files: Array<{ filename: string; media_type: string }>,
+): Json {
+  let next = 0;
+  const document = parts.map((p): WireTextPart | WireFilePart => {
+    if (!isFilePart(p)) return { type: 'text', text: (p as TextPart).text };
+    const index = next++;
+    const file = files[index]!;
+    return { type: 'file', field: `file_${index}`, filename: file.filename, media_type: file.media_type };
+  });
+  return { document, ...createFields(options, null) };
 }
 
 /**
@@ -364,8 +487,52 @@ export function createMemoriesInterface(
   return {
     async create(options) {
       const o = options as unknown as Record<string, unknown>;
-      await transport.checkCustomerId(o['customer_id'] ?? o['customerId'], 'memories.create');
-      return transport.request<CreateMemoryResult>('memories_create', { body: buildCreateBody(options) });
+      const customerId = o['customer_id'] ?? o['customerId'];
+      if (customerId !== undefined && customerId !== null && customerId !== '') {
+        await transport.checkCustomerId(customerId, 'memories.create');
+      }
+      const n = normaliseContent(options.document, 'document');
+      if (n === null || n.kind === 'text') {
+        return transport.request<CreateMemoryResult>('memories_create', {
+          body: buildCreateBody(options),
+        });
+      }
+
+      // Everything but the files is validated before any file is read, so a
+      // typo in document_type does not cost a 10 MB download first.
+      buildCreateManifest(options, n.parts.filter((p) => !isFilePart(p)), []);
+      const fetchImpl = ((url: string, init?: RequestInit) =>
+        transport.fetchExternal(url, init)) as typeof fetch;
+      const files = await Promise.all(
+        n.parts.filter(isFilePart).map((p) => resolveFile(p, fetchImpl)),
+      );
+
+      const form = new FormData();
+      form.set('manifest', JSON.stringify(buildCreateManifest(options, n.parts, files)));
+      files.forEach((file, i) => {
+        form.set(
+          `file_${i}`,
+          new Blob([file.bytes as unknown as BlobSource], { type: file.media_type }),
+          file.filename,
+        );
+      });
+      // Not retried: the endpoint is declared non-idempotent, as /create is.
+      return transport.request<CreateMemoryResult>('memories_create_multipart', {
+        body: form,
+        rawBody: true,
+        // A server older than this route answers 404, or 405 because
+        // /api/v1/memories/{memory_id} exists with other methods. Either would
+        // otherwise read as "context not found" or a bare HTTP error.
+        // InvalidInputError, with Python's message.
+        mapError: (status, error) =>
+          status === 404 || status === 405
+            ? new InvalidInputError(
+              'This Synap server does not support file parts in memories.create. ' +
+                'Upgrade the Synap server, or send text only.',
+              { correlationId: error.correlationId, cause: error },
+            )
+            : undefined,
+      });
     },
 
     async batch_create(options) {
@@ -375,7 +542,13 @@ export function createMemoriesInterface(
       }
       const failFast = options.fail_fast ?? options.failFast ?? false;
       return transport.request<BatchCreateResult>('memories_batch', {
-        body: { documents: docs.map(buildCreateBody), fail_fast: failFast },
+        body: {
+          documents: docs.map((d) => {
+            jsonDocument(d.document, 'memories.batch_create');
+            return buildCreateBody(d);
+          }),
+          fail_fast: failFast,
+        },
       });
     },
 

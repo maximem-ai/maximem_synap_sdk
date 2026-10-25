@@ -12,6 +12,10 @@ from typing import Optional
 class SynapError(Exception):
     """Base exception for all Synap SDK errors."""
 
+    #: The HTTP status the server answered with, when the error came from an
+    #: HTTP response. None for errors raised before or without a response.
+    status_code: Optional[int] = None
+
     def __init__(self, message: str, correlation_id: Optional[str] = None):
         super().__init__(message)
         self.correlation_id = correlation_id

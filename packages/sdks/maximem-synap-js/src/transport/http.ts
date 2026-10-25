@@ -132,6 +132,12 @@ export interface RequestOptions {
   correlationId?: string;
   /** Overrides the endpoint's declared idempotency. */
   idempotent?: boolean;
+  /**
+   * Re-map an HTTP error for this one call, given the status. Returns the
+   * error to throw instead, or undefined to keep it. Applied before the retry
+   * decision, so the retry policy sees what the caller will.
+   */
+  mapError?: (status: number, error: SynapError) => SynapError | undefined;
   signal?: AbortSignal;
 }
 
@@ -177,6 +183,17 @@ export class HttpTransport {
       () => this.pingHealth(),
       options.keepAlive?.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS,
     );
+  }
+
+  /**
+   * @internal Fetch a URL that is not Synap's, with this transport's fetch.
+   *
+   * Used to read a `FilePart` given by `url`: the SDK fetches it, the server
+   * never does. Deliberately sends none of this transport's headers, because
+   * the URL belongs to somebody else and the API key must not reach them.
+   */
+  fetchExternal(url: string, init: RequestInit = {}): Promise<Response> {
+    return this.fetchImpl(url, init);
   }
 
   /** Start keeping the connection warm. Opt-in: it is pointless in serverless. */
@@ -379,7 +396,8 @@ export class HttpTransport {
     }
 
     if (!response.ok) {
-      throw await toHttpError(response, correlationId);
+      const error = await toHttpError(response, correlationId);
+      throw options.mapError?.(response.status, error) ?? error;
     }
 
     if (response.status === 204) return undefined as T;
@@ -555,6 +573,11 @@ async function toHttpError(response: Response, correlationId: string): Promise<S
   switch (response.status) {
     case 400:
     case 422:
+    // Wrong method, too large, unsupported media type: each says what was
+    // wrong with the request, and none of them goes away on a retry.
+    case 405:
+    case 413:
+    case 415:
       return new InvalidInputError(message, opts);
     case 401:
     case 403:

@@ -8,6 +8,7 @@ from .models import (
     MergeStrategy,
     CreateMemoryRequest,
     CreateMemoryResponse,
+    AttachmentResult,
     BatchCreateRequest,
     BatchCreateResponse,
     MemoryStatusResponse,
@@ -18,6 +19,7 @@ from .models import (
     ForgetCandidate,
     ForgetResponse,
 )
+from .parts import OBJECTIVES, FilePart, Objective, TextPart
 
 __all__ = [
     "MemoriesInterface",
@@ -27,6 +29,7 @@ __all__ = [
     "MergeStrategy",
     "CreateMemoryRequest",
     "CreateMemoryResponse",
+    "AttachmentResult",
     "BatchCreateRequest",
     "BatchCreateResponse",
     "MemoryStatusResponse",
@@ -36,4 +39,8 @@ __all__ = [
     "ForgetStatus",
     "ForgetCandidate",
     "ForgetResponse",
+    "TextPart",
+    "FilePart",
+    "OBJECTIVES",
+    "Objective",
 ]

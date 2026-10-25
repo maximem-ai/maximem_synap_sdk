@@ -3,8 +3,10 @@
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Dict, List, Optional, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from uuid import UUID
+
+from ..models.errors import InvalidInputError
 
 
 class DocumentType(StrEnum):
@@ -79,6 +81,47 @@ class CreateMemoryRequest(BaseModel):
     # Metadata
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def _client_self_scope(self) -> "CreateMemoryRequest":
+        """`scope={"client": "self"}` names the caller's own client level.
+
+        A write with no ids already lands there, so the path is sent as null
+        and the body is the one an unscoped write sends. With a user or
+        customer id it contradicts itself and is refused. "self" next to other
+        entries is refused for the same reason. Every other use of a "client"
+        key goes to the server untouched.
+        """
+        scope = self.scope
+        if not scope or "self" not in scope.values():
+            return self
+        if scope == {"client": "self"}:
+            if self.user_id is not None or self.customer_id is not None:
+                raise InvalidInputError(
+                    'scope={"client": "self"} names the client level, so it '
+                    "cannot be combined with user_id or customer_id"
+                )
+            self.scope = None
+            return self
+        if len(scope) > 1:
+            raise InvalidInputError(
+                '"self" can only be used alone, as scope={"client": "self"}; '
+                f"got {scope}"
+            )
+        return self
+
+
+class AttachmentResult(BaseModel):
+    """What happened to one file sent to `memories.create`.
+
+    `status` is "read" when the file was read into the memory, or "failed"
+    when it could not be; the rest of the document is still ingested and
+    `error` says why.
+    """
+    filename: str
+    media_type: str
+    status: str
+    error: Optional[str] = None
+
 
 class CreateMemoryResponse(BaseModel):
     """Response from memory creation."""
@@ -87,6 +130,8 @@ class CreateMemoryResponse(BaseModel):
     status: IngestStatus
     queued_at: datetime
     error_message: Optional[str] = None
+    # One per file sent, in order. None when the document had no files.
+    attachments: Optional[List[AttachmentResult]] = None
 
 
 class BatchCreateRequest(BaseModel):

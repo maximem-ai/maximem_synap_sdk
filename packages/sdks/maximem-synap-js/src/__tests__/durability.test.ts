@@ -165,6 +165,21 @@ describe('the journal itself', () => {
     expect(JSON.parse(lines[0] as string).e.content).toBe('a\nb');
   });
 
+  it('never writes inline image parts to the durable outbox', () => {
+    const j = new OutboxJournal(root, CREDS.instanceId);
+    j.recordQueued({
+      event_id: 'ev-image', content: '[image: receipt.png]',
+      metadata: {
+        keep: 'this',
+        synap_content_parts: '[{"type":"image","data":"private-base64"}]',
+      },
+    });
+    const line = readFileSync(j.path, 'utf8');
+    const event = JSON.parse(line) as { e: { metadata: Record<string, unknown> } };
+    expect(line).not.toContain('private-base64');
+    expect(event.e.metadata).toEqual({ keep: 'this' });
+  });
+
   it('no filesystem means no journal and no crash', () => {
     // Workers, edge runtimes and the browser. The SDK has to behave exactly as
     // it did before: buffered events survive a reconnect and not a restart.

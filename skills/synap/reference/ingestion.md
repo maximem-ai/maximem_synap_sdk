@@ -25,7 +25,7 @@ Returns immediately. Processing happens in the background.
 
 | Param | Type | Notes |
 | --- | --- | --- |
-| `document` | `str` | Required. Raw content. For chat, include speaker labels. |
+| `document` | `str`, or a list of strings and parts | Required. Raw content. For chat, include speaker labels. A list may hold images; see below. |
 | `document_type` | `str` | Default `"ai-chat-conversation"`. Drives extraction strategy. See list below. |
 | `user_id` | `str` | Required for user-scoped memories, in both modes. |
 | `customer_id` | `str` | **B2B only.** Required on B2B for user-scoped and customer-scoped memories. On B2C it is rejected with HTTP 400. |
@@ -49,6 +49,35 @@ Which ids you send is not a judgement call, the instance settles it. B2C (`user_
 | `meeting-transcript` | Multi-speaker extraction, action items, decisions |
 
 For images and audio, the user does media processing upstream and passes text to Synap.
+
+## Images in conversations
+
+An image shared in a conversation can go in as it is. Put a `FilePart` where it sits; Synap reads it and stores a description in its place.
+
+```python
+from maximem_synap import FilePart
+
+response = await sdk.memories.create(
+    document=["User: here's the receipt", FilePart(path="receipt.png")],
+    user_id="alice",
+)
+response.attachments   # one per file: filename, media_type, status ("read" | "failed"), error
+
+# The same list works as `content` here:
+await sdk.conversation.record_message(conversation_id=cid, role="user",
+    content=["here's the receipt", FilePart(path="receipt.png")], user_id="alice")
+await sdk.instance.send_message(content=["here's the receipt", FilePart(data=png_bytes,
+    filename="receipt.png")], conversation_id=cid, user_id="alice")
+```
+
+JS: `filePart({ path | data | url })` and `textPart(text)` from `@maximem/synap-js-sdk`.
+
+- `FilePart` takes exactly one of `data`, `path` or `url`. The SDK fetches a `url`; the server never does.
+- png, jpeg and webp only, up to 10 per call, 10 MB each. Other files get HTTP 415: use `memories.create_from_file`.
+- A list of text only is joined with `"\n"` and sent as that string, byte for byte.
+- `send_message` caps the images in one event at 2.5 MB (the stream message limit is 4 MB). Use `record_message` or `memories.create` for larger ones.
+- `objective=` (optional) on `memories.create`: `"conversation"`, `"bootstrap"`, `"knowledge-base"`, `"record"`, `"profile"` or free text. Stored only; nothing acts on it yet.
+- Needs an SDK and server with file parts. An older server makes `memories.create` raise `InvalidInputError` asking to upgrade the server.
 
 ## Speaker labels matter
 

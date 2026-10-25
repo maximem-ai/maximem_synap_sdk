@@ -652,7 +652,24 @@ class HTTPTransport:
         response: httpx.Response,
         correlation_id: str,
     ) -> Dict[str, Any]:
-        """Handle HTTP response, raising appropriate errors."""
+        """Handle HTTP response, raising appropriate errors.
+
+        Every error raised for a response carries its HTTP status as
+        `status_code`, so a caller that needs to tell two statuses apart
+        (an old server's 404 from its 405) reads the number rather than the
+        exception class or its text.
+        """
+        try:
+            return self._raise_for_response(response, correlation_id)
+        except SynapError as e:
+            e.status_code = response.status_code
+            raise
+
+    def _raise_for_response(
+        self,
+        response: httpx.Response,
+        correlation_id: str,
+    ) -> Dict[str, Any]:
         if response.status_code == 200:
             return response.json()
 
@@ -731,6 +748,14 @@ class HTTPTransport:
                 error_message if isinstance(error_message, str) else "Conflict",
                 correlation_id=correlation_id,
             )
+
+        if response.status_code in (405, 413, 415):
+            # Permanent refusals, not blips: the route does not take this
+            # method (405, which is what a server too old to have the route
+            # answers when another method shares its path), the body is too
+            # large (413), or the media type is refused (415). Retrying any
+            # of them sends the same request to the same answer.
+            raise InvalidInputError(error_message, correlation_id=correlation_id)
 
         if response.status_code == 422:
             # Validation failure (e.g. an out-of-range precision_level or

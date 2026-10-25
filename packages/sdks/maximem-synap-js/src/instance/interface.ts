@@ -15,6 +15,16 @@ import type { AnticipationCache } from '../context/anticipation-cache.js';
 import type { StreamCredentials, StreamState } from '../grpc/stream-client.js';
 import { getEnv } from '../util/env.js';
 import { newCorrelationId } from '../util/correlation.js';
+import {
+  MAX_STREAM_IMAGE_BYTES, normaliseContent, toInlineParts, type ContentPart,
+} from '../memories/parts.js';
+
+/**
+ * The metadata key a streamed event's parts travel under. The proto has no
+ * field for them, so they ride in metadata as a JSON string, and `content`
+ * carries the placeholder rendering so an older server still records text.
+ */
+export const CONTENT_PARTS_METADATA_KEY = 'synap_content_parts';
 
 export interface ListenOptions {
   /** Called with the attempt count each time the stream reconnects. */
@@ -40,7 +50,14 @@ export interface ListenOptions {
 }
 
 export interface SendMessageOptions {
-  content: string;
+  /**
+   * A string, or a list of strings, `TextPart`s and `FilePart`s (images). A
+   * list with no file is joined with `"\n"`. With a file, the parts go in
+   * `metadata.synap_content_parts` (images inline as base64, at most 2.5 MB of
+   * raw image bytes per event) and `content` becomes the placeholder text,
+   * each image as `[image: <filename>]`.
+   */
+  content: string | ContentPart[];
   role?: string;
   conversation_id?: string;
   conversationId?: string;
@@ -292,15 +309,29 @@ export function createInstanceNamespace(
   cache: AnticipationCache,
   /** Buffers a stream-sent turn locally, same as the HTTP write paths. */
   onTurn?: (turn: { conversationId: string; role: string; content: string }) => void,
-  /** The client's `agent_model` / `agent_context_window`, folded into each event's metadata. */
-  agentModel: () => AgentModel = () => ({}),
-  /** Keeps a reported tool result in the local turn archive (`archive_tool_result`). */
-  onToolResult?: (r: { conversationId: string; result: unknown; toolName: string }) => void,
-  // The B2C customer_id check, as every HTTP write runs it. Passed in because
-  // the stream has no HttpTransport, which is where the instance's isolation
-  // lives once whoami has resolved it.
-  checkCustomerId: (customerId: unknown, where: string) => Promise<void> = async () => {},
+  // `fetchUrl` was introduced before the later internal callbacks. Accept both
+  // call layouts while consumers move to the current one:
+  // (onTurn, fetchUrl, agentModel, onToolResult, checkCustomerId), and
+  // (onTurn, agentModel, onToolResult, checkCustomerId).
+  fetchOrAgentModel?: typeof fetch | (() => AgentModel),
+  agentModelOrToolResult?: (() => AgentModel) | ((r: { conversationId: string; result: unknown; toolName: string }) => void),
+  onToolResultOrCheck?: ((r: { conversationId: string; result: unknown; toolName: string }) => void) | ((customerId: unknown, where: string) => Promise<void>),
+  checkCustomerIdArg?: (customerId: unknown, where: string) => Promise<void>,
 ): InstanceNamespace {
+  const defaultFetch = ((url: string, init?: RequestInit) => globalThis.fetch(url, init)) as typeof fetch;
+  const imageFirst = fetchOrAgentModel !== undefined
+    && (fetchOrAgentModel.length > 0 || agentModelOrToolResult === undefined);
+  const fetchUrl = imageFirst ? fetchOrAgentModel as typeof fetch : defaultFetch;
+  const agentModel = (imageFirst ? agentModelOrToolResult : fetchOrAgentModel) as (() => AgentModel) | undefined
+    ?? (() => ({}));
+  const onToolResult = (imageFirst ? onToolResultOrCheck : agentModelOrToolResult) as
+    | ((r: { conversationId: string; result: unknown; toolName: string }) => void)
+    | undefined;
+  const checkCustomerId = (imageFirst ? checkCustomerIdArg : onToolResultOrCheck) as
+    | ((customerId: unknown, where: string) => Promise<void>)
+    | undefined
+    ?? (async () => {});
+  const hasCustomerIdCheck = (imageFirst ? checkCustomerIdArg : onToolResultOrCheck) !== undefined;
   let client: StreamClient | null = null;
   // conversationId -> sessionId, for conversations this stream has opened a
   // session for. Cleared on reconnect: a session belongs to the stream that
@@ -386,6 +417,38 @@ export function createInstanceNamespace(
     } catch {
       // Leave it unmarked so the next event opens it.
     }
+  }
+
+  /**
+   * Keeps conversation events in call order.
+   *
+   * A send whose content holds a file has to read it first, which is async,
+   * so a caller who fires `send_message(image)` then `send_message(text)`
+   * without awaiting would otherwise see the text reach the stream first. A
+   * send that needs no read, while nothing is queued ahead of it, goes out
+   * synchronously exactly as it always did; anything else waits its turn. File
+   * reads still start at once, so only the sending is serialised.
+   */
+  let tail: Promise<void> = Promise.resolve();
+  let queued = 0;
+  function inOrder<T>(prepared: Promise<T> | null, send: (value: T) => void, sync?: T): Promise<void> {
+    if (prepared === null && queued === 0) {
+      send(sync as T);
+      return Promise.resolve();
+    }
+    // Marked handled now: a rejection is surfaced through `run`, but only once
+    // the sends ahead of it are done, and Node must not flag it before then.
+    prepared?.catch(() => {});
+    queued += 1;
+    const run = tail.then(async () => {
+      send(prepared === null ? (sync as T) : await prepared);
+    });
+    const done = () => {
+      queued -= 1;
+    };
+    // The chain never rejects, so one failed send cannot block the next.
+    tail = run.then(done, done);
+    return run;
   }
 
   const namespace: InstanceNamespace = {
@@ -494,9 +557,11 @@ export function createInstanceNamespace(
       // First, as Python checks it. Until 0.5.18 the stream skipped it, so a
       // B2C customer_id went out and the server refused the event on the
       // stream, where nothing surfaced it.
-      await checkCustomerId(
-        options.customer_id ?? options.customerId, 'instance.send_message',
-      );
+      if (hasCustomerIdCheck) {
+        await checkCustomerId(
+          options.customer_id ?? options.customerId, 'instance.send_message',
+        );
+      }
       if (client === null) throw new ListeningNotActiveError('Listening is not active');
       const eventType = options.event_type ?? options.eventType ?? 'user_message';
       // InvalidInputError, as Python raises both. Until 0.5.18 a bad
@@ -511,51 +576,78 @@ export function createInstanceNamespace(
       if (options.content === undefined || options.content === null) {
         throw new InvalidInputError('content is required');
       }
-      const conversationId = options.conversation_id ?? options.conversationId ?? '';
-      ensureSession(
-        conversationId,
-        options.user_id ?? options.userId ?? '',
-        options.customer_id ?? options.customerId ?? '',
-      );
-      // Only conversational turns belong in the local short-term buffer. A tool
-      // call or a result is not a turn, and buffering one splices it into the
-      // caller's own prompt as if somebody had said it. Python mirrors user and
-      // assistant messages only; this side mirrored everything.
-      if (eventType === 'user_message' || eventType === 'assistant_message') {
-        onTurn?.({
+      const parts = normaliseContent(options.content, 'content');
+      const emit = ({ content, metadata }: { content: string; metadata: Record<string, string> }) => {
+        // A file read can take a while; the stream may have gone in the meantime.
+        if (client === null) throw new ListeningNotActiveError('Listening is not active');
+        const conversationId = options.conversation_id ?? options.conversationId ?? '';
+        ensureSession(
           conversationId,
+          options.user_id ?? options.userId ?? '',
+          options.customer_id ?? options.customerId ?? '',
+        );
+        // Only conversational turns belong in the local short-term buffer. A tool
+        // call or a result is not a turn, and buffering one splices it into the
+        // caller's own prompt as if somebody had said it. Python mirrors user and
+        // assistant messages only; this side mirrored everything.
+        if (eventType === 'user_message' || eventType === 'assistant_message') {
+          onTurn?.({
+            conversationId,
+            role: options.role ?? 'user',
+            content,
+          });
+        }
+        client.sendConversationEvent({
+          event_type: eventType,
+          content,
           role: options.role ?? 'user',
-          content: options.content,
+          conversation_id: options.conversation_id ?? options.conversationId ?? '',
+          user_id: options.user_id ?? options.userId ?? '',
+          customer_id: options.customer_id ?? options.customerId ?? '',
+          session_id: options.session_id ?? options.sessionId
+            ?? openSessions.get(conversationId) ?? '',
+          metadata: withAgentModel(metadata, agentModelOf(options), agentModel(), true) ?? {},
+          timestamp_ms: Date.now(),
+          tool_name: options.tool_name ?? options.toolName ?? '',
+          // Python serialises tool_args with json.dumps into tool_args_json.
+          tool_args_json: (() => {
+            const a = options.tool_args ?? options.toolArgs;
+            return a === undefined ? '' : jsonOrText(a);
+          })(),
+          tool_result_json: toolResultJson(options.tool_result ?? options.toolResult),
+          tool_call_id: options.tool_call_id ?? options.toolCallId ?? '',
+          search_queries: options.search_queries ?? options.searchQueries ?? [],
+          context_types: options.context_types ?? options.contextTypes ?? [],
+          ...(() => {
+            const sp = options.scope_path ?? options.scopePath;
+            return sp && Object.keys(sp).length > 0 ? { scope: sp } : {};
+          })(),
         });
+      };
+
+      if (parts?.kind !== 'parts') {
+        const content = parts?.kind === 'text' ? parts.text : (options.content as string);
+        return inOrder(null, emit, { content, metadata: options.metadata ?? {} });
       }
-      client.sendConversationEvent({
-        event_type: eventType,
-        content: options.content,
-        role: options.role ?? 'user',
-        conversation_id: options.conversation_id ?? options.conversationId ?? '',
-        user_id: options.user_id ?? options.userId ?? '',
-        customer_id: options.customer_id ?? options.customerId ?? '',
-        session_id: options.session_id ?? options.sessionId
-          ?? openSessions.get(conversationId) ?? '',
-        metadata: withAgentModel(options.metadata, agentModelOf(options), agentModel(), true) ?? {},
-        timestamp_ms: Date.now(),
-        tool_name: options.tool_name ?? options.toolName ?? '',
-        // Python serialises tool_args with json.dumps into tool_args_json.
-        tool_args_json: (() => {
-          const a = options.tool_args ?? options.toolArgs;
-          return a === undefined ? '' : jsonOrText(a);
-        })(),
-        tool_result_json: toolResultJson(options.tool_result ?? options.toolResult),
-        tool_call_id: options.tool_call_id ?? options.toolCallId ?? '',
-        search_queries: options.search_queries ?? options.searchQueries ?? [],
-        context_types: options.context_types ?? options.contextTypes ?? [],
-        // The proto's `scope`: the conversation's rung, kept from the first
-        // event that names one. Omitted when absent or empty, as in Python.
-        ...(() => {
-          const sp = options.scope_path ?? options.scopePath;
-          return sp && Object.keys(sp).length > 0 ? { scope: sp } : {};
-        })(),
-      });
+      const prepared = (async () => {
+        const inline = await toInlineParts(parts.parts, fetchUrl);
+        if (inline.rawBytes > MAX_STREAM_IMAGE_BYTES) {
+          // Python's message, word for word.
+          throw new InvalidInputError(
+            `The images in this event come to more than ${MAX_STREAM_IMAGE_BYTES} bytes, ` +
+              'which is over what one streamed event can carry. Send them with ' +
+              'memories.create or conversation.record_message instead.',
+          );
+        }
+        return {
+          content: inline.placeholder,
+          metadata: {
+            ...(options.metadata ?? {}),
+            [CONTENT_PARTS_METADATA_KEY]: JSON.stringify(inline.wire),
+          },
+        };
+      })();
+      return inOrder(prepared, emit);
     },
 
     async record_tool_call(options: RecordToolCallOptions) {
@@ -611,24 +703,29 @@ export function createInstanceNamespace(
         options.user_id ?? options.userId ?? '',
         options.customer_id ?? options.customerId ?? '',
       );
-      client.sendConversationEvent({
-        // Python emits reasoning as an `agent_thinking` conversation event.
-        event_type: 'agent_thinking',
-        content: options.content,
-        // Deliberately no role. A thought is not the assistant's reply, and
-        // this went out as 'assistant' from the day it shipped: the server
-        // checked role before event_type, so every reasoning step any client
-        // sent was filed as the final answer and the reasoning path never ran.
-        // Sending no role is correct against both the fixed server and one that
-        // has not been updated yet.
-        role: '',
-        conversation_id: options.conversation_id ?? options.conversationId ?? '',
-        user_id: options.user_id ?? options.userId ?? '',
-        customer_id: options.customer_id ?? options.customerId ?? '',
-        session_id: options.session_id ?? options.sessionId ?? '',
-        metadata: thinkingMetadata(options),
-        timestamp_ms: Date.now(),
-      });
+      // Queued behind an earlier send that is still reading a file, so the
+      // thought reaches the stream after it, as it was called.
+      return inOrder(null, () => {
+        if (client === null) throw new ListeningNotActiveError('Listening is not active');
+        client.sendConversationEvent({
+          // Python emits reasoning as an `agent_thinking` conversation event.
+          event_type: 'agent_thinking',
+          content: options.content,
+          // Deliberately no role. A thought is not the assistant's reply, and
+          // this went out as 'assistant' from the day it shipped: the server
+          // checked role before event_type, so every reasoning step any client
+          // sent was filed as the final answer and the reasoning path never ran.
+          // Sending no role is correct against both the fixed server and one that
+          // has not been updated yet.
+          role: '',
+          conversation_id: options.conversation_id ?? options.conversationId ?? '',
+          user_id: options.user_id ?? options.userId ?? '',
+          customer_id: options.customer_id ?? options.customerId ?? '',
+          session_id: options.session_id ?? options.sessionId ?? '',
+          metadata: thinkingMetadata(options),
+          timestamp_ms: Date.now(),
+        });
+      }, undefined);
     },
 
     get is_listening() {

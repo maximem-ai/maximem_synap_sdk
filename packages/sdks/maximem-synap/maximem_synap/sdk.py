@@ -53,6 +53,20 @@ from .utils.correlation import generate_correlation_id
 from .utils.validators import validate_conversation_id, validate_instance_id
 from ._version import __version__
 from .memories.interface import MemoriesInterface
+from .memories.parts import (
+    MAX_STREAM_IMAGE_BYTES,
+    STREAM_PARTS_METADATA_KEY,
+    FilePart,
+    TextPart,
+    compact_json as _compact_json,
+    has_files as _has_files,
+    inline_wire_parts as _inline_wire_parts,
+    is_parts as _is_parts,
+    join_text as _join_text,
+    placeholder_text as _placeholder_text,
+    resolve_files as _resolve_files,
+    to_parts as _to_parts,
+)
 from .data.interface import DataInterface
 from .facade.instance import InstanceController
 from .facade.conversation import ConversationController
@@ -91,6 +105,20 @@ def _stored_batch_rows(messages: List[Dict[str, Any]], result: Any) -> List[tupl
         )
         return []
     return list(zip(stored, results))
+
+
+def _mirror_text(content: Any, *, what: str) -> Any:
+    """The text the local short-term store keeps for a turn.
+
+    A string (or anything else that is not a list) is kept as it is. A list
+    of parts becomes its text joined with newlines, each file standing in as
+    ``[image: <filename>]``: the store never holds file bytes. Raises
+    InvalidInputError for an empty list or a bad part, before anything is
+    sent.
+    """
+    if not _is_parts(content):
+        return content
+    return _placeholder_text(_to_parts(content, what=what))
 
 
 def _one_write_landed(in_flight: Dict[str, int], conversation_id: str) -> None:
@@ -2239,7 +2267,7 @@ class ConversationInterface:
         self,
         conversation_id: str,
         role: str,
-        content: str,
+        content: Union[str, List[Union[str, TextPart, FilePart]]],
         user_id: str,
         customer_id: Optional[str] = None,
         session_id: Optional[str] = None,
@@ -2253,7 +2281,14 @@ class ConversationInterface:
         Args:
             conversation_id: Unique conversation identifier
             role: Message role ("user" or "assistant")
-            content: Message content text
+            content: Message content text, or a list of strings, `TextPart`
+                and `FilePart`. A list of text only is joined with newlines
+                and sent exactly as that string. A list with files sends each
+                image inline; the server reads it and records a description
+                in its place. Images only (png, jpeg, webp), up to 10 per
+                message, 10 MB each. `FilePart(url=...)` is fetched by the
+                SDK. Raises InvalidInputError for an empty list or a file
+                over 10 MB.
             user_id: User identifier (required, must be external ID)
             customer_id: Customer identifier. REQUIRED on a B2B instance.
                 NOT ACCEPTED on a B2C instance (user_context_isolation =
@@ -2302,6 +2337,9 @@ class ConversationInterface:
         metadata = with_agent_model(metadata, model=model, context_window=context_window,
                                     config=getattr(self._sdk, "_config", None))
         validate_conversation_id(conversation_id)
+        # What the local short-term store keeps for this turn. The image bytes
+        # are not kept: each file stands in as "[image: <filename>]".
+        mirror_content = _mirror_text(content, what="content")
         controller = self._ensure_controller()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         in_flight = self._sdk._st_writes_in_flight
@@ -2344,7 +2382,7 @@ class ConversationInterface:
                 self._sdk._st_store.append_turn(
                     conversation_id=conversation_id,
                     role=role,
-                    content=content,
+                    content=mirror_content,
                     timestamp=ts,
                     # The server's id and its message count for the
                     # conversation after this write. The count is what tells
@@ -2372,7 +2410,8 @@ class ConversationInterface:
         Args:
             messages: List of message dicts with conversation_id, role, content,
                 etc. A message may also carry ``scope_path``, the rung, spelled
-                exactly as in ``record_message``.
+                exactly as in ``record_message``. ``content`` may be a list of
+                parts, as in ``record_message``.
 
         Returns:
             Dict with total, succeeded, failed, results[]
@@ -2391,6 +2430,10 @@ class ConversationInterface:
             }
             for _msg in messages
         ]
+        mirror_contents = [
+            _mirror_text(m.get("content", ""), what=f"messages[{i}].content")
+            for i, m in enumerate(messages)
+        ]
         controller = self._ensure_controller()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         result = await controller.record_messages_batch(
@@ -2402,6 +2445,7 @@ class ConversationInterface:
             # should be reflected in local cache. ``results`` lists the stored
             # rows only, in input order, and ``errors`` names the failed ones
             # by index, so the two are paired up by ``_stored_batch_rows``.
+            mirror_by_message = {id(m): c for m, c in zip(messages, mirror_contents)}
             for msg, res in _stored_batch_rows(messages, result):
                 if not isinstance(res, dict) or not res.get("message_id"):
                     continue
@@ -2409,7 +2453,7 @@ class ConversationInterface:
                     self._sdk._st_store.append_turn(
                         conversation_id=msg.get("conversation_id", ""),
                         role=msg.get("role", "user"),
-                        content=msg.get("content", ""),
+                        content=mirror_by_message.get(id(msg), msg.get("content", "")),
                         message_id=res.get("message_id"),
                         server_message_count=res.get("conversation_message_count"),
                         in_flight=self._sdk._st_writes_in_flight.get(
@@ -4848,7 +4892,7 @@ class InstanceInterface:
 
     async def send_message(
         self,
-        content: str,
+        content: Union[str, List[Union[str, TextPart, FilePart]]],
         role: str = "user",
         conversation_id: Optional[str] = None,
         user_id: Optional[str] = None,
@@ -4869,7 +4913,18 @@ class InstanceInterface:
         """Send a conversation message over the active gRPC stream.
 
         Args:
-            content: Message content
+            content: Message content, or a list of strings, `TextPart` and
+                `FilePart`. A list of text only is joined with newlines and
+                sent exactly as that string. With files, the parts travel in
+                ``metadata["synap_content_parts"]`` (images inline as base64)
+                and ``content`` carries the text with each image as
+                ``[image: <filename>]``, so a server that does not read parts
+                still records the turn. The images in one event may total at
+                most 2.5 MB; larger ones raise InvalidInputError, so send them
+                with ``memories.create`` or ``conversation.record_message``.
+                The on-disk outbox journal keeps the event without the image
+                parts, so an event replayed after a process restart records
+                the placeholder text only.
             role: "user" or "assistant"
             conversation_id: Conversation identifier
             user_id: User identifier
@@ -4919,6 +4974,22 @@ class InstanceInterface:
             )
         if content is None:
             raise InvalidInputError("content is required")
+
+        # Only parts are unpacked; a string goes out exactly as it did.
+        if _is_parts(content):
+            parts = _to_parts(content, what="content")
+            if _has_files(parts):
+                resolved = await _resolve_files(
+                    parts, max_total_bytes=MAX_STREAM_IMAGE_BYTES,
+                )
+                # Copied, never edited: the caller's dict is theirs.
+                metadata = dict(metadata or {})
+                metadata[STREAM_PARTS_METADATA_KEY] = _compact_json(
+                    _inline_wire_parts(resolved)
+                )
+                content = _placeholder_text(parts)
+            else:
+                content = _join_text(parts)
 
         await self._ensure_session(
             conversation_id or "", user_id or "", customer_id or "",

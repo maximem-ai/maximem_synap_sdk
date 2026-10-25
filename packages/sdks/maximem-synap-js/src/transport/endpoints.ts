@@ -23,6 +23,7 @@ export const ENDPOINTS = {
   memories_create: { method: "POST", path: "/api/v1/memories/create", idempotent: false },
   memories_batch: { method: "POST", path: "/api/v1/memories/batch", idempotent: false },
   memories_upload: { method: "POST", path: "/api/v1/memories/upload", idempotent: false },
+  memories_create_multipart: { method: "POST", path: "/api/v1/memories/create-multipart", idempotent: false },
   memories_status: { method: "GET", path: "/api/v1/memories/status/{ingestion_id}", idempotent: true },
   memories_get: { method: "GET", path: "/api/v1/memories/{memory_id}", idempotent: true },
   memories_update: { method: "PATCH", path: "/api/v1/memories/{memory_id}", idempotent: false },

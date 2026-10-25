@@ -566,8 +566,12 @@ export class SynapClient {
       ({ conversationId, role, content }) => {
         this.#shortTerm.appendTurn(conversationId, role, content);
       },
+      // A FilePart given by url is read with the same fetch as everything else.
+      ((url: string, init?: RequestInit) =>
+        this.#transport.fetchExternal(url, init)) as typeof fetch,
       () => this.#agentModel,
-      ({ conversationId, result, toolName }) => this.archive_tool_result(conversationId, result, { tool_name: toolName }),
+      ({ conversationId, result, toolName }: { conversationId: string; result: unknown; toolName: string }) =>
+        this.archive_tool_result(conversationId, result, { tool_name: toolName }),
       (customerId, where) => this.#transport.checkCustomerId(customerId, where),
     );
     // A compaction folds turns into the server's summary, so the local copies

@@ -20,6 +20,9 @@ const corpusPath = path.resolve(here, '../../../CONTRACT/conformance/http_status
 
 /** Declared, not hidden: each names why it is not fixed here. */
 const KNOWN_STATUS_DIFFS: Record<number, { js: string; reason: string }> = {
+  405: { js: 'InvalidInputError', reason: 'An unsupported image route is caller input, not retryable.' },
+  413: { js: 'InvalidInputError', reason: 'An over-limit image payload is caller input, not retryable.' },
+  415: { js: 'InvalidInputError', reason: 'An unsupported image media type is caller input, not retryable.' },
   504: {
     js: 'AgentUnavailableError',
     reason:

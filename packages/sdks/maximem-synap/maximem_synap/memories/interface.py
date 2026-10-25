@@ -5,11 +5,11 @@ import json as _json
 import os
 import time
 from datetime import datetime
-from typing import IO, Dict, List, Optional, Union
+from typing import IO, Any, Dict, List, Optional, Union
 from uuid import UUID
 
 from ..utils.correlation import generate_correlation_id
-from ..models.errors import InvalidInputError
+from ..models.errors import InvalidInputError, SynapError
 from ..telemetry.collector import emit_memory_event
 from ..telemetry.models import TelemetryEventType
 from .models import (
@@ -26,6 +26,17 @@ from .models import (
     MergeStrategy,
     ForgetMode,
     ForgetResponse,
+    AttachmentResult,
+)
+from .parts import (
+    FilePart,
+    TextPart,
+    compact_json,
+    has_files,
+    join_text,
+    multipart_wire_parts,
+    resolve_files,
+    to_parts,
 )
 
 
@@ -45,6 +56,13 @@ class MemoriesInterface:
         result = await sdk.memories.create(
             document="Company refund policy: 30-day window.",
             document_type="document",
+        )
+
+        # A conversation with an image in it (png, jpeg or webp)
+        result = await sdk.memories.create(
+            document=["Here is my receipt", FilePart(path="receipt.png")],
+            user_id="user-123",
+            customer_id="customer-456",
         )
 
         # Check status
@@ -78,15 +96,18 @@ class MemoriesInterface:
 
     async def create(
         self,
-        document: str,
+        document: Union[
+            str, Dict[str, Any], TextPart, FilePart, List[Union[str, TextPart, FilePart]]
+        ],
         user_id: Optional[str] = None,
         customer_id: Optional[str] = None,
-        document_type: str = "ai-chat-conversation",
+        document_type: Optional[str] = None,
         document_id: Optional[str] = None,
         document_created_at: Optional[datetime] = None,
         mode: str = "long-range",
         metadata: Optional[dict] = None,
         scope: Optional[Dict[str, str]] = None,
+        objective: Optional[str] = None,
         **kwargs,
     ) -> CreateMemoryResponse:
         """
@@ -96,14 +117,31 @@ class MemoriesInterface:
         Use `status()` to check progress.
 
         Args:
-            document: The content to memorize
+            document: The content to memorize. One of:
+                - a string, or a dict (sent as it is);
+                - a `TextPart`, sent as its text;
+                - a list of strings, `TextPart` and `FilePart`. A list holding
+                  only text is joined with newlines and sent exactly as that
+                  string would be. A list holding a `FilePart` is uploaded
+                  with its files: each image is read and described, and the
+                  description takes the image's place in the text. Up to 10
+                  files, 10 MB each. Only png, jpeg and webp images are
+                  accepted today; use `create_from_file` for documents.
+                  `FilePart(url=...)` is fetched by the SDK, never the server.
+                  Needs a Synap server that supports file parts; an older one
+                  raises InvalidInputError saying so.
+                - a single `FilePart`, the same as a list holding only it.
+                An empty list raises InvalidInputError.
             user_id: External user ID this memory is about. Optional — omit
                 for customer- or client-scope ingestion.
             customer_id: External customer ID this memory belongs to. Optional —
                 omit for client-scope ingestion. The server derives the
                 effective scope from the IDs passed and the instance's
                 user_context_isolation (B2C/B2B).
-            document_type: Type of document (ai-chat-conversation, email, pdf, etc.)
+            document_type: Type of document (ai-chat-conversation, email, pdf,
+                etc.). Omitted, a text document is sent as
+                "ai-chat-conversation", as it always was; a document with files
+                leaves it to the server, which reads it as a conversation.
             document_id: Optional client-provided ID
             document_created_at: When the document was originally created
             mode: "fast" or "long-range"
@@ -114,18 +152,43 @@ class MemoriesInterface:
                 Only needed if your scope ladder has a level between customer
                 and user: two ids cannot say which one a write belongs to, and
                 the server refuses rather than guessing. Omit it otherwise.
+                {"client": "self"} names your own client level: the same as
+                omitting it with no ids, and an error with a user_id or
+                customer_id.
+            objective: What this write is for, stored with the ingestion. One
+                of `OBJECTIVES` ("conversation", "bootstrap", "knowledge-base",
+                "record", "profile") or free text, up to 500 characters. Only
+                sent when given.
 
         Returns:
-            CreateMemoryResponse with ingestion_id and status
+            CreateMemoryResponse with ingestion_id and status. `attachments`
+            lists what happened to each file, in order, when there were files.
+
+        Raises:
+            InvalidInputError: an empty list, a bad part, a file over 10 MB,
+                a path that cannot be read or a URL that cannot be fetched, a
+                contradictory scope, or a server too old to take files.
         """
         self._sdk._check_customer_id(customer_id, where="memories.create")
         self._sdk._ensure_initialized()
+
+        # A string or a dict goes to the model untouched: those callers'
+        # bodies must not change by a byte. Only the new shapes are unpacked.
+        parts = None
+        if isinstance(document, (TextPart, FilePart, list, tuple)):
+            parts = to_parts(document, what="document")
+            if not has_files(parts):
+                document = join_text(parts)
+                parts = None
+
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = time.time()
 
         request = CreateMemoryRequest(
-            document=document,
-            document_type=DocumentType(document_type),
+            document=document if parts is None else "",
+            document_type=DocumentType(
+                document_type if document_type is not None else DocumentType.CONVERSATION
+            ),
             document_id=document_id,
             document_created_at=document_created_at,
             user_id=user_id,
@@ -134,6 +197,9 @@ class MemoriesInterface:
             mode=IngestMode(mode),
             metadata=metadata or {},
         )
+        body = request.model_dump(mode="json")
+        if objective is not None:
+            body["objective"] = objective
 
         emit_memory_event(
             self._sdk._telemetry_collector,
@@ -143,20 +209,57 @@ class MemoriesInterface:
         )
 
         try:
-            auth_context = await self._sdk._get_auth_context(correlation_id)
+            if parts is None:
+                auth_context = await self._sdk._get_auth_context(correlation_id)
 
-            result = await self._sdk._http_transport.post(
-                path="/api/v1/memories/create",
-                auth_context=auth_context,
-                json=request.model_dump(mode="json"),
-                correlation_id=correlation_id,
-            )
+                result = await self._sdk._http_transport.post(
+                    path="/api/v1/memories/create",
+                    auth_context=auth_context,
+                    json=body,
+                    correlation_id=correlation_id,
+                )
+            else:
+                resolved = await resolve_files(parts)
+                manifest_parts, files = multipart_wire_parts(resolved)
+                body["document"] = manifest_parts
+                # Unset stays null: the server picks the type for a document
+                # with files rather than the SDK guessing one.
+                body["document_type"] = (
+                    DocumentType(document_type).value if document_type is not None else None
+                )
 
+                auth_context = await self._sdk._get_auth_context(correlation_id)
+                try:
+                    result = await self._sdk._http_transport.post_multipart(
+                        path="/api/v1/memories/create-multipart",
+                        auth_context=auth_context,
+                        data={"manifest": compact_json(body)},
+                        files=files,
+                        correlation_id=correlation_id,
+                    )
+                except SynapError as e:
+                    # A server older than the route answers 405 (another
+                    # method shares the path) or 404. Read by status, since
+                    # 405 and 404 map to different exception classes.
+                    if e.status_code not in (404, 405):
+                        raise
+                    raise InvalidInputError(
+                        "This Synap server does not support file parts in "
+                        "memories.create. Upgrade the Synap server, or send "
+                        "text only.",
+                        correlation_id=correlation_id,
+                    ) from e
+
+            attachments = result.get("attachments")
             response = CreateMemoryResponse(
                 ingestion_id=UUID(result["ingestion_id"]),
                 document_id=result["document_id"],
                 status=IngestStatus(result["status"]),
                 queued_at=datetime.fromisoformat(result["queued_at"]),
+                attachments=(
+                    [AttachmentResult(**a) for a in attachments]
+                    if attachments is not None else None
+                ),
             )
 
             latency_ms = int((time.time() - start_time) * 1000)

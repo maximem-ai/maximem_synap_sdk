@@ -45,6 +45,26 @@ _OP_UNACKED = "u"     # written to the stream, waiting for the server
 _OP_ACKED = "a"       # the server confirmed it; forget it
 _OP_DROPPED = "d"     # evicted by the depth or age bound; forget it
 
+# `send_message` puts an event's images here as base64, up to a few MB of it.
+# The journal is fsynced on the event loop, once per event, so it never holds
+# them: the event is journalled with the key removed. Its `content` already
+# carries the text with each image as "[image: <filename>]", so an event
+# replayed after a restart still records a meaningful turn, just without the
+# images. Kept in step with `memories.parts.STREAM_PARTS_METADATA_KEY`.
+_PARTS_METADATA_KEY = "synap_content_parts"
+
+
+def _journal_form(event: Dict[str, Any]) -> Dict[str, Any]:
+    """The event as it is written to disk: without the inline image parts."""
+    metadata = event.get("metadata")
+    if not isinstance(metadata, dict) or _PARTS_METADATA_KEY not in metadata:
+        return event
+    stripped = dict(event)
+    stripped["metadata"] = {
+        k: v for k, v in metadata.items() if k != _PARTS_METADATA_KEY
+    }
+    return stripped
+
 
 class OutboxJournal:
     """Append-only record of what the outbound buffers hold.
@@ -67,10 +87,10 @@ class OutboxJournal:
     # ---------------------------------------------------------------- writes
 
     def record_queued(self, message: Dict[str, Any]) -> None:
-        self._append({"op": _OP_QUEUED, "e": message})
+        self._append({"op": _OP_QUEUED, "e": _journal_form(message)})
 
     def record_unacked(self, message: Dict[str, Any]) -> None:
-        self._append({"op": _OP_UNACKED, "e": message})
+        self._append({"op": _OP_UNACKED, "e": _journal_form(message)})
 
     def record_acked(self, event_id: str) -> None:
         self._append({"op": _OP_ACKED, "id": event_id})
@@ -159,9 +179,11 @@ class OutboxJournal:
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
                     for event in unacked:
-                        fh.write(json.dumps({"op": _OP_UNACKED, "e": event}) + "\n")
+                        fh.write(json.dumps(
+                            {"op": _OP_UNACKED, "e": _journal_form(event)}) + "\n")
                     for event in queued:
-                        fh.write(json.dumps({"op": _OP_QUEUED, "e": event}) + "\n")
+                        fh.write(json.dumps(
+                            {"op": _OP_QUEUED, "e": _journal_form(event)}) + "\n")
                     fh.flush()
                     os.fsync(fh.fileno())
                 os.replace(tmp, self.path)

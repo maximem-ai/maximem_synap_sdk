@@ -90,6 +90,22 @@ async function resolveFs(): Promise<void> {
 export interface JournalEvent { event_id?: string; [k: string]: unknown }
 
 /**
+ * The stream protocol carries inline image bytes under this metadata key. The
+ * placeholder in `content` is enough for an interrupted event to be replayed,
+ * while retaining the bytes would put customer images on disk.
+ */
+function withoutContentParts(event: JournalEvent): JournalEvent {
+  const metadata = event['metadata'];
+  if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata)
+      || !Object.prototype.hasOwnProperty.call(metadata, 'synap_content_parts')) {
+    return event;
+  }
+  const cleanMetadata = { ...(metadata as Record<string, unknown>) };
+  delete cleanMetadata['synap_content_parts'];
+  return { ...event, metadata: cleanMetadata };
+}
+
+/**
  * `~/.synap`, the same root Python's SDK uses, so a Node process and a Python
  * process on one machine read each other's journals. Empty string where there
  * is no home directory to ask for, which disables the journal.
@@ -143,8 +159,12 @@ export class OutboxJournal {
 
   // ------------------------------------------------------------------ writes
 
-  recordQueued(event: JournalEvent): void { this.#append({ op: OP_QUEUED, e: event }); }
-  recordUnacked(event: JournalEvent): void { this.#append({ op: OP_UNACKED, e: event }); }
+  recordQueued(event: JournalEvent): void {
+    this.#append({ op: OP_QUEUED, e: withoutContentParts(event) });
+  }
+  recordUnacked(event: JournalEvent): void {
+    this.#append({ op: OP_UNACKED, e: withoutContentParts(event) });
+  }
   recordAcked(id: string): void { this.#append({ op: OP_ACKED, id }); }
 
   /** An event the buffers gave up on. It does not come back on restart either:
@@ -221,8 +241,8 @@ export class OutboxJournal {
     try {
       this.#mkdir();
       const body = [
-        ...unacked.map((e) => JSON.stringify({ op: OP_UNACKED, e })),
-        ...queued.map((e) => JSON.stringify({ op: OP_QUEUED, e })),
+        ...unacked.map((e) => JSON.stringify({ op: OP_UNACKED, e: withoutContentParts(e) })),
+        ...queued.map((e) => JSON.stringify({ op: OP_QUEUED, e: withoutContentParts(e) })),
       ].join('\n') + '\n';
       const tmp = `${this.path}.${Date.now()}.tmp`;
       this.#fs.writeFileSync(tmp, body, 'utf8');

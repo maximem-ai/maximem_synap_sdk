@@ -9,12 +9,22 @@ import type { HttpTransport } from '../transport/http.js';
 import { fetchContext, type FetchHooks } from '../context/fetch.js';
 import { agentModelOf, withAgentModel, type AgentModel } from '../agent-model.js';
 import type { FetchOptions, Json, RawContext } from '../context/types.js';
+import {
+  normaliseContent, toInlineParts,
+  type ContentPart, type WireImagePart, type WireTextPart,
+} from '../memories/parts.js';
 
 export interface RecordMessageOptions {
   conversation_id?: string;
   conversationId?: string;
   role: string;
-  content: string;
+  /**
+   * The message. A string, or a list of strings, `TextPart`s and `FilePart`s
+   * (images today). A list with no file is joined with `"\n"` and sent as that
+   * string. With a file, the parts are sent in order with each file inline as
+   * base64; the server reads the images and stores the message as text.
+   */
+  content: string | ContentPart[];
   user_id?: string;
   userId?: string;
   customer_id?: string;
@@ -119,7 +129,18 @@ function iso(v: string | Date | undefined): string | undefined {
   return v instanceof Date ? v.toISOString() : v;
 }
 
-export function buildRecordMessageBody(options: RecordMessageOptions): Json {
+/**
+ * The JSON body Python sends for one message.
+ *
+ * `resolvedContent` is the content after its files were read, supplied by
+ * `record_message`. Without it, a list with no file is joined into one string,
+ * and a list with a file throws: reading a file is async, and this is not.
+ */
+export function buildRecordMessageBody(
+  options: RecordMessageOptions,
+  resolvedContent?: string | Array<WireTextPart | WireImagePart>,
+  field = 'content',
+): Json {
   const o = options as unknown as Record<string, unknown>;
   const conversationId = either<string>(o, 'conversation_id', 'conversationId');
   const userId = either<string>(o, 'user_id', 'userId');
@@ -144,10 +165,24 @@ export function buildRecordMessageBody(options: RecordMessageOptions): Json {
   // here made the only correct B2C shape impossible to express.
   // checked by the caller, which holds the transport; see createConversationNamespace
 
+  let content: unknown = options.content;
+  if (resolvedContent !== undefined) {
+    content = resolvedContent;
+  } else {
+    const n = normaliseContent(options.content, field);
+    if (n?.kind === 'parts') {
+      throw new InvalidInputError(
+        'content holds a FilePart, whose bytes have to be read first. ' +
+          'Send it with conversation.record_message.',
+      );
+    }
+    if (n !== null) content = n.text;
+  }
+
   const body: Json = {
     conversation_id: conversationId,
     role: options.role,
-    content: options.content,
+    content,
     user_id: userId,
     customer_id: customerId,
     // Python always sends this, defaulting to {}.
@@ -478,6 +513,34 @@ export function createConversationNamespace(
       inFlight: writesInFlight.get(conversationId) ?? 0,
     };
   };
+  const fetchImpl = ((url: string, init?: RequestInit) =>
+    transport.fetchExternal(url, init)) as typeof fetch;
+  /** Everything but the content's files, so a bad id fails before a download. */
+  const validateMessage = (options: RecordMessageOptions, field = 'content'): void => {
+    if (normaliseContent(options.content, field)?.kind === 'parts') {
+      buildRecordMessageBody(options, '', field);
+    } else {
+      buildRecordMessageBody(options, undefined, field);
+    }
+  };
+  /**
+   * The body for one message, and what the local short-term store keeps for
+   * it: the content itself, or, when it carries images, the placeholder
+   * rendering (`[image: <filename>]`), never base64.
+   */
+  const prepareMessage = async (
+    options: RecordMessageOptions,
+    field = 'content',
+  ): Promise<{ body: Json; mirror: string }> => {
+    const n = normaliseContent(options.content, field);
+    if (n?.kind !== 'parts') {
+      const body = buildRecordMessageBody(options, undefined, field);
+      return { body, mirror: String(body['content'] ?? '') };
+    }
+    validateMessage(options, field);
+    const inline = await toInlineParts(n.parts, fetchImpl);
+    return { body: buildRecordMessageBody(options, inline.wire), mirror: inline.placeholder };
+  };
   const convId = (v: { conversation_id?: string; conversationId?: string } | string): string => {
     const id = typeof v === 'string' ? v : (v.conversation_id ?? v.conversationId);
     if (!id) throw new InvalidInputError('conversation_id is required');
@@ -495,7 +558,9 @@ export function createConversationNamespace(
           (options as unknown as Record<string, unknown>)['customerId'],
         'conversation.record_message',
       );
-      const body = withTurnModel(buildRecordMessageBody(options), options);
+      const prepared = await prepareMessage(options);
+      const body = withTurnModel(prepared.body, options);
+      const mirror = prepared.mirror;
       const conversationId = String(body['conversation_id'] ?? '');
       writeStarted(conversationId);
       let result: Json;
@@ -509,7 +574,7 @@ export function createConversationNamespace(
       onTurn({
         conversationId,
         role: String(body['role'] ?? 'user'),
-        content: String(body['content'] ?? ''),
+        content: mirror,
         timestamp: body['timestamp'] as string | undefined,
         ...confirmation(result, conversationId),
       });
@@ -532,7 +597,14 @@ export function createConversationNamespace(
           mo['customer_id'] ?? mo['customerId'], 'conversation.record_messages_batch',
         );
       }
-      const bodies = messages.map((m) => withTurnModel(buildRecordMessageBody(m), m));
+      // Every message validated before any file is read, then the files of
+      // all of them read together.
+      // Python names the failing message in the error, so this does too.
+      const field = (i: number) => `messages[${i}].content`;
+      messages.forEach((m, i) => validateMessage(m, field(i)));
+      const prepared = await Promise.all(messages.map((m, i) => prepareMessage(m, field(i))));
+      const bodies = prepared.map((p, i) => withTurnModel(p.body, messages[i]!));
+      const mirrors = new Map(prepared.map((p, i) => [bodies[i]!, p.mirror]));
       const result = await transport.request<Json>('conversations_messages_batch', {
         body: { messages: bodies },
       });
@@ -542,7 +614,7 @@ export function createConversationNamespace(
         onTurn({
           conversationId,
           role: String(body['role'] ?? 'user'),
-          content: String(body['content'] ?? ''),
+          content: mirrors.get(body) ?? String(body['content'] ?? ''),
           timestamp: body['timestamp'] as string | undefined,
           ...confirmation(row, conversationId),
         });

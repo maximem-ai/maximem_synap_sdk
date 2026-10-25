@@ -5,13 +5,41 @@ which enables automatic compaction when thresholds are exceeded.
 """
 
 import logging
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, Union
+
+from ..memories.parts import (
+    FilePart,
+    TextPart,
+    has_files,
+    inline_wire_parts,
+    is_parts,
+    join_text,
+    resolve_files,
+    to_parts,
+)
 
 if TYPE_CHECKING:
     from ..transport.http_client import HTTPTransport
     from ..auth.models import AuthContext
 
 logger = logging.getLogger("synap.sdk.facade.conversation")
+
+
+async def _wire_content(content: Any, *, what: str) -> Any:
+    """`content` as it goes on the wire.
+
+    Only parts (a list or a single part) are unpacked. A string, and
+    anything else a caller passed before parts existed, goes out exactly as
+    it did. A list holding only
+    text becomes the newline-joined string, so it is that string's bytes; a
+    list holding files becomes text and image parts with the bytes inline.
+    """
+    if not is_parts(content):
+        return content
+    parts = to_parts(content, what=what)
+    if not has_files(parts):
+        return join_text(parts)
+    return inline_wire_parts(await resolve_files(parts))
 
 
 class ConversationController:
@@ -35,7 +63,7 @@ class ConversationController:
         self,
         conversation_id: str,
         role: str,
-        content: str,
+        content: Union[str, List[Union[str, TextPart, FilePart]]],
         user_id: str,
         # Optional, to match ConversationInterface.record_message above it. A
         # B2C caller sends no customer_id, and a controller that still demands
@@ -51,7 +79,9 @@ class ConversationController:
         Args:
             conversation_id: Unique conversation identifier
             role: Message role ("user" or "assistant")
-            content: Message content text
+            content: Message content text, or a list of strings, TextPart and
+                FilePart. Text only is joined with newlines; files are read
+                and sent inline (images only, 10 MB each).
             user_id: User identifier (required)
             customer_id: Customer identifier (required)
             session_id: Session identifier (optional, auto-generated if not provided)
@@ -72,6 +102,8 @@ class ConversationController:
 
         if role not in ("user", "assistant"):
             raise ValueError(f"Invalid role '{role}'. Must be 'user' or 'assistant'.")
+
+        content = await _wire_content(content, what="content")
 
         auth_context = await self._auth_provider(correlation_id)
 
@@ -110,7 +142,8 @@ class ConversationController:
             messages: List of message dicts, each with:
                 - conversation_id: str (required)
                 - role: str ("user" or "assistant") (required)
-                - content: str (required)
+                - content: str, or a list of parts as in ``record_message``
+                  (required)
                 - user_id: Optional[str]
                 - customer_id: Optional[str]
                 - session_id: Optional[str]
@@ -140,19 +173,25 @@ class ConversationController:
             if msg["role"] not in ("user", "assistant"):
                 raise ValueError(f"Message {i} has invalid role '{msg['role']}'")
 
-        auth_context = await self._auth_provider(correlation_id)
-
         # Copy rather than mutate: the caller's list is theirs, and the batch
         # mirror in sdk.py reads the same dicts afterwards.
         wire = []
-        for msg in messages:
+        for i, msg in enumerate(messages):
             if "scope_path" in msg:
                 m = {k: v for k, v in msg.items() if k != "scope_path"}
                 if msg["scope_path"]:
                     m["scope"] = msg["scope_path"]
-                wire.append(m)
             else:
-                wire.append(msg)
+                m = msg
+            if is_parts(msg["content"]):
+                if m is msg:
+                    m = dict(msg)
+                m["content"] = await _wire_content(
+                    msg["content"], what=f"messages[{i}].content"
+                )
+            wire.append(m)
+
+        auth_context = await self._auth_provider(correlation_id)
 
         result = await self._transport.post(
             "/v1/conversations/messages/batch",
