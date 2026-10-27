@@ -221,3 +221,7 @@ class ForgetResponse(BaseModel):
     failed_ids: List[str] = Field(default_factory=list)
     still_present_in: List[str] = Field(default_factory=list)
     may_be_incomplete: bool = False
+    # A `direct` request that matched nothing and named its `conversation_id`
+    # is matched to that conversation's batch when it is saved. False for a
+    # request that did not name a conversation, and from servers that predate it.
+    retry_scheduled: bool = False
