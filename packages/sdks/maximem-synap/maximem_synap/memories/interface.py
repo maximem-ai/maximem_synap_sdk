@@ -789,6 +789,7 @@ class MemoriesInterface:
         customer_id: Optional[str] = None,
         scope: Optional[Dict[str, str]] = None,
         mode: str = "preview",
+        conversation_id: Optional[str] = None,
     ) -> ForgetResponse:
         """
         Forget memories by describing them in the user's own words.
@@ -821,6 +822,18 @@ class MemoriesInterface:
                 Only needed if your scope ladder has a level between customer
                 and user.
             mode: "preview" or "direct".
+            conversation_id: The conversation this request is made in. Optional,
+                and used only by `mode="direct"`. Pass it when you record the
+                conversation through the SDK's listening stream (the gRPC
+                `conversation.record_message` / `instance.send_message` path):
+                messages on that path are saved in batches, so the thing the
+                user just said may not exist as a memory yet when the request
+                arrives. With the id, a request that finds nothing is matched
+                to the batch of that conversation when it is saved, and removes
+                what it describes then; `retry_scheduled` is True on the
+                response. Without it, a request that finds nothing simply
+                answers "nothing_matches" and nothing waits. You do not need it
+                for `memories.create()`.
 
         Returns:
             ForgetResponse. `status` is one of "nothing_matches", "preview",
@@ -855,6 +868,13 @@ class MemoriesInterface:
                 f"{', '.join(m.value for m in ForgetMode)}"
             ) from None
 
+        if conversation_id is not None and (
+            not isinstance(conversation_id, str) or not 1 <= len(conversation_id) <= 200
+        ):
+            raise InvalidInputError(
+                "conversation_id must be a string of 1 to 200 characters"
+            )
+
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = time.time()
 
@@ -865,6 +885,10 @@ class MemoriesInterface:
             "scope": scope,
             "mode": forget_mode.value,
         }
+        # Sent only when given, so a call without it is byte-identical to what
+        # older versions sent.
+        if conversation_id is not None:
+            body["conversation_id"] = conversation_id
 
         emit_memory_event(
             self._sdk._telemetry_collector,

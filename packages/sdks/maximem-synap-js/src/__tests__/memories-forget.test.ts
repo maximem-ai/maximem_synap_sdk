@@ -54,6 +54,30 @@ describe('forget request body', () => {
     });
   });
 
+  it('leaves conversation_id out of the body unless it is given, as Python does', () => {
+    const body = buildForgetBody({ description: 'my old address', user_id: 'u1', mode: 'direct' });
+    expect(Object.keys(body)).toEqual(['description', 'user_id', 'customer_id', 'scope', 'mode']);
+  });
+
+  it('appends conversation_id after the existing keys when given (snake or camel)', () => {
+    const snake = buildForgetBody({ description: 'my contact number', user_id: 'u1', mode: 'direct', conversation_id: 'conv-42' });
+    const camel = buildForgetBody({ description: 'my contact number', userId: 'u1', mode: 'direct', conversationId: 'conv-42' });
+    expect(snake).toEqual(camel);
+    expect(Object.keys(snake)).toEqual(['description', 'user_id', 'customer_id', 'scope', 'mode', 'conversation_id']);
+    expect((snake as Record<string, unknown>)['conversation_id']).toBe('conv-42');
+  });
+
+  it.each(['', 'x'.repeat(201)])('rejects conversation_id %j before any request', (c) => {
+    expect(() => buildForgetBody({ description: 'my contact number', user_id: 'u1', conversation_id: c }))
+      .toThrow(InvalidInputError);
+  });
+
+  it('counts conversation_id in code points, as Python does', () => {
+    expect(() => buildForgetBody({ description: 'my contact number', user_id: 'u1', conversation_id: '\u{1F600}'.repeat(200) })).not.toThrow();
+    expect(() => buildForgetBody({ description: 'my contact number', user_id: 'u1', conversation_id: '\u{1F600}'.repeat(201) }))
+      .toThrow(InvalidInputError);
+  });
+
   it.each(['', 'ab', 'x'.repeat(501)])('rejects description %j before any request', (d) => {
     expect(() => buildForgetBody({ description: d, user_id: 'u1' })).toThrow(InvalidInputError);
   });
