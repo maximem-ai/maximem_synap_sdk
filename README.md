@@ -60,12 +60,13 @@ Synap's scores on the two standard long-term memory benchmarks, produced with ou
 
 | Benchmark | Synap accuracy | Scope | Answer model / judge |
 |---|---|---|---|
-| **LongMemEval** | **95.2%** (476 / 500) | Full set, 6 categories | `gpt-5.4` / `gpt-4o` |
-| **LongMemEval** (answerable questions) | 95.5% (449 / 470) | 30 abstention questions excluded | `gpt-5.4` / `gpt-4o` |
-| **LongMemEval retrieval** (Recall@20) | **98.1%** (461 / 470) | Abstention excluded | none / `gpt-4o` |
-| **LoCoMo** | **93.2%** | Cat 1–4, adversarial excluded | `gpt-5-mini` / `gpt-5-mini` |
+| **LongMemEval**, all 500 questions ([results](https://github.com/maximem-ai/eval_benchmark_runs_output/blob/main/RESULTS.md#longmemeval-overall-952)) | **95.2%** (476 / 500) | Full set, 6 categories | `gpt-5.4` / `gpt-4o` |
+| **LongMemEval**, answerable questions ([results](https://github.com/maximem-ai/eval_benchmark_runs_output#results-by-category)) | 95.5% (449 / 470) | 30 abstention questions excluded | `gpt-5.4` / `gpt-4o` |
+| **LongMemEval**, answerable, excluding 3 dataset-defect questions ([results](https://github.com/maximem-ai/eval_benchmark_runs_output/blob/main/RESULTS.md#longmemeval-answerable-excluding-3-dataset-defect-questions-961), [the 3 questions](https://github.com/maximem-ai/eval_benchmark_runs_output/blob/main/results/longmemeval/DATASET_DEFECTS.md)) | **96.1%** (449 / 467) | 467 of 500 | `gpt-5.4` / `gpt-4o` |
+| **LongMemEval retrieval**, Recall@20 ([results](https://github.com/maximem-ai/eval_benchmark_runs_output/blob/main/RESULTS.md#longmemeval-retrieval-recall20-981)) | **98.1%** (461 / 470) | Abstention excluded | none / `gpt-4o` |
+| **LoCoMo** ([results](https://github.com/maximem-ai/eval_benchmark_runs_output/blob/main/RESULTS.md#locomo-overall-932-cat-1-4-adversarial-excluded)) | **93.2%** | Cat 1–4, adversarial excluded | `gpt-5-mini` / `gpt-5-mini` |
 
-The LongMemEval run is from 2026-10-13 and the LoCoMo run from 2026-06-20. For LongMemEval, the retrieved memories, answer and judge verdict for every one of the 500 questions are published, so you can recompute the score.
+The LongMemEval run is from 2026-10-13 and the LoCoMo run from 2026-06-20. For LongMemEval, the retrieved memories, answer and judge verdict for every one of the 500 questions are published, so you can recompute the score. The 96.1% leaves out only 3 questions whose gold answers the conversations do not support; the all-500 score of 95.2% is the one to compare with other vendors.
 
 Other vendors publish their own numbers under different answer models and judges. Our harness ships adapters for Mem0, Zep and Supermemory, so you can run them side by side yourself. [How scores differ across setups →](https://github.com/maximem-ai/eval_benchmark_runs_output/blob/main/METHODOLOGY.md)
 
