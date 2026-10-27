@@ -314,6 +314,19 @@ export interface ForgetOptions {
   scope?: Record<string, string> | null;
   /** `"preview"` (default) or `"direct"`. See `MemoriesInterface.forget`. */
   mode?: ForgetMode | string;
+  /**
+   * The conversation this request is made in (1 to 200 characters). Used only
+   * by `mode: "direct"`. Pass it when you record the conversation through the
+   * SDK's listening stream (gRPC): messages on that path are saved in batches,
+   * so what the user just said may not exist as a memory yet. With the id, the
+   * request also stays open until the batch of that conversation that holds it
+   * has been saved and checked, whether or not the search finds something now,
+   * and removes what it describes then (`retry_scheduled` is true). Without it,
+   * the request is answered once (`nothing_matches` if nothing is found) and
+   * nothing waits. Not needed for `memories.create()`.
+   */
+  conversation_id?: string | null;
+  conversationId?: string | null;
 }
 
 /** A memory the description matched. Mirrors Python's `ForgetCandidate`. */
@@ -336,6 +349,13 @@ export interface ForgetResult {
   failed_ids: string[];
   still_present_in: string[];
   may_be_incomplete: boolean;
+  /**
+   * True when a `direct` request named its `conversation_id` and stays open until
+   * the batch of that conversation that holds it has been saved and checked,
+   * whether or not the search found something now. Absent from servers that
+   * predate it; read it as false.
+   */
+  retry_scheduled?: boolean;
 }
 
 /** The body Python builds for `memories.forget`, key order included. */
@@ -359,13 +379,26 @@ export function buildForgetBody(options: ForgetOptions): Json {
     );
   }
   const o = options as unknown as Record<string, unknown>;
-  return {
+  const body: Record<string, unknown> = {
     description,
     user_id: either<string>(o, 'user_id', 'userId') ?? null,
     customer_id: either<string>(o, 'customer_id', 'customerId') ?? null,
     scope: options.scope ?? null,
     mode,
   };
+  // Sent only when given, as Python does, so a call without it is unchanged.
+  const conversationId = either<string>(o, 'conversation_id', 'conversationId');
+  if (conversationId !== undefined && conversationId !== null) {
+    if (
+      typeof conversationId !== 'string' ||
+      [...conversationId].length < 1 ||
+      [...conversationId].length > 200
+    ) {
+      throw new InvalidInputError('conversation_id must be a string of 1 to 200 characters');
+    }
+    body['conversation_id'] = conversationId;
+  }
+  return body as Json;
 }
 
 export interface MemoriesInterface {
