@@ -36,7 +36,7 @@
 
 ## The memory layer for production AI agents
 
-Synap gives your agents memory that lasts across conversations, sessions and devices. It scores **95.2% on LongMemEval and 93.2% on LoCoMo** ([every LongMemEval answer is published](https://github.com/maximem-ai/eval_benchmark_runs_output), [reproduce with our open harness](https://github.com/maximem-ai/memory_and_context_eval_harness)), fetches context in ~15ms P50 (internal measurement) before your agent asks, and ships native packages for 24 agent frameworks.
+Synap gives your agents memory that lasts across conversations, sessions and devices. It scores **95.6% on LongMemEval and 93.2% on LoCoMo** ([every LongMemEval answer is published](https://github.com/maximem-ai/eval_benchmark_runs_output), [reproduce with our open harness](https://github.com/maximem-ai/memory_and_context_eval_harness)), fetches context in ~15ms P50 (internal measurement) before your agent asks, and ships native packages for 24 agent frameworks.
 
 <p align="center">
   <strong>LangChain · LangGraph · LlamaIndex · CrewAI · AutoGen · Haystack · Google ADK · OpenAI Agents · Semantic Kernel · Pydantic AI · Agno · LiveKit · Pipecat · Claude Agent · Mastra · Vercel AI SDK · NeMo Agent Toolkit · Microsoft Agent Framework</strong>
@@ -60,13 +60,12 @@ Synap's scores on the two standard long-term memory benchmarks, produced with ou
 
 | Benchmark | Synap accuracy | Scope | Answer model / judge |
 |---|---|---|---|
-| **LongMemEval**, all 500 questions ([results](https://github.com/maximem-ai/eval_benchmark_runs_output/blob/main/RESULTS.md#longmemeval-overall-952)) | **95.2%** (476 / 500) | Full set, 6 categories | `gpt-5.4` / `gpt-4o` |
-| **LongMemEval**, answerable questions ([results](https://github.com/maximem-ai/eval_benchmark_runs_output#results-by-category)) | 95.5% (449 / 470) | 30 abstention questions excluded | `gpt-5.4` / `gpt-4o` |
-| **LongMemEval**, answerable, excluding 3 dataset-defect questions ([results](https://github.com/maximem-ai/eval_benchmark_runs_output/blob/main/RESULTS.md#longmemeval-answerable-excluding-3-dataset-defect-questions-961), [the 3 questions](https://github.com/maximem-ai/eval_benchmark_runs_output/blob/main/results/longmemeval/DATASET_DEFECTS.md)) | **96.1%** (449 / 467) | 467 of 500 | `gpt-5.4` / `gpt-4o` |
+| **LongMemEval**, all 500 questions ([results](https://github.com/maximem-ai/eval_benchmark_runs_output/blob/main/RESULTS.md#longmemeval-overall-956)) | **95.6%** (478 / 500) | Full set, 6 categories | `gemini-3.8-flash` / `gpt-4o` |
+| **LongMemEval**, answerable questions ([results](https://github.com/maximem-ai/eval_benchmark_runs_output/blob/main/RESULTS.md#longmemeval-answerable-questions-957)) | 95.7% (450 / 470) | 30 abstention questions excluded | `gemini-3.8-flash` / `gpt-4o` |
 | **LongMemEval retrieval**, Recall@20 ([results](https://github.com/maximem-ai/eval_benchmark_runs_output/blob/main/RESULTS.md#longmemeval-retrieval-recall20-981)) | **98.1%** (461 / 470) | Abstention excluded | none / `gpt-4o` |
 | **LoCoMo** ([results](https://github.com/maximem-ai/eval_benchmark_runs_output/blob/main/RESULTS.md#locomo-overall-932-cat-1-4-adversarial-excluded)) | **93.2%** | Cat 1–4, adversarial excluded | `gpt-5-mini` / `gpt-5-mini` |
 
-The LongMemEval run is from 2026-10-13 and the LoCoMo run from 2026-06-20. For LongMemEval, the retrieved memories, answer and judge verdict for every one of the 500 questions are published, so you can recompute the score. The 96.1% leaves out only 3 questions whose gold answers the conversations do not support; the all-500 score of 95.2% is the one to compare with other vendors.
+The LongMemEval run is from October 2026 and the LoCoMo run from 2026-06-20. For LongMemEval, the retrieved memories, answer and judge verdict for every one of the 500 questions are published, so you can recompute the score.
 
 Other vendors publish their own numbers under different answer models and judges. Our harness ships adapters for Mem0, Zep and Supermemory, so you can run them side by side yourself. [How scores differ across setups →](https://github.com/maximem-ai/eval_benchmark_runs_output/blob/main/METHODOLOGY.md)
 
@@ -327,7 +326,7 @@ Understand the system before building on it:
 
 - 📘 **[Why we built Synap](https://www.maximem.ai/blog/why-we-built-synap)**: the problem with current AI memory systems
 - ⚙️ **[How Synap works under the hood](https://www.maximem.ai/blog/how-maximem-synap-works)**: architecture, retrieval pipeline, and design decisions
-- 📊 **[Benchmark results](https://www.maximem.ai/blog/synap-benchmark-results)**: 95.2% on LongMemEval, 93.2% on LoCoMo, methodology, and reproducibility
+- 📊 **[Benchmark results](https://www.maximem.ai/blog/synap-benchmark-results)**: 95.6% on LongMemEval, 93.2% on LoCoMo, methodology, and reproducibility
 - 🧪 **[Evaluation harness](https://github.com/maximem-ai/memory_and_context_eval_harness)**: run LoCoMo and LongMemEval yourself against Synap, Mem0, Zep and Supermemory
 
 ---
