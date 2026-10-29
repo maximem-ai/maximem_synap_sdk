@@ -42,6 +42,20 @@ Synap gives your agents memory that lasts across conversations, sessions and dev
   <strong>LangChain · LangGraph · LlamaIndex · CrewAI · AutoGen · Haystack · Google ADK · OpenAI Agents · Semantic Kernel · Pydantic AI · Agno · LiveKit · Pipecat · Claude Agent · Mastra · Vercel AI SDK · NeMo Agent Toolkit · Microsoft Agent Framework</strong>
 </p>
 
+<p align="center">
+  <picture>
+    <source media="(prefers-reduced-motion: reduce)" srcset="assets/chart-static.png">
+    <img src="assets/chart-animated.gif" alt="LongMemEval accuracy as published by each vendor, with Maximem Synap highest at 95.6% on all 500 questions" width="800" />
+  </picture>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/comparison-table-dark.png">
+    <img src="assets/comparison-table-light.png" alt="Table: LongMemEval_S answer accuracy on all 500 questions for Maximem Synap (95.6%, answer model Gemini 3.8 Flash, judge gpt-4o) and other vendors' published scores. Columns: context per question in tokens, run data public, eval harness open, answer model, judge model, score date." width="800" />
+  </picture>
+</p>
+
 ### What's open, what's hosted
 
 | | This repo (Apache 2.0) | Synap Cloud (managed) |
