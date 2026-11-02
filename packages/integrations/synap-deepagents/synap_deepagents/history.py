@@ -30,6 +30,7 @@ from deepagents.middleware._utils import append_to_system_message
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
+    coerce_conversation_id,
     CompactedHistory,
     SynapIntegrationError,
     splice_history,
@@ -84,7 +85,7 @@ async def fetch_history(
             site, logger, conversation_id=conversation_id, style=style,
         ):
             response = await sdk.conversation.context.get_context_for_prompt(
-                conversation_id=conversation_id,
+                conversation_id=coerce_conversation_id(conversation_id),
                 style=style,
             )
     except SynapIntegrationError:

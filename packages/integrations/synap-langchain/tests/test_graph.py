@@ -6,6 +6,7 @@ Documented error-handling contract (from graph.py / wrap_sdk_errors_async):
 """
 
 import pytest
+from synap_integrations_common import coerce_conversation_id
 from unittest.mock import AsyncMock, MagicMock
 
 from synap_langchain.graph import create_synap_node
@@ -69,7 +70,7 @@ async def test_node_extracts_query_from_human_messages(mock_sdk):
     assert result == {"synap_context": "context here"}
     call_kwargs = mock_sdk.fetch.call_args.kwargs
     assert call_kwargs["search_query"] == ["what is my budget?"]
-    assert call_kwargs["conversation_id"] == "conv-1"
+    assert call_kwargs["conversation_id"] == coerce_conversation_id("conv-1")
     assert call_kwargs["user_id"] == "u1"
 
 
@@ -144,7 +145,7 @@ async def test_node_reads_conversation_id_from_state_when_not_set(mock_sdk):
     node = create_synap_node(mock_sdk, user_id="u1")  # no conversation_id
     await node({"messages": [], "conversation_id": "from-state-123"})
 
-    assert mock_sdk.fetch.call_args.kwargs["conversation_id"] == "from-state-123"
+    assert mock_sdk.fetch.call_args.kwargs["conversation_id"] == coerce_conversation_id("from-state-123")
 
 
 @pytest.mark.asyncio

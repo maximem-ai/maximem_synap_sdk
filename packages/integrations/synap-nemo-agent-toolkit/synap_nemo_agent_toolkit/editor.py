@@ -35,14 +35,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Optional
+from typing import Any, Dict, Mapping, Optional
 
 from maximem_synap import MaximemSynapSDK
 from nat.memory.interfaces import MemoryEditor
 from nat.memory.models import MemoryItem
 
 from nat.builder.context import ContextState
-from synap_integrations_common import record_turn, wrap_sdk_errors_async
+from synap_integrations_common import (
+    ensure_ids_match_path,
+    record_turn,
+    wrap_sdk_errors_async,
+)
 
 from synap_nemo_agent_toolkit._ledger import consume_written
 
@@ -67,6 +71,11 @@ class SynapMemoryEditor(MemoryEditor):
         document_type: ``document_type`` stamped on every ``memories.create``
             write. Defaults to ``"ai-chat-conversation"`` to match the
             other integrations.
+        scope_path: The level on a deeper scope ladder, e.g. ``{"customer":
+            "acme", "team": "payments", "user": "alice"}``. Fixed when the
+            editor is built (it is not read from ``search`` kwargs or from a
+            ``MemoryItem``) and sent with every read, write and recorded turn,
+            only when set. Writes get it as ``memories.create(scope=...)``.
     """
 
     def __init__(
@@ -76,6 +85,7 @@ class SynapMemoryEditor(MemoryEditor):
         customer_id: str = "",
         mode: str = "accurate",
         document_type: str = "ai-chat-conversation",
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> None:
         if sdk is None:
             raise ValueError("SynapMemoryEditor requires a non-None sdk")
@@ -83,6 +93,10 @@ class SynapMemoryEditor(MemoryEditor):
         self.customer_id = customer_id
         self.mode = mode
         self.document_type = document_type
+        self.scope_path: Optional[Dict[str, str]] = dict(scope_path) if scope_path else None
+        ensure_ids_match_path(
+            self.scope_path, customer_id=customer_id or None,
+            where="SynapMemoryEditor(customer_id=)")
         self._delete_warned = False
 
     # ── writes ─────────────────────────────────────────────────────────────
@@ -98,9 +112,18 @@ class SynapMemoryEditor(MemoryEditor):
         if not items:
             return
 
-        async def _one(item: MemoryItem) -> None:
+        # Validate EVERY item before writing any, so a mixed batch is
+        # all-or-nothing. The item's user is per call; the path is fixed. The
+        # server lets the path win, so a different user would be filed under
+        # the path's.
+        for item in items:
             if not item.user_id:
                 raise ValueError("MemoryItem.user_id is required for Synap writes")
+            ensure_ids_match_path(
+                self.scope_path, user_id=item.user_id, customer_id=self.customer_id,
+                where="nemo_agent_toolkit.add_items")
+
+        async def _one(item: MemoryItem) -> None:
             conversation = item.conversation
             if not item.memory and conversation:
                 conversation = await self._record_turns(item.user_id, conversation)
@@ -129,6 +152,7 @@ class SynapMemoryEditor(MemoryEditor):
                     customer_id=self.customer_id or "",
                     document_type=self.document_type,
                     metadata=metadata,
+                    **({"scope": dict(self.scope_path)} if self.scope_path else {}),
                 )
 
         # Fan out concurrently — mirrors Mem0Editor's asyncio.gather shape
@@ -142,6 +166,9 @@ class SynapMemoryEditor(MemoryEditor):
 
         A turn the exporter already wrote counts as recorded.
         """
+        ensure_ids_match_path(
+            self.scope_path, user_id=user_id, customer_id=self.customer_id,
+            where="nemo_agent_toolkit.record_turns")
         conversation_id = ""
         try:
             conversation_id = ContextState.get().conversation_id.get() or ""
@@ -157,6 +184,7 @@ class SynapMemoryEditor(MemoryEditor):
             elif not await record_turn(
                 self.sdk, role=role, content=text, conversation_id=conversation_id,
                 user_id=user_id, customer_id=self.customer_id,
+                **({"scope_path": dict(self.scope_path)} if self.scope_path else {}),
             ):
                 left.append(msg)
         return left
@@ -182,6 +210,12 @@ class SynapMemoryEditor(MemoryEditor):
         )
         tag_filter = kwargs.pop("tag_filter", None)
 
+        # Outside the try below on purpose: a read that degrades to [] on an SDK
+        # blip must not turn a mismatched identity into "no memories". It raises.
+        ensure_ids_match_path(
+            self.scope_path, user_id=user_id, customer_id=customer_id,
+            where="nemo_agent_toolkit.search")
+
         try:
             response = await self.sdk.fetch(
                 user_id=user_id,
@@ -190,6 +224,7 @@ class SynapMemoryEditor(MemoryEditor):
                 max_results=max(int(top_k), 1),
                 mode=self.mode,
                 include_conversation_context=include_conversation_context,
+                **({"scope_path": dict(self.scope_path)} if self.scope_path else {}),
             )
         except Exception as exc:  # noqa: BLE001 — read-side graceful degrade
             logger.error(

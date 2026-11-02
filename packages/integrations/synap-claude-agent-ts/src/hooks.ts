@@ -87,7 +87,8 @@ import {
   reportToolCall,
   reportToolResult,
 } from "./stream-events.js";
-import type { SynapIdentityOptions } from "./types.js";
+import { withScopePath, type SynapIdentityOptions } from "./types.js";
+import { assertSdkSupportsScopePath, ensureIdsMatchPath } from "./scope-guard.js";
 
 export interface CreateSynapHooksOptions extends SynapIdentityOptions {
   /** Synap fetch mode; "accurate" (default) or "fast". */
@@ -141,6 +142,7 @@ export function createSynapHooks(
     maxResults = 20,
     contextPreamble = DEFAULT_CONTEXT_PREAMBLE,
     recordUserPrompts = true,
+    scopePath,
   } = options;
 
   if (!sdk) {
@@ -149,6 +151,10 @@ export function createSynapHooks(
   if (!userId) {
     throw new Error("createSynapHooks requires a non-empty userId");
   }
+  // Fixed at construction, so a disagreement is a configuration mistake: the
+  // server would use the path's `user` / `customer` over the ids sent beside it.
+  assertSdkSupportsScopePath(sdk, scopePath, "createSynapHooks");
+  ensureIdsMatchPath(scopePath, { userId, customerId, where: "createSynapHooks" });
 
   /**
    * The compaction last put in front of the model, so a compaction is injected
@@ -187,6 +193,7 @@ export function createSynapHooks(
         max_results: maxResults,
         mode,
         include_conversation_context: false,
+        ...withScopePath("scope_path", scopePath),
       });
       formatted = (response.formatted_context ?? "").trim();
     } catch (err) {
@@ -207,6 +214,7 @@ export function createSynapHooks(
         conversationId: convId,
         userId,
         customerId,
+        ...(scopePath && Object.keys(scopePath).length > 0 ? { scopePath } : {}),
       });
     }
 
@@ -298,6 +306,7 @@ export function createSynapHooks(
       conversationId: convIdOf(i),
       userId,
       customerId,
+      ...(scopePath && Object.keys(scopePath).length > 0 ? { scopePath } : {}),
     });
     return {};
   };

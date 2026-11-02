@@ -17,6 +17,7 @@ import pytest
 from agent_framework import Message
 from synap_microsoft_agent.history_provider import SynapHistoryProvider
 from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +150,7 @@ class TestGetMessagesHappyPath:
         await provider.get_messages("sess-fallback")
 
         sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-            conversation_id="conv-explicit"
+            conversation_id=coerce_conversation_id("conv-explicit")
         )
 
     @pytest.mark.asyncio
@@ -161,7 +162,7 @@ class TestGetMessagesHappyPath:
         await provider.get_messages("sess-from-arg")
 
         sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-            conversation_id="sess-from-arg"
+            conversation_id=coerce_conversation_id("sess-from-arg")
         )
 
     @pytest.mark.asyncio

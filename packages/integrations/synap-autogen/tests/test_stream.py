@@ -19,6 +19,7 @@ The contract these pin, from ``stream_events`` and from the module docstring:
 
 from __future__ import annotations
 
+from synap_integrations_common.conversation_id import coerce_conversation_id
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -51,6 +52,7 @@ requires_agentchat = pytest.mark.skipif(
 )
 
 from synap_integrations_common import set_auto_listen
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 from synap_autogen.stream import (
     SynapStreamingChatContext,
@@ -174,7 +176,7 @@ class TestStreamFirstAndNeverBoth:
             ("user", "hello"), ("assistant", "hi"),
         ]
         for c in calls:
-            assert c.kwargs["conversation_id"] == "conv-1"
+            assert c.kwargs["conversation_id"] == coerce_conversation_id("conv-1")
             assert c.kwargs["user_id"] == "user-1"
             assert c.kwargs["customer_id"] == "cust-1"
 

@@ -51,6 +51,17 @@ guard = _load_guard()
 _COMMON = "maximem-synap-integrations-common"
 
 
+def _highest_floor(dist: str) -> str:
+    """The newest `dist` any package in this checkout asks for (see below)."""
+    floors = [
+        guard.parse_version(r.floor)
+        for folder in guard.SELECTION_ENV.values()
+        for r in guard.requirements_of(folder)
+        if r.name == dist
+    ]
+    return ".".join(str(n) for n in max(floors))
+
+
 def _highest_common_floor() -> str:
     """The newest `integrations-common` any package in this checkout asks for.
 
@@ -177,9 +188,9 @@ class TestTheCaseTheGuardWasWrittenFor:
 
     def _pypi_on_the_day(self, name: str) -> str | None:
         return {
-            "maximem-synap": "0.5.3",
+            "maximem-synap": _highest_floor("maximem-synap"),
             _COMMON: _common_one_bump_below_its_floor(),
-            "maximem-synap-langchain": "0.3.2",
+            "maximem-synap-langchain": _highest_floor("maximem-synap-langchain"),
         }.get(name)
 
     def _exists_on_the_day(self, name: str, version: str) -> bool:
@@ -237,7 +248,7 @@ class TestTheCaseTheGuardWasWrittenFor:
         # that is not out yet can only be satisfied by publishing that first.
         def sdk_is_behind(name: str) -> str | None:
             return {
-                "maximem-synap": "0.5.2",
+                "maximem-synap": "0.0.1",
                 "maximem-synap-integrations-common": "0.2.0",
             }.get(name)
 
@@ -273,9 +284,9 @@ class TestPypiSummaryEndpointLag:
 
     def _stale_summary(self, name: str) -> str | None:
         return {
-            "maximem-synap": "0.5.2",  # actually 0.5.3, the cache has not caught up
+            "maximem-synap": "0.0.1",  # actually the floor, the cache has not caught up
             _COMMON: _highest_common_floor(),  # common's own floor is met
-            "maximem-synap-langchain": "0.3.2",
+            "maximem-synap-langchain": _highest_floor("maximem-synap-langchain"),
         }.get(name)
 
     def test_a_stale_summary_does_not_refuse_a_release_that_is_actually_fine(self):
@@ -283,7 +294,7 @@ class TestPypiSummaryEndpointLag:
             ["synap-agno"],
             "patch",
             lookup=self._stale_summary,
-            exists=lambda name, version: (name, version) == ("maximem-synap", "0.5.3"),
+            exists=lambda name, version: (name, version) == ("maximem-synap", _highest_floor("maximem-synap")),
         )
         assert problems == [], (
             f"the floor IS met, PyPI's summary is just behind; got {problems}"

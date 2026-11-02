@@ -35,6 +35,7 @@ export type { SynapCompactionModelOptions } from "./compaction.js";
 export { createSynapStreamHooks } from "./stream.js";
 export type { SynapStreamHooksOptions, SynapTurnSdkLike } from "./stream.js";
 export { setAutoListen } from "./stream-events.js";
+export { SynapScopeError } from "./scope-guard.js";
 export type { SynapStreamSdkLike } from "./stream-events.js";
 
 export {

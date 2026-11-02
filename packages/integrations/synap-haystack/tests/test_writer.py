@@ -16,6 +16,7 @@ from haystack import Document
 
 from synap_haystack import SynapMemoryWriter, SynapMemoryStore
 from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +169,7 @@ class TestWriterRun:
     def test_conversation_id_forwarded_to_sdk(self, writer, mock_sdk):
         writer.run(documents=[_user_doc()])
         kw = mock_sdk.conversation.record_message.call_args.kwargs
-        assert kw["conversation_id"] == "conv-1"
+        assert kw["conversation_id"] == coerce_conversation_id("conv-1")
 
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ import pytest
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 from synap_deepagents.middleware import (
     SYNAP_MEMORY_PROMPT,
@@ -183,7 +184,7 @@ async def test_scope_and_knobs_forwarded(mock_sdk):
     kwargs = mock_sdk.fetch.await_args.kwargs
     assert kwargs["user_id"] == "alice"
     assert kwargs["customer_id"] == "acme"
-    assert kwargs["conversation_id"] == "conv-1"
+    assert kwargs["conversation_id"] == coerce_conversation_id("conv-1")
     assert kwargs["max_results"] == 5
     assert kwargs["mode"] == "accurate"
     assert kwargs["precision_level"] == "medium"

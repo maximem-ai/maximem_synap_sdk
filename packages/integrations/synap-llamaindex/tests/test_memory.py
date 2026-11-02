@@ -8,6 +8,7 @@ Documented error-handling contract (from memory.py docstring):
 
 from __future__ import annotations
 
+from synap_integrations_common.conversation_id import coerce_conversation_id
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,6 +17,7 @@ from llama_index.core.base.llms.types import ChatMessage, MessageRole
 
 from synap_llamaindex.memory import SynapChatMemory
 from synap_integrations_common import SynapIntegrationError, set_auto_listen
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +154,7 @@ async def test_aget_with_input_calls_fetch(memory, mock_sdk):
 
     mock_sdk.fetch.assert_awaited_once()
     call_kwargs = mock_sdk.fetch.call_args.kwargs
-    assert call_kwargs["conversation_id"] == "conv-1"
+    assert call_kwargs["conversation_id"] == coerce_conversation_id("conv-1")
     assert call_kwargs["user_id"] == "u1"
     assert call_kwargs["search_query"] == ["tea preferences"]
     assert call_kwargs["include_conversation_context"] is False
@@ -312,7 +314,7 @@ async def test_aput_records_user_message(memory, mock_sdk):
     kw = mock_sdk.conversation.record_message.call_args.kwargs
     assert kw["role"] == "user"
     assert kw["content"] == "hi there"
-    assert kw["conversation_id"] == "conv-1"
+    assert kw["conversation_id"] == coerce_conversation_id("conv-1")
     assert kw["user_id"] == "u1"
     assert kw["customer_id"] == "c1"
 

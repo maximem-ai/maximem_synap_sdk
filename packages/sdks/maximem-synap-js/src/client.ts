@@ -16,6 +16,7 @@
 import type { AgentModel } from './agent-model.js';
 import { AuthenticationError, InvalidInputError } from './errors.js';
 import { getEnv } from './util/env.js';
+import { isLocalMode, localToken } from './local-mode.js';
 import { HttpTransport, type Credentials, type HttpTransportOptions } from './transport/http.js';
 import { fetchContext, responseShapeOf } from './context/fetch.js';
 import { normalizeContextResponse } from './context/normalize.js';
@@ -33,6 +34,7 @@ import {
 import { createDataInterface, type DataInterface } from './data/interface.js';
 import { createUserNamespace, type UserNamespace } from './user/interface.js';
 import { createCreditsNamespace, type CreditsNamespace } from './credits/interface.js';
+import { createMacaNamespace, type MacaNamespace } from './maca/interface.js';
 import { createCacheNamespace, type CacheNamespace } from './cache/interface.js';
 import { createInstanceNamespace, type InstanceNamespace } from './instance/interface.js';
 import type { FetchOptions, Json, NormalisedContext, RawContext } from './context/types.js';
@@ -59,6 +61,7 @@ import {
 import { conversationStateContext, hasQuery, profileContext } from './context/no-query.js';
 import { buildTool, type AsToolOptions, type ToolDefinition } from './tool/as-tool.js';
 import { checkCustomerId } from './scoping.js';
+import { type ScopeLadder, pathAboveIdentity } from './scope-ladder.js';
 
 /** Levels the SDK emits. Mirrors the subset of Python's logging it uses. */
 export type SynapLogLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -174,6 +177,8 @@ export interface SynapClientOptions {
    * running two clients on one identity with separate caches.
    */
   _force_new?: boolean;
+  /** Test seam: a monotonic clock in milliseconds for the scope-ladder cache. Not part of the everyday surface. */
+  _clock?: () => number;
 }
 
 interface ScopedContext {
@@ -251,6 +256,28 @@ export interface UnifiedFetchOptions {
    * numbered list in that order. The typed lists are filled either way.
    */
   response_shape?: string;
+  /**
+   * The rung to read at, one entry per level from the first, for an account
+   * with a deeper ladder (see `get_scope_ladder` and `ScopeLadder.address`).
+   * Only when set. Send ids as well. Not needed on a default ladder. The user
+   * and conversation fetches get the path as given. The client fetch gets no
+   * path. The client read is meant to return the account-wide shared memory,
+   * and the user and customer reads already cover the person's and the team's
+   * own levels. The server does apply a path on that route (it narrows the read
+   * to that chain's own nodes), so sending one would narrow the shared read,
+   * duplicate results the other reads return, and create registry nodes on a
+   * read; it is also validated strictly (HTTP 400 if it is invalid or nested
+   * scoping is off). SDK 0.7.0 sent it. The customer fetch
+   * reads shared material only and the server refuses (HTTP 400) a path that
+   * names the identity rung, so it gets the path with the identity level and
+   * every level below it removed. The identity level is found by its role on
+   * the account's ladder, which `fetch` reads first when a path is set and the
+   * customer scope runs (one shared read, cached 300 s; no request when it is
+   * cached, and none for a call without a path). If that read fails, a warning
+   * is logged and only the reserved key `user` is removed. A path with no
+   * identity level goes to the user, conversation and customer fetches as given.
+   */
+  scope_path?: Record<string, string> | null;
 }
 
 /** `SYNAP_SDK_LOCAL_MODEL=off` keeps the local embedding model from loading. Python: the same. */
@@ -279,12 +306,14 @@ export class SynapClient {
   readonly memories!: MemoriesInterface;
   readonly data!: DataInterface;
   readonly credits!: CreditsNamespace;
+  readonly maca!: MacaNamespace;
   readonly cache!: CacheNamespace;
   readonly instance!: InstanceNamespace;
 
   #closed = false;
   #initialized = false;
   #identity: Promise<void> | undefined;
+  #localMode = false;
   readonly #registryKeys!: string[];
   readonly #compactionSubscribers!: CompactionSubscribers;
   readonly #shortTerm!: ShortTermStore;
@@ -304,8 +333,9 @@ export class SynapClient {
   readonly #fetchHooks!: FetchHooks;
 
   constructor(options: SynapClientOptions = {}) {
-    const credentials = resolveCredentials(options);
     const resolvedBaseUrl = resolveBaseUrl(options);
+    const localMode = isLocalMode(options.apiKey, resolvedBaseUrl);
+    const credentials = resolveCredentials(options, localMode);
     // Fail locally on a malformed id rather than sending it upstream.
     validateInstanceId(credentials.instanceId);
 
@@ -341,6 +371,7 @@ export class SynapClient {
       }
     }
     this.#registryKeys = options._force_new === true ? [] : [registryKey];
+    this.#localMode = localMode;
 
     this.#transport = new HttpTransport({
       credentials,
@@ -354,10 +385,17 @@ export class SynapClient {
       ...(options.retryPolicy !== undefined ? { retryPolicy: options.retryPolicy } : {}),
       ...(options.keepAlive !== undefined ? { keepAlive: options.keepAlive } : {}),
       ...(options.fetchImpl !== undefined ? { fetchImpl: options.fetchImpl } : {}),
+      ...(options._clock !== undefined ? { clock: options._clock } : {}),
       userAgent: `@maximem/synap-js-sdk/${SDK_VERSION}`,
     });
     if (options.heartbeat) this.#transport.startHeartbeat();
     this.#transport.identityResolver = () => this.#resolveIdentity();
+    // A 400 that answers a call which carried a scope path may mean the ladder
+    // we hold is stale, so the next get_scope_ladder() re-reads. A 400 on a call
+    // with no path says nothing about it, and the server's wording is not read.
+    this.#transport.onInvalidInput = (_error, carriedScopePath) => {
+      if (carriedScopePath) this.#transport.invalidateScopeLadder();
+    };
 
     this.#anticipationCache = new AnticipationCache();
 
@@ -559,6 +597,7 @@ export class SynapClient {
       return cleared;
     });
     this.credits = createCreditsNamespace(this.#transport);
+    this.maca = createMacaNamespace(this.#transport);
     this.cache = createCacheNamespace(this.#anticipationCache);
     this.instance = createInstanceNamespace(
       () => this.#transport.currentCredentials(),
@@ -580,6 +619,12 @@ export class SynapClient {
     // then, not at construction, so a process that never listens or searches
     // never downloads it.
     this.instance._internal.setOnListen(() => this.#startLocalModel());
+    if (localMode) {
+      this.instance._internal.blockListen(
+        'Not available in the open-source server: listen() needs the gRPC stream and ' +
+          'anticipation, which it does not have.',
+      );
+    }
     this.instance._internal.setCompactionApplier((bundle) => {
       this.#shortTerm.applyCompaction(bundle);
     });
@@ -736,15 +781,39 @@ export class SynapClient {
     await this.#resolveIdentity();
   }
 
+  /**
+   * The account's scope ladder, or `null` when it cannot be known.
+   *
+   * Mirrors Python's `get_scope_ladder()`. Read lazily from
+   * `GET /api/v1/auth/whoami` (even when the client and instance ids are
+   * already known), cached for 300 s (`null` included), re-read on `refresh: true`. Concurrent
+   * callers share one read. If a re-read
+   * after expiry fails, the last known ladder is returned with a warning and
+   * the next try waits 60 s. A failure on the very first read, or with
+   * `refresh`, is thrown. With no `scope_ladder` block the default ladder is
+   * inferred from `user_context_isolation` (`source: "inferred"`).
+   *
+   *     const ladder = await client.get_scope_ladder();
+   *     const addr = ladder!.address(['acme', 'payments', 'dana']);
+   *     await client.fetch({ search_query: ['...'], ...addr.read_kwargs() });
+   */
+  async get_scope_ladder(options: { refresh?: boolean } = {}): Promise<ScopeLadder | null> {
+    return this.#transport.getScopeLadder(options.refresh === true, (m) => this.#warn(m));
+  }
+
   /** Runs whoami at most once, however many calls arrive together. */
   #resolveIdentity(): Promise<void> {
-    this.#identity ??= this.#whoami();
+    this.#identity ??= this.#whoami().catch((error: unknown) => {
+      // Only local mode throws. Forget the failure so a later call asks again.
+      this.#identity = undefined;
+      throw error;
+    });
     return this.#identity;
   }
 
   async #whoami(): Promise<void> {
     const credentials = this.#transport.currentCredentials();
-    if (credentials.clientId !== '' && credentials.instanceId !== '') return;
+    if (!this.#localMode && credentials.clientId !== '' && credentials.instanceId !== '') return;
     try {
       const whoami = (await this.#transport.request('whoami', {})) as Json;
       const resolvedClientId = String(whoami['client_id'] ?? '');
@@ -777,9 +846,26 @@ export class SynapClient {
           this.#registryKeys.push(resolvedInstanceId);
         }
       }
-    } catch {
+    } catch (error) {
       // Non-fatal, exactly as in Python: identity resolution is an
       // optimisation, and every route still authenticates on the API key.
+      // Local mode has no key to fall back on, so there it is an error.
+      if (this.#localMode) {
+        throw new AuthenticationError(
+          `Could not reach the Synap server at ${this.#transport.baseUrl}, or it did not ` +
+            `identify itself: GET /api/v1/auth/whoami failed (${(error as Error)?.message ?? String(error)}).`,
+          { cause: error },
+        );
+      }
+    }
+    if (this.#localMode) {
+      const known = this.#transport.currentCredentials();
+      if (known.clientId === '' || known.instanceId === '') {
+        throw new AuthenticationError(
+          `The Synap server at ${this.#transport.baseUrl} did not identify itself: ` +
+            'GET /api/v1/auth/whoami returned no client_id or instance_id.',
+        );
+      }
     }
   }
 
@@ -876,6 +962,7 @@ export class SynapClient {
       include_profile: includeProfile = true,
       last_n_conversations: lastNConversations = 1,
       response_shape: responseShape = 'by_type',
+      scope_path: scopePath,
     } = options;
 
     // First, as Python checks it: on B2C a customer_id is refused even when
@@ -899,7 +986,36 @@ export class SynapClient {
       query_date: queryDate,
       max_results_per_query: maxResultsPerQuery,
       response_shape: responseShape,
+      // Forwarded only when set (Python: `if scope_path`), so a call without
+      // one hands every scope fetch exactly the options it always got.
+      ...(scopePath !== undefined && scopePath !== null && Object.keys(scopePath).length > 0
+        ? { scope_path: scopePath }
+        : {}),
     };
+
+    // The customer route reads shared material and refuses a path that names
+    // the identity rung (HTTP 400), so it gets the path stopped above that
+    // rung. The identity level is found by role on the account's ladder, so the
+    // ladder is read first (get_scope_ladder: one shared read, cached 300 s, so
+    // usually no request). Only when a path is set AND the customer fetch will
+    // run: any other call makes no ladder request. If the read fails, the
+    // reserved key `user` is the identity and the failure is warned about.
+    // Python: sdk.fetch.
+    const { scope_path: _fullPath, ...sharedNoPath } = shared as typeof shared & { scope_path?: Record<string, string> };
+    void _fullPath;
+    let customerPath: Record<string, string> | undefined;
+    if (scopePath && Object.keys(scopePath).length > 0
+        && customerId !== undefined && customerId !== null && customerId !== '' && wants('customer')) {
+      let ladder: ScopeLadder | null = null;
+      try {
+        ladder = await this.get_scope_ladder();
+      } catch (e) {
+        this.#warn(`Could not read the scope ladder (${e instanceof Error ? e.message : String(e)}); `
+          + "cutting the customer scope's path at the reserved key 'user'.");
+      }
+      customerPath = pathAboveIdentity(scopePath, ladder);
+    }
+    const customerShared = customerPath ? { ...sharedNoPath, scope_path: customerPath } : sharedNoPath;
 
     const labels: string[] = [];
     const tasks: Array<Promise<RawContext>> = [];
@@ -946,7 +1062,7 @@ export class SynapClient {
     if (present(customerId) && wants('customer')) {
       labels.push('customer');
       tasks.push(this.customer.context.fetch({
-        customer_id: customerId, conversation_id: conversationId, ...shared,
+        customer_id: customerId, conversation_id: conversationId, ...customerShared,
       } as FetchOptions));
     }
     // Client scope needs no identifier (it is inferred from auth), but Python
@@ -955,7 +1071,7 @@ export class SynapClient {
     if (scopes !== undefined && scopes.includes('client')) {
       labels.push('client');
       tasks.push(this.client.context.fetch({
-        conversation_id: conversationId, ...shared,
+        conversation_id: conversationId, ...sharedNoPath,
       } as FetchOptions));
     }
 
@@ -1340,7 +1456,7 @@ function resolveBaseUrl(options: SynapClientOptions): string | undefined {
   return fromEnv !== undefined && fromEnv !== '' ? fromEnv : undefined;
 }
 
-function resolveCredentials(options: SynapClientOptions): Credentials {
+function resolveCredentials(options: SynapClientOptions, localMode: boolean): Credentials {
   // Read at call time, not module load, so a late process.env mutation works.
   // `||`, not `??`: an empty apiKey falls back to the environment, as
   // Python's `api_key or os.environ.get(...)` does.
@@ -1348,14 +1464,15 @@ function resolveCredentials(options: SynapClientOptions): Credentials {
   // An AuthenticationError, as Python raises it (auth/manager.py), so one
   // `catch` handles "no usable key" in both SDKs. Until 0.5.13 this was an
   // InvalidInputError.
-  if (!apiKey) {
+  if (!apiKey && !localMode) {
     throw new AuthenticationError(
       'No Synap API key found. Set SYNAP_API_KEY in your environment, or pass ' +
         'apiKey to the SynapClient constructor.',
     );
   }
   return {
-    apiKey,
+    // In local mode the credential is the optional token, '' when there is none.
+    apiKey: apiKey || localToken(),
     clientId: options.clientId ?? getEnv('SYNAP_CLIENT_ID') ?? '',
     instanceId: options.instanceId ?? getEnv('SYNAP_INSTANCE_ID') ?? '',
   };

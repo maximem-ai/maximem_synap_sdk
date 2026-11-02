@@ -259,6 +259,7 @@ Production default: `long-range` ingest, `fast` retrieve.
 10. **Provision only through the CLI procedure above**, never from application code, and never create or delete workspaces or touch billing or members.
 11. **Open the stream in a long-lived process.** `listen()` at startup, the five events per turn, `stop_listening()` at shutdown. Finishing an integration with read and write only is the most common way it delivers nothing.
 12. **Read the instance mode, never guess it.** `GET /api/v1/auth/whoami` → `user_context_isolation`. `equals_customer` = B2C, send `user_id` alone; `strict` = B2B, send both ids. Never pass the user id as a `customer_id` to fill the field, and never send both "to be safe": on B2C that is an HTTP 400 on every call.
+13. **Detect a deeper scope ladder, never assume it.** whoami's `scope_ladder` block (read through `await sdk.get_scope_ladder()`, Python SDK 0.7.1 / JS SDK 0.7.1 or later; 0.7.0 fails on the customer scope when a path is sent) lists the levels. On a default ladder send ids only. On a deeper one build the arguments with `ladder.address([...])` (`read_kwargs()` / `write_kwargs()`), which refuses before any request if the path would be refused. Never hand-write a path on a default ladder, and never guess a level key.
 
 ## Supported framework integrations
 

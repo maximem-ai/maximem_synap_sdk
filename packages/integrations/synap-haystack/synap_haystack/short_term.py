@@ -35,6 +35,7 @@ from typing import Dict, Literal, Optional
 from haystack import component
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
+    coerce_conversation_id,
     SynapIntegrationError,
     run_async,
     wrap_sdk_errors_async,
@@ -144,7 +145,7 @@ class SynapShortTermContext:
                 style=self.style,
             ):
                 response = await self.sdk.conversation.context.get_context_for_prompt(
-                    conversation_id=self.conversation_id,
+                    conversation_id=coerce_conversation_id(self.conversation_id),
                     style=self.style,
                 )
             compaction = getattr(response, "context_block", None)

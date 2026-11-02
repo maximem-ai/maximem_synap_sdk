@@ -20,6 +20,7 @@ Contract under test:
 
 from __future__ import annotations
 
+from synap_integrations_common.conversation_id import coerce_conversation_id
 import asyncio
 import json
 import sys
@@ -45,7 +46,7 @@ from nat.data_models.intermediate_step import (  # noqa: E402
 )
 from nat.data_models.invocation_node import InvocationNode  # noqa: E402
 
-from synap_integrations_common import set_auto_listen  # noqa: E402
+from synap_integrations_common import coerce_conversation_id, set_auto_listen  # noqa: E402
 from synap_nemo_agent_toolkit.stream import (  # noqa: E402
     SynapStreamExporter,
     SynapStreamExporterConfig,
@@ -499,7 +500,7 @@ class TestStreamOnly:
             ("user", "where is my order"),
             ("assistant", "it ships tomorrow"),
         ]
-        assert all(c.kwargs["conversation_id"] == "conv-1" for c in calls)
+        assert all(c.kwargs["conversation_id"] == coerce_conversation_id("conv-1") for c in calls)
         assert all(c.kwargs["user_id"] == "user-1" for c in calls)
 
     @pytest.mark.asyncio

@@ -58,6 +58,7 @@ from .models.errors import (
     TransientError,
 )
 from .scoping import CustomerIdNotAcceptedError
+from .scope_ladder import ScopeAddress, ScopeLadder, ScopeLadderError, ScopeLevel
 from .data import DeleteDataResult
 from .memories.models import (
     BatchCreateRequest,
@@ -139,6 +140,10 @@ __all__ = [
     "InvalidInstanceIdError",
     "InvalidConversationIdError",
     "CustomerIdNotAcceptedError",
+    "ScopeAddress",
+    "ScopeLadder",
+    "ScopeLadderError",
+    "ScopeLevel",
     "AuthenticationError",
     "ContextNotFoundError",
     "ConflictError",

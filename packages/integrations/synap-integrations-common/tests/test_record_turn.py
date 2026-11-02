@@ -6,6 +6,9 @@ import pytest
 
 from synap_integrations_common import record_turn
 
+from synap_integrations_common import coerce_conversation_id  # noqa: E402
+CONV_REST = coerce_conversation_id("c1")  # REST wants the UUID the server derives from "c1"
+
 
 def sdk(listening: bool, record=None):
     return SimpleNamespace(
@@ -27,7 +30,7 @@ async def test_without_a_stream_the_turn_goes_over_rest():
     s = sdk(False)
     assert await record_turn(s, role="assistant", content="hello", conversation_id="c1", user_id="u1")
     s.conversation.record_message.assert_awaited_once_with(
-        conversation_id="c1", role="assistant", content="hello", user_id="u1")
+        conversation_id=CONV_REST, role="assistant", content="hello", user_id="u1")
 
 
 @pytest.mark.asyncio

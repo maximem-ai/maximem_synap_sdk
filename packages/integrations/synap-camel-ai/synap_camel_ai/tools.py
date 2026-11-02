@@ -12,11 +12,11 @@ CAMEL tool bodies are synchronous, so each drives the async SDK through
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import Any, Dict, List, Mapping, Optional
 
 from camel.toolkits import FunctionTool
 from maximem_synap import MaximemSynapSDK
-from synap_integrations_common import run_async, wrap_sdk_errors
+from synap_integrations_common import ensure_ids_match_path, run_async, wrap_sdk_errors
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,7 @@ def create_synap_tools(
     user_id: str,
     *,
     customer_id: str = "",
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> List[FunctionTool]:
     """Build ``search_memory`` and ``store_memory`` tools bound to a Synap scope.
 
@@ -35,6 +36,10 @@ def create_synap_tools(
         customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
             B2C instance (user_context_isolation=equals_customer): the server
             rejects a call carrying one with HTTP 400. Leave it unset there.
+        scope_path: Deeper scope ladders only: the level both tools read and
+            write at, as ``{level_key: value}``. It is closed over here and sent
+            only when set; it is NOT a parameter of either tool, so the model
+            cannot choose a level.
 
     Returns:
         A list ``[search_memory, store_memory]`` of :class:`FunctionTool`.
@@ -43,6 +48,13 @@ def create_synap_tools(
         raise ValueError("create_synap_tools requires a non-None sdk")
     if not user_id or not str(user_id).strip():
         raise ValueError("create_synap_tools requires a non-empty user_id")
+    ensure_ids_match_path(
+        scope_path, user_id=user_id, customer_id=customer_id or None,
+        where="create_synap_tools")
+
+    path: Optional[Dict[str, str]] = dict(scope_path) if scope_path else None
+    read_extra: Dict[str, Any] = {"scope_path": path} if path else {}
+    write_extra: Dict[str, Any] = {"scope": path} if path else {}
 
     def search_memory(query: str) -> str:
         """Search the user's long-term memory for relevant context.
@@ -60,6 +72,7 @@ def create_synap_tools(
                     customer_id=customer_id or None,
                     search_query=[query],
                     include_conversation_context=False,
+                    **read_extra,
                 )
             )
         except Exception as exc:  # noqa: BLE001 — read-side graceful degrade
@@ -90,6 +103,7 @@ def create_synap_tools(
                     document=content,
                     user_id=user_id,
                     customer_id=customer_id or None,
+                    **write_extra,
                 )
             )
         return (

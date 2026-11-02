@@ -53,6 +53,7 @@ describe('@maximem/synap-mastra public surface', () => {
       'buildSynapShortTermSystem',
       'synapShortTermInstructions',
       'setAutoListen',
+      'SynapScopeError',
     ]);
     const actual = Object.keys(pkg).filter(
       (k) => typeof (pkg as Record<string, unknown>)[k] !== 'undefined',

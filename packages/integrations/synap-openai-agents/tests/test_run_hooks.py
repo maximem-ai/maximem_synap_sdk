@@ -13,6 +13,7 @@ agent's loop, where an exception from telemetry ends the run.
 
 from __future__ import annotations
 
+from synap_integrations_common.conversation_id import coerce_conversation_id
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -20,6 +21,7 @@ import pytest
 
 from synap_integrations_common import set_auto_listen
 from synap_openai_agents import SynapRunHooks, report_user_turn
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 def sdk(listening: bool = True, auto_listen: bool = False):
@@ -204,7 +206,7 @@ class TestWithoutAStream:
         assert [(c.kwargs["role"], c.kwargs["content"]) for c in calls] == [
             ("user", "where is my order"), ("assistant", "Your order shipped."),
         ]
-        assert all(c.kwargs["conversation_id"] == "c1" for c in calls)
+        assert all(c.kwargs["conversation_id"] == coerce_conversation_id("c1") for c in calls)
         assert calls[1].kwargs["customer_id"] == "cus1"
         s.instance.send_message.assert_not_awaited()
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 import abc
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 from uuid import uuid4
 
 from agno.db.base import AsyncBaseDb
@@ -39,6 +39,9 @@ class AsyncSynapDb(AsyncBaseDb):
         max_results: Default cap on ``sdk.fetch`` when Agno doesn't specify.
         default_query: The question asked when Agno loads a user's memories
             without a search term (see :class:`SynapDb`).
+        scope_path: Deeper scope ladders only; see :class:`SynapDb`. A path that
+            includes the ``user`` level fixes the user: a call for another
+            user_id raises ``SynapIntegrationError`` before anything is sent.
     """
 
     def __init__(
@@ -49,6 +52,7 @@ class AsyncSynapDb(AsyncBaseDb):
         mode: str = "accurate",
         max_results: int = 50,
         default_query: str = DEFAULT_QUERY,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> None:
         if sdk is None:
             raise ValueError("AsyncSynapDb requires a non-None sdk")
@@ -56,7 +60,8 @@ class AsyncSynapDb(AsyncBaseDb):
         # The sync class holds the Synap logic and the in-process stores; this class
         # awaits its async internals directly and never goes through run_async.
         self._synap = SynapDb(
-            sdk, customer_id, mode=mode, max_results=max_results, default_query=default_query
+            sdk, customer_id, mode=mode, max_results=max_results, default_query=default_query,
+            scope_path=scope_path,
         )
         self._inner = InMemoryDb()
         self.sdk = sdk
@@ -84,6 +89,8 @@ class AsyncSynapDb(AsyncBaseDb):
         preserve_updated_at: bool = False,
     ) -> List[Union[UserMemory, Dict[str, Any]]]:
         out: List[Union[UserMemory, Dict[str, Any]]] = []
+        for memory in memories:  # all of them first: no partial write
+            self._synap._check_user(memory.user_id, "AsyncSynapDb.upsert_memories")
         for memory in memories:
             if memory.memory_id is None:
                 memory.memory_id = str(uuid4())
@@ -139,9 +146,11 @@ class AsyncSynapDb(AsyncBaseDb):
         return self._synap.get_user_memory_stats(limit=limit, page=page, user_id=user_id)
 
     async def delete_user_memory(self, memory_id: str, user_id: Optional[str] = None) -> None:
+        self._synap._check_user(user_id, "AsyncSynapDb.delete_user_memory")
         await self._synap._adelete([memory_id])
 
     async def delete_user_memories(self, memory_ids: List[str], user_id: Optional[str] = None) -> None:
+        self._synap._check_user(user_id, "AsyncSynapDb.delete_user_memories")
         await self._synap._adelete(memory_ids)
 
     async def clear_memories(self) -> None:

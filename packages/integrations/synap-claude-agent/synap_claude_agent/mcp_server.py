@@ -39,11 +39,12 @@ fix it. :class:`_CustomerScope` makes the injection conditional instead.
 from __future__ import annotations
 
 import logging
-from typing import Any, Awaitable, Callable, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, TypeVar
 
 from claude_agent_sdk import SdkMcpTool, create_sdk_mcp_server, tool
 from claude_agent_sdk.types import McpSdkServerConfig
 from maximem_synap import MaximemSynapSDK
+from synap_integrations_common import coerce_conversation_id, ensure_ids_match_path
 
 try:  # SDK >= 0.4.7 raises this client-side on a B2C instance.
     from maximem_synap.scoping import CustomerIdNotAcceptedError as _SdkCustomerIdError
@@ -175,6 +176,7 @@ def _build_synap_tools(
     customer_id: str,
     conversation_id: Optional[str],
     mode: str,
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> list[SdkMcpTool]:
     """Build the underlying :class:`SdkMcpTool` list.
 
@@ -187,7 +189,15 @@ def _build_synap_tools(
     :class:`_CustomerScope` rather than pasted into both calls, so a B2C instance
     stops receiving a field it refuses. Pass "" on B2C.
     """
+    ensure_ids_match_path(
+        scope_path, user_id=user_id or None, customer_id=customer_id or None,
+        where="create_synap_mcp_server")
     scope = _CustomerScope(sdk, customer_id)
+    # Closed over here: it is not in either tool's input schema and nothing in
+    # the model's arguments is read as a level, so the model cannot choose one.
+    path: Optional[Dict[str, str]] = dict(scope_path) if scope_path else None
+    read_extra: Dict[str, Any] = {"scope_path": path} if path else {}
+    write_extra: Dict[str, Any] = {"scope": path} if path else {}
 
     @tool(
         "synap_search",
@@ -210,13 +220,14 @@ def _build_synap_tools(
 
         async def _fetch(scoped_customer_id):
             return await sdk.fetch(
-                conversation_id=conversation_id,
+                conversation_id=coerce_conversation_id(conversation_id),
                 user_id=user_id,
                 customer_id=scoped_customer_id,
                 search_query=[query],
                 max_results=max_results,
                 mode=mode,
                 include_conversation_context=False,
+                **read_extra,
             )
 
         try:
@@ -284,6 +295,7 @@ def _build_synap_tools(
                 user_id=user_id,
                 customer_id=scoped_customer_id,
                 metadata=metadata,
+                **write_extra,
             )
 
         try:
@@ -334,6 +346,7 @@ def create_synap_mcp_server(
     name: str = "synap",
     version: str = "0.1.0",
     mode: str = "accurate",
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> McpSdkServerConfig:
     """Build an in-process MCP server exposing Synap as Claude tools.
 
@@ -354,6 +367,10 @@ def create_synap_mcp_server(
         name: Server name; sets the ``mcp__<name>__<tool>`` prefix.
         version: Server version string.
         mode: Synap fetch mode, "accurate" (default) or "fast".
+        scope_path: Deeper scope ladders only: the level both tools read and
+            write at, as ``{level_key: value}``. Bound here with the ids, sent
+            only when set, and never a tool argument: the model cannot choose a
+            level.
     """
     if sdk is None:
         raise ValueError("create_synap_mcp_server requires a non-None sdk")
@@ -366,5 +383,6 @@ def create_synap_mcp_server(
         customer_id=customer_id,
         conversation_id=conversation_id,
         mode=mode,
+        scope_path=scope_path,
     )
     return create_sdk_mcp_server(name=name, version=version, tools=tools)

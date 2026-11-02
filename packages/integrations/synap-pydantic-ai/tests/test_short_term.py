@@ -37,6 +37,7 @@ import pytest
 
 from synap_integrations_common import SynapIntegrationError
 from synap_pydantic_ai.deps import SynapDeps
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 from synap_pydantic_ai.short_term import (
     _compose,
     _validate,
@@ -238,7 +239,7 @@ class TestCacheHit:
         await cb(_FakeRunContext(deps=deps))
 
         sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-            conversation_id="conv_target",
+            conversation_id=coerce_conversation_id("conv_target"),
             style="narrative",
         )
 
@@ -253,7 +254,7 @@ class TestCacheHit:
         await cb(_FakeRunContext(deps=deps))
 
         sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-            conversation_id="conv_abc",
+            conversation_id=coerce_conversation_id("conv_abc"),
             style="bullet_points",
         )
 

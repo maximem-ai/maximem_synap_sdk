@@ -14,6 +14,7 @@ import sys
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 # Load short_term.py directly to avoid triggering the package __init__
 # (which imports editor.py, which needs nat.memory.interfaces).
@@ -157,7 +158,7 @@ class TestCacheHit:
         fn = SynapShortTermFunction(sdk, style="bullet_points")
         await fn(conversation_id="conv_abc")
         sdk.conversation.context.get_context_for_prompt.assert_awaited_with(
-            conversation_id="conv_abc",
+            conversation_id=coerce_conversation_id("conv_abc"),
             style="bullet_points",
         )
 
@@ -167,7 +168,7 @@ class TestCacheHit:
         fn = SynapShortTermFunction(sdk, default_conversation_id="conv_default")
         await fn()  # no explicit conv id
         sdk.conversation.context.get_context_for_prompt.assert_awaited_with(
-            conversation_id="conv_default",
+            conversation_id=coerce_conversation_id("conv_default"),
             style="narrative",
         )
 
@@ -177,7 +178,7 @@ class TestCacheHit:
         fn = SynapShortTermFunction(sdk, default_conversation_id="conv_default")
         await fn(conversation_id="conv_override")
         sdk.conversation.context.get_context_for_prompt.assert_awaited_with(
-            conversation_id="conv_override",
+            conversation_id=coerce_conversation_id("conv_override"),
             style="narrative",
         )
 

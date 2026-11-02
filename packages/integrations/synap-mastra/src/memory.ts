@@ -24,6 +24,7 @@
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 import { MastraMemory } from "@mastra/core/memory";
+import { assertSdkSupportsScopePath, ensureIdsMatchPath } from "./scope-guard.js";
 import type {
   StorageThreadType,
   MessageDeleteInput,
@@ -49,10 +50,11 @@ import {
   messageText,
 } from "./processors.js";
 import { SynapMastraStreamReporter, type SynapStreamOptions } from "./stream.js";
-import type {
-  SynapSdkLike,
-  SynapRecentMessage,
-  SynapIdentityOptions,
+import {
+  withScopePath,
+  type SynapSdkLike,
+  type SynapRecentMessage,
+  type SynapIdentityOptions,
 } from "./types.js";
 
 export interface SynapMemoryOptions extends SynapIdentityOptions, SynapStreamOptions {
@@ -79,6 +81,7 @@ export class SynapMemory extends MastraMemory {
   private readonly sdk: SynapSdkLike;
   private readonly userId: string;
   private readonly customerId: string;
+  private readonly scopePath: Record<string, string> | undefined;
   private readonly mode: string;
   private readonly injectSystemContext: boolean;
   private readonly stream: SynapMastraStreamReporter;
@@ -98,10 +101,20 @@ export class SynapMemory extends MastraMemory {
     if (!options.userId) {
       throw new Error("SynapMemory requires a non-empty userId");
     }
+    // Fixed at construction, so a disagreement is a configuration mistake and
+    // is refused here, before any call: the server would use the path's
+    // `user` / `customer` over the ids and the run would address another identity.
+    assertSdkSupportsScopePath(options.sdk, options.scopePath, "SynapMemory");
+    ensureIdsMatchPath(options.scopePath, {
+      userId: options.userId,
+      customerId: options.customerId,
+      where: "SynapMemory",
+    });
     super({ id: options.id, name: "synap" });
     this.sdk = options.sdk;
     this.userId = options.userId;
     this.customerId = options.customerId ?? "";
+    this.scopePath = options.scopePath;
     this.mode = options.mode ?? "accurate";
     this.injectSystemContext = options.injectSystemContext ?? true;
     this.stream = new SynapMastraStreamReporter(
@@ -111,6 +124,7 @@ export class SynapMemory extends MastraMemory {
       {
         reportToolResults: options.reportToolResults,
         reportThoughts: options.reportThoughts,
+        scopePath: options.scopePath,
       },
     );
   }
@@ -136,6 +150,7 @@ export class SynapMemory extends MastraMemory {
         max_results: 20,
         mode: this.mode,
         include_conversation_context: false,
+        ...withScopePath("scope_path", this.scopePath),
       });
       const text = (response.formatted_context ?? "").trim();
       return text ? text : null;
@@ -237,6 +252,7 @@ export class SynapMemory extends MastraMemory {
         sdk: this.sdk,
         userId: this.userId,
         customerId: this.customerId,
+        scopePath: this.scopePath,
         mode: this.mode,
         injectSystemContext: this.injectSystemContext,
       }),
@@ -315,6 +331,7 @@ export class SynapMemory extends MastraMemory {
         content,
         user_id: this.userId,
         ...(this.customerId ? { customer_id: this.customerId } : {}),
+        ...withScopePath("scope_path", this.scopePath),
       });
       out.push(m);
     }

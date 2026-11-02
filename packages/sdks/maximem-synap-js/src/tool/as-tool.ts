@@ -29,6 +29,14 @@ export interface AsToolOptions {
   name?: string;
   description?: string;
   style?: string;
+  /**
+   * Closed-over rung for an account with a deeper ladder. Never part of the
+   * schema the LLM sees, so the model cannot change it. Forwarded only when set.
+   * With `scope: 'unified'` the customer fetch gets it cut above the identity
+   * rung, as in `fetch`. With `scope: 'customer'` it goes as given, and the
+   * server refuses (HTTP 400) a path that names the identity rung.
+   */
+  scope_path?: Record<string, string> | null;
 }
 
 export type ToolHandler = (callArgs?: Json) => Promise<Json>;
@@ -178,8 +186,15 @@ export async function invokeScopeFetch(params: {
   customerId: string | undefined;
   conversationId: string | undefined;
   callArgs: Json;
+  scopePath?: Record<string, string> | null | undefined;
 }): Promise<Json> {
-  const { target, scope, userId, customerId, conversationId, callArgs } = params;
+  const { target, scope, userId, customerId, conversationId, callArgs, scopePath } = params;
+  // Closed over, never read from callArgs: the model cannot change it. Added
+  // only when set, so a tool without one hands the fetch what it always got.
+  const pathOpt: Json =
+    scopePath !== undefined && scopePath !== null && Object.keys(scopePath).length > 0
+      ? { scope_path: scopePath }
+      : {};
 
   const searchQuery = callArgs['search_query'];
   // Python: `int(call_args.get("max_results") or 10)` -- so 0 falls back to 10.
@@ -199,6 +214,7 @@ export async function invokeScopeFetch(params: {
     types,
     mode,
     precision_level: precisionLevel,
+    ...pathOpt,
   };
 
   if (scope === 'unified') {
@@ -305,7 +321,9 @@ export function buildTool(
   const schema = toolInputSchema(scope, { hasConversationId: conversationId !== undefined });
 
   const handler: ToolHandler = (callArgs: Json = {}) =>
-    invokeScopeFetch({ target, scope, userId, customerId, conversationId, callArgs });
+    invokeScopeFetch({
+      target, scope, userId, customerId, conversationId, callArgs, scopePath: options.scope_path,
+    });
 
   if (style === 'openai') {
     return {

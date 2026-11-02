@@ -26,7 +26,7 @@ and unit-tested.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 from uuid import UUID
 
 from langchain_core.callbacks import AsyncCallbackHandler
@@ -35,6 +35,7 @@ from langchain_core.outputs import Generation, LLMResult
 
 from maximem_synap import MaximemSynapSDK
 
+from synap_integrations_common import ensure_ids_match_path
 from synap_integrations_common.stream_events import (
     record_turn,
     report_reasoning,
@@ -183,6 +184,8 @@ class SynapCallbackHandler(AsyncCallbackHandler):
         conversation_id: str,
         user_id: str,
         customer_id: str = "",
+        *,
+        scope_path: Optional[Mapping[str, str]] = None,
     ):
         if sdk is None:
             raise ValueError("SynapCallbackHandler requires a non-None sdk")
@@ -192,11 +195,18 @@ class SynapCallbackHandler(AsyncCallbackHandler):
             )
         if not user_id:
             raise ValueError("SynapCallbackHandler requires a non-empty user_id")
+        ensure_ids_match_path(
+            scope_path, user_id=user_id, customer_id=customer_id or None,
+            where="SynapCallbackHandler")
 
         self.sdk = sdk
         self.conversation_id = conversation_id
         self.user_id = user_id
         self.customer_id = customer_id
+        # The conversation's level on a deeper scope ladder. Carried on the
+        # two turn events only (user and assistant): the tool and reasoning
+        # events cannot carry a path (see ``record_turn``).
+        self.scope_path = dict(scope_path) if scope_path else None
         # ⚠ Which user turns have already gone out.
         #
         # `on_chat_model_start` fires once per MODEL CALL, not once per turn.
@@ -237,11 +247,15 @@ class SynapCallbackHandler(AsyncCallbackHandler):
         # its event, so a REST write on top of a delivered one writes it twice.
         # `record_turn` never raises, which a callback must not.
         model_metadata = {"agent_model": self._agent_model} if self._agent_model else None
+        extra: Dict[str, Any] = {}
+        if self.scope_path:
+            extra["scope_path"] = dict(self.scope_path)
         await record_turn(
             self.sdk, role=role, content=content,
             conversation_id=self.conversation_id,
             user_id=self.user_id, customer_id=self.customer_id,
             metadata=model_metadata,
+            **extra,
         )
         if role == "assistant":
             self._last_unkeyed_user = None

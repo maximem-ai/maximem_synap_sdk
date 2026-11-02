@@ -108,9 +108,12 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence
 
+from synap_integrations_common import ensure_ids_match_path
+from synap_microsoft_agent._scope_path import checked_scope_path
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
     default_scope,
+    scope_string,
     run_async,
     wrap_sdk_errors_async,
 )
@@ -286,6 +289,7 @@ class SynapMemoryStore(MemoryStore):
         owner_state_key: str = DEFAULT_OWNER_STATE_KEY,
         scope_resolver: Optional[Any] = None,
         transcripts_root: Optional[str] = None,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> None:
         if sdk is None:
             raise ValueError("SynapMemoryStore requires a non-None sdk")
@@ -298,6 +302,13 @@ class SynapMemoryStore(MemoryStore):
         self.sdk = sdk
         self.user_id = user_id
         self.customer_id = customer_id
+        # A deeper scope ladder's level (e.g. {"customer": "acme", "team":
+        # "payments", "user": "alice"}). Sent with every Synap call, only when
+        # set; fixed here, never read from a tool argument.
+        self.scope_path: Optional[Dict[str, str]] = checked_scope_path(scope_path, "SynapMemoryStore")
+        ensure_ids_match_path(
+            self.scope_path, user_id=user_id or None, customer_id=customer_id or None,
+            where="SynapMemoryStore")
         self.records: TopicRecordStore = record_store or InMemoryTopicRecordStore()
         self.include_recall = include_recall
         self.recall_header = recall_header
@@ -340,6 +351,12 @@ class SynapMemoryStore(MemoryStore):
         return self._default_owner()
 
     def _default_owner(self) -> str:
+        if self.scope_path:
+            # The label follows the order the caller gave the levels in. The
+            # server orders by ladder position, so order does not matter to it,
+            # but it DOES matter here: the label is the local record partition
+            # key, so the same levels in another key order are another partition.
+            return scope_string(list(self.scope_path.values()))
         if self.user_id:
             return default_scope(self.user_id, self.customer_id)
         return f"/{self.customer_id}"
@@ -363,7 +380,7 @@ class SynapMemoryStore(MemoryStore):
         if owner and isinstance(getattr(session, "state", None), dict):
             session.state[self.owner_state_key] = owner
 
-    def _scope_kwargs(self, session: Any) -> Dict[str, Any]:
+    def _scope_kwargs(self, session: Any, *, write: bool = False) -> Dict[str, Any]:
         """Return the ``user_id`` / ``customer_id`` pair for a Synap call.
 
         A ``scope_resolver`` changes the *record* partition. It does not
@@ -373,7 +390,11 @@ class SynapMemoryStore(MemoryStore):
         store per tenant.
         """
         del session
-        return {"user_id": self.user_id, "customer_id": self.customer_id}
+        kwargs: Dict[str, Any] = {"user_id": self.user_id, "customer_id": self.customer_id}
+        if self.scope_path:
+            # `memories.create` calls the path `scope`; `fetch` calls it `scope_path`.
+            kwargs["scope" if write else "scope_path"] = dict(self.scope_path)
+        return kwargs
 
     # ------------------------------------------------------------------
     # Topics — exact, from the record store
@@ -435,7 +456,7 @@ class SynapMemoryStore(MemoryStore):
                     document=document,
                     document_type=self.document_type,
                     mode=self.ingest_mode,
-                    **self._scope_kwargs(session),
+                    **self._scope_kwargs(session, write=True),
                 )
 
         response = run_async(_submit())

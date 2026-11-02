@@ -44,6 +44,16 @@ logger = logging.getLogger("synap.sdk.transport.http")
 _CREDIT_ERRORS = frozenset({"insufficient_credits", "trial_limit_reached"})
 
 
+def _bearer_header(auth_context: AuthContext) -> Dict[str, str]:
+    """The Authorization header, or nothing when there is no credential.
+
+    The credential is empty only in local mode with no SYNAP_API_TOKEN set.
+    """
+    if not auth_context.api_key:
+        return {}
+    return {"Authorization": f"Bearer {auth_context.api_key}"}
+
+
 def _credit_payload(error_body: Any) -> Dict[str, Any]:
     """The credit gate's structured body, however the server nested it.
 
@@ -221,6 +231,51 @@ def _declared_idempotent(method: str, path: str) -> bool:
     return False
 
 
+def _is_scope_path(value: Any) -> bool:
+    """A scope path is a non-empty object of level key to id. A multipart form
+    sends it as a JSON string. (`data.delete` also has a `scope` field, but that
+    one is a plain string such as "user", so it is not a path.)"""
+    if isinstance(value, str) and value.lstrip().startswith("{"):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return False
+    return isinstance(value, dict) and len(value) > 0
+
+
+def _carries_scope_path(payload: Any) -> bool:
+    """Whether a request body names a scope path: a top-level `scope` (context
+    fetches, record_message, ingest_transcript, memories, send_message) or one
+    on a message of a batch (`record_messages`).
+
+    Used only to decide whether a 400 answer should invalidate the cached scope
+    ladder. Ladder refusals reach the SDK as a plain 400 with no code, so the
+    rule is about the request, not the wording. The gRPC stream does not
+    surface HTTP 400, so a ladder error on the stream is not observed here.
+    """
+    if not isinstance(payload, dict):
+        return False
+    if _is_scope_path(payload.get("scope")):
+        return True
+    # `memories.create` with file parts posts one `manifest` form field: a JSON
+    # string whose `scope` key holds the path. An unreadable manifest is "no
+    # path"; this check must never raise.
+    manifest = payload.get("manifest")
+    if isinstance(manifest, str):
+        try:
+            parsed = json.loads(manifest)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict) and _is_scope_path(parsed.get("scope")):
+            return True
+    for value in payload.values():
+        if isinstance(value, list) and any(
+            isinstance(item, dict) and _is_scope_path(item.get("scope")) for item in value
+        ):
+            return True
+    return False
+
+
 class HTTPTransport:
     """HTTP transport with retries, timeouts, and telemetry.
 
@@ -262,6 +317,11 @@ class HTTPTransport:
         self.timeouts = timeouts or TimeoutConfig()
         self.retry_policy = retry_policy
         self.telemetry_callback = telemetry_callback
+        # Called as observer(error, carried_scope_path) for every 400 answer.
+        # `carried_scope_path` says whether the request that was refused named a
+        # scope path, which is how the SDK learns its cached ladder may be
+        # stale. Never allowed to raise.
+        self.invalid_input_observer: Optional[Callable[[BaseException, bool], None]] = None
 
         self._limits = httpx.Limits(
             max_connections=20,
@@ -480,7 +540,7 @@ class HTTPTransport:
             self._cooldown_check(cooldown_key, correlation_id)
 
         headers = {
-            "Authorization": f"Bearer {auth_context.api_key}",
+            **_bearer_header(auth_context),
             "X-Correlation-ID": correlation_id,
             "X-Client-ID": auth_context.client_id,
             "X-Instance-ID": auth_context.instance_id,
@@ -532,7 +592,10 @@ class HTTPTransport:
                 )
 
                 # Handle response
-                result = self._handle_response(response, correlation_id)
+                result = self._handle_response(
+                    response, correlation_id,
+                    carried_scope_path=_carries_scope_path(json),
+                )
                 if gated:
                     self._cooldown_clear(cooldown_key)
                 return result
@@ -651,6 +714,7 @@ class HTTPTransport:
         self,
         response: httpx.Response,
         correlation_id: str,
+        carried_scope_path: bool = False,
     ) -> Dict[str, Any]:
         """Handle HTTP response, raising appropriate errors.
 
@@ -663,6 +727,12 @@ class HTTPTransport:
             return self._raise_for_response(response, correlation_id)
         except SynapError as e:
             e.status_code = response.status_code
+            observer = getattr(self, "invalid_input_observer", None)
+            if observer is not None and response.status_code == 400 and isinstance(e, InvalidInputError):
+                try:
+                    observer(e, carried_scope_path)
+                except Exception:  # noqa: BLE001
+                    pass
             raise
 
     def _raise_for_response(
@@ -1023,7 +1093,7 @@ class HTTPTransport:
         start_time = datetime.now(timezone.utc)
 
         headers = {
-            "Authorization": f"Bearer {auth_context.api_key}",
+            **_bearer_header(auth_context),
             "X-Correlation-ID": correlation_id,
             "X-Client-ID": auth_context.client_id,
             "X-Instance-ID": auth_context.instance_id,
@@ -1059,7 +1129,10 @@ class HTTPTransport:
                     status_code=response.status_code,
                 )
 
-                return self._handle_response(response, correlation_id)
+                return self._handle_response(
+                    response, correlation_id,
+                    carried_scope_path=_carries_scope_path(data),
+                )
 
             except httpx.TimeoutException as e:
                 # Upload may have been received in full; outcome unknown.

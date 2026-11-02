@@ -36,6 +36,8 @@ Returns immediately. Processing happens in the background.
 
 Which ids you send is not a judgement call, the instance settles it. B2C (`user_context_isolation = "equals_customer"`) takes `user_id` alone and rejects a `customer_id` with HTTP 400; B2B (`strict`) requires `customer_id` and errors on a `user_id` sent by itself. When in doubt, call `GET /api/v1/auth/whoami` and read `user_context_isolation`. Do not pass both to cover yourself, and never reuse the user id as the customer id.
 
+**Deeper ladders.** If the account has levels between customer and user, a write also names the level with a path: `scope=` on `memories.create` / `create_from_file` / `forget`, `scope_path=` on `record_message`, `ingest_transcript` and `send_message`. Python SDK 0.7.0 / JS SDK 0.7.0 build it: `addr = (await sdk.get_scope_ladder()).address([customer, team, user])`, then `sdk.memories.create(document=..., **addr.write_kwargs())`. On a default ladder send ids only; the server refuses a path unless nested scoping is on and the ladder has been accepted. See `reference/core-concepts.md` (Deeper scope ladders).
+
 ## Document types
 
 | Type | Optimized for |

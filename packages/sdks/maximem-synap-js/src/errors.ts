@@ -35,6 +35,7 @@ export type SynapErrorCode =
   | 'invalid_instance_id'
   | 'invalid_conversation_id'
   | 'customer_id_not_accepted'
+  | 'scope_ladder_error'
   | 'authentication'
   | 'context_not_found'
   | 'conflict'
@@ -262,6 +263,14 @@ export class CustomerIdNotAcceptedError extends InvalidInputError {
   }
 }
 
+/**
+ * The values cannot be addressed on this account's scope ladder. Raised before
+ * any request, by `ScopeLadder.address`. Python: `maximem_synap.ScopeLadderError`.
+ */
+export class ScopeLadderError extends InvalidInputError {
+  static override readonly errorCode: SynapErrorCode = 'scope_ladder_error';
+}
+
 export class AuthenticationError extends SynapPermanentError {
   static override readonly errorCode: SynapErrorCode = 'authentication';
 }
@@ -383,6 +392,7 @@ const PARENT: Partial<Record<SynapErrorCode, SynapErrorCode>> = {
   invalid_instance_id: 'invalid_input',
   invalid_conversation_id: 'invalid_input',
   customer_id_not_accepted: 'invalid_input',
+  scope_ladder_error: 'invalid_input',
   authentication: 'permanent',
   context_not_found: 'permanent',
   conflict: 'permanent',

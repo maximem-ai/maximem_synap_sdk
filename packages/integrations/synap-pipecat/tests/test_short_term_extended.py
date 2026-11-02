@@ -21,6 +21,7 @@ import pytest
 from pipecat.processors.aggregators.llm_context import LLMContext
 
 from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 from synap_pipecat.short_term import (
     _DEFAULT_CLOSE,
     _DEFAULT_OPEN,
@@ -156,7 +157,7 @@ class TestSynapShortTermProcessorSDKCallContract:
         await proc._refresh_st()
 
         call = sdk.conversation.context.get_context_for_prompt.call_args
-        assert call.kwargs["conversation_id"] == "my-conv-99"
+        assert call.kwargs["conversation_id"] == coerce_conversation_id("my-conv-99")
 
     @pytest.mark.asyncio
     async def test_sdk_called_once_per_refresh(self):

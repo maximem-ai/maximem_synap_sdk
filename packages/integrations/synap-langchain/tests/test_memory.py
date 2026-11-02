@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from synap_langchain.memory import SynapChatMessageHistory, SynapMemory
 from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +91,7 @@ async def test_aget_messages_returns_human_and_ai_messages(history, mock_sdk):
     assert isinstance(msgs[1], AIMessage)
     assert msgs[1].content == "hi there"
     mock_sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-        conversation_id="conv-1",
+        conversation_id=coerce_conversation_id("conv-1"),
     )
 
 
@@ -193,7 +194,7 @@ async def test_aadd_messages_passes_conversation_and_user_ids(history, mock_sdk)
     await history.aadd_messages([HumanMessage(content="hello")])
 
     kw = mock_sdk.conversation.record_message.call_args.kwargs
-    assert kw["conversation_id"] == "conv-1"
+    assert kw["conversation_id"] == coerce_conversation_id("conv-1")
     assert kw["user_id"] == "user-1"
     assert kw["customer_id"] == "cust-1"
 

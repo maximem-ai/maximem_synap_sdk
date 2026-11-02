@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 import weakref
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 from claude_agent_sdk import HookMatcher
 from claude_agent_sdk.types import (
@@ -33,6 +33,8 @@ from claude_agent_sdk.types import (
 )
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
+    ensure_ids_match_path,
+    coerce_conversation_id,
     end_session,
     fetch_compacted_history,
     is_synap_history,
@@ -68,6 +70,7 @@ def create_synap_hooks(
     max_results: int = 20,
     context_preamble: Optional[str] = None,
     record_user_prompts: bool = True,
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> dict[str, list[HookMatcher]]:
     """Return a ``hooks`` dict suitable for ``ClaudeAgentOptions(hooks=...)``.
 
@@ -88,6 +91,11 @@ def create_synap_hooks(
             to Synap conversation history via
             ``sdk.conversation.record_message``. Disable if you want
             injection-only semantics.
+        scope_path: Deeper scope ladders only: the level the memory and the
+            conversation belong to, as ``{level_key: value}``. Sent with the
+            context fetch and with the user and assistant turns only when set;
+            tool and compaction events are unchanged. Leave it unset and every
+            call is exactly what it was.
 
     Stream events
     -------------
@@ -118,8 +126,14 @@ def create_synap_hooks(
         raise ValueError("create_synap_hooks requires a non-None sdk")
     if not user_id:
         raise ValueError("create_synap_hooks requires a non-empty user_id")
+    ensure_ids_match_path(
+        scope_path, user_id=user_id, customer_id=customer_id or None,
+        where="create_synap_hooks")
 
     preamble = context_preamble or _DEFAULT_CONTEXT_PREAMBLE
+    path: Optional[Dict[str, str]] = dict(scope_path) if scope_path else None
+    fetch_extra: Dict[str, Any] = {"scope_path": path} if path else {}
+    turn_extra: Dict[str, Any] = {"scope_path": path} if path else {}
 
     async def on_user_prompt_submit(
         input_data: Any,
@@ -136,13 +150,14 @@ def create_synap_hooks(
         formatted = ""
         try:
             response = await sdk.fetch(
-                conversation_id=conv_id,
+                conversation_id=coerce_conversation_id(conv_id),
                 user_id=user_id,
                 customer_id=customer_id or None,
                 search_query=[str(prompt)],
                 max_results=max_results,
                 mode=mode,
                 include_conversation_context=False,
+                **fetch_extra,
             )
             formatted = (getattr(response, "formatted_context", None) or "").strip()
         except Exception as exc:  # noqa: BLE001 — read degrades gracefully
@@ -167,7 +182,7 @@ def create_synap_hooks(
             await record_turn(
                 sdk, role="user", content=str(prompt),
                 conversation_id=str(conv_id), user_id=user_id,
-                customer_id=customer_id,
+                customer_id=customer_id, **turn_extra,
             )
 
         parts = [preamble.format(body=formatted)] if formatted else []
@@ -243,6 +258,7 @@ def create_synap_hooks(
                 await record_turn(
                     sdk, role="assistant", content=reply,
                     conversation_id=conv_id, user_id=user_id, customer_id=customer_id,
+                    **turn_extra,
                 )
         await end_session(sdk, conv_id)
         return {}
@@ -289,6 +305,7 @@ async def report_assistant_turn(
     conversation_id: str,
     user_id: str,
     customer_id: str = "",
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> bool:
     """Write the agent's reply yourself. Returns whether it was written.
 
@@ -297,10 +314,14 @@ async def report_assistant_turn(
     field, or a run without the hooks; if you call it and also use them, the
     reply is written once.
     """
+    ensure_ids_match_path(
+        scope_path, user_id=user_id or None, customer_id=customer_id or None,
+        where="report_assistant_turn")
+    extra: Dict[str, Any] = {"scope_path": dict(scope_path)} if scope_path else {}
     written = await record_turn(
         sdk, role="assistant", content=content or "",
         conversation_id=conversation_id, user_id=user_id,
-        customer_id=customer_id,
+        customer_id=customer_id, **extra,
     )
     if written:
         try:
