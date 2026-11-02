@@ -572,10 +572,11 @@ class GRPCTransport:
     async def _open_stream(self):
         """Open bidirectional Listen stream with auth metadata."""
         metadata = [
-            ("authorization", f"Bearer {self._auth_context.api_key}"),
             ("x-client-id", self._auth_context.client_id),
             ("x-instance-id", self._auth_context.instance_id),
         ]
+        if self._auth_context.api_key:
+            metadata.insert(0, ("authorization", f"Bearer {self._auth_context.api_key}"))
         if self._auth_context.correlation_id:
             metadata.append(("x-correlation-id", self._auth_context.correlation_id))
         return self._stub.Listen(metadata=metadata)

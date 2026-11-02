@@ -749,7 +749,9 @@ export class GrpcStreamClient {
     });
 
     const metadata = new grpc.Metadata();
-    metadata.add('authorization', `Bearer ${this.#credentials.apiKey}`);
+    if (this.#credentials.apiKey !== '') {
+      metadata.add('authorization', `Bearer ${this.#credentials.apiKey}`);
+    }
     metadata.add('x-client-id', this.#credentials.clientId);
     metadata.add('x-instance-id', this.#credentials.instanceId);
 

@@ -34,10 +34,12 @@ from .models.conversations import TranscriptIngestResponse, TranscriptTurn
 from .models.enums import CompactionLevel, ContextScope
 from .models.errors import (
     SynapError,
+    SynapPermanentError,
     AuthenticationError,
     InvalidInputError,
     ContextNotFoundError,
 )
+from .auth.local_mode import is_local_mode
 from .auth.manager import CredentialManager
 from .cache.manager import CacheManager, CacheScope
 # Imported at module level, not lazily like AnticipationCache below it: a
@@ -1071,6 +1073,7 @@ class MaximemSynapSDK:
         self._grpc_transport: Optional[GRPCTransport] = None
         self._telemetry_collector: Optional[TelemetryCollector] = None
         self._telemetry_transport: Optional[TelemetryTransport] = None
+        self._local_mode = False
         self._client_id: Optional[str] = None
 
         from .cache.anticipation_cache import AnticipationCache
@@ -1125,6 +1128,9 @@ class MaximemSynapSDK:
         # (credits.py imports MaximemSynapSDK via TYPE_CHECKING only).
         from .credits import CreditsInterface
         self.credits = CreditsInterface(self)
+
+        from .maca import MacaInterface
+        self.maca = MacaInterface(self)
 
         # Configure logging
         configure_logging(self._config.log_level)
@@ -1486,8 +1492,13 @@ class MaximemSynapSDK:
             instance_id=self.instance_id,
         )
 
+        # No key and a base URL: the open-source server, which has no auth.
+        self._local_mode = is_local_mode(self._api_key, self._config.api_base_url)
+
         try:
-            credentials = self._credential_manager.load(api_key=self._api_key)
+            credentials = self._credential_manager.load(
+                api_key=self._api_key, base_url=self._config.api_base_url
+            )
             self._client_id = credentials.client_id
             if credentials.instance_id:
                 self.instance_id = credentials.instance_id
@@ -1512,13 +1523,13 @@ class MaximemSynapSDK:
         # Best-effort: a whoami failure leaves whatever the env / explicit
         # path produced and falls through to the existing behavior. Skipped
         # if everything is already known to avoid an extra round-trip.
-        if not self._client_id or not self.instance_id:
+        if self._local_mode or not self._client_id or not self.instance_id:
             try:
                 from .auth.models import AuthContext
                 bootstrap_ctx = AuthContext(
                     client_id=self._client_id or "",
                     instance_id=self.instance_id or "",
-                    api_key=self._api_key or os.environ.get("SYNAP_API_KEY", ""),
+                    api_key=credentials.api_key,
                 )
                 whoami = await self._http_transport.get(
                     "/api/v1/auth/whoami", auth_context=bootstrap_ctx,
@@ -1540,8 +1551,22 @@ class MaximemSynapSDK:
                         self._credential_manager._credentials.instance_id = resolved_instance_id
                     self._http_transport.instance_id = resolved_instance_id
             except Exception as e:
+                if self._local_mode:
+                    # There is no key to fall back on, and every other call
+                    # would fail later with a less useful message.
+                    raise AuthenticationError(
+                        f"Could not reach the Synap server at "
+                        f"{self._http_transport.base_url}, or it did not identify "
+                        f"itself: GET /api/v1/auth/whoami failed ({e})."
+                    ) from e
                 logger.warning(
                     "SDK whoami bootstrap failed (non-fatal, will fall back to env): %s", e,
+                )
+            if self._local_mode and not (self._client_id and self.instance_id):
+                raise AuthenticationError(
+                    f"The Synap server at {self._http_transport.base_url} did not "
+                    f"identify itself: GET /api/v1/auth/whoami returned no "
+                    f"client_id or instance_id."
                 )
 
         # The identity is now known. If this SDK was keyed on its credential —
@@ -1611,21 +1636,31 @@ class MaximemSynapSDK:
             self._turn_store = on_disk
             self._st_store.attach_archive(on_disk)
 
-        # Initialize telemetry transport
-        self._telemetry_transport = TelemetryTransport(
-            base_url=self._http_transport.base_url,
-            get_auth_context=self._get_auth_context_for_telemetry,
-        )
+        if self._local_mode:
+            # Nothing is sent to /v1/telemetry. A disabled collector keeps the
+            # many emit call sites working as no-ops.
+            self._telemetry_collector = TelemetryCollector(
+                instance_id=self.instance_id,
+                client_id=self._client_id,
+                sdk_version=__version__,
+                enabled=False,
+            )
+        else:
+            # Initialize telemetry transport
+            self._telemetry_transport = TelemetryTransport(
+                base_url=self._http_transport.base_url,
+                get_auth_context=self._get_auth_context_for_telemetry,
+            )
 
-        # Initialize telemetry collector
-        self._telemetry_collector = TelemetryCollector(
-            instance_id=self.instance_id,
-            client_id=self._client_id,
-            sdk_version=__version__,
-            transport_callback=self._telemetry_transport.send,
-            enabled=True,
-        )
-        await self._telemetry_collector.start()
+            # Initialize telemetry collector
+            self._telemetry_collector = TelemetryCollector(
+                instance_id=self.instance_id,
+                client_id=self._client_id,
+                sdk_version=__version__,
+                transport_callback=self._telemetry_transport.send,
+                enabled=True,
+            )
+            await self._telemetry_collector.start()
 
         # Emit init event
         from .telemetry.models import TelemetryEventType
@@ -4738,6 +4773,11 @@ class InstanceInterface:
                 automatically, so fetch() can find them without a round-trip.
         """
         self._sdk._ensure_initialized()
+        if self._sdk._local_mode:
+            raise SynapPermanentError(
+                "Not available in the open-source server: listen() needs the gRPC "
+                "stream and anticipation, which it does not have."
+            )
         self._on_context_callback = on_context
         self._open_sessions.clear()
 

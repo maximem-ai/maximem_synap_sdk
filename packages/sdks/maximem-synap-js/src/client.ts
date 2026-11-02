@@ -16,6 +16,7 @@
 import type { AgentModel } from './agent-model.js';
 import { AuthenticationError, InvalidInputError } from './errors.js';
 import { getEnv } from './util/env.js';
+import { isLocalMode, localToken } from './local-mode.js';
 import { HttpTransport, type Credentials, type HttpTransportOptions } from './transport/http.js';
 import { fetchContext, responseShapeOf } from './context/fetch.js';
 import { normalizeContextResponse } from './context/normalize.js';
@@ -33,6 +34,7 @@ import {
 import { createDataInterface, type DataInterface } from './data/interface.js';
 import { createUserNamespace, type UserNamespace } from './user/interface.js';
 import { createCreditsNamespace, type CreditsNamespace } from './credits/interface.js';
+import { createMacaNamespace, type MacaNamespace } from './maca/interface.js';
 import { createCacheNamespace, type CacheNamespace } from './cache/interface.js';
 import { createInstanceNamespace, type InstanceNamespace } from './instance/interface.js';
 import type { FetchOptions, Json, NormalisedContext, RawContext } from './context/types.js';
@@ -279,12 +281,14 @@ export class SynapClient {
   readonly memories!: MemoriesInterface;
   readonly data!: DataInterface;
   readonly credits!: CreditsNamespace;
+  readonly maca!: MacaNamespace;
   readonly cache!: CacheNamespace;
   readonly instance!: InstanceNamespace;
 
   #closed = false;
   #initialized = false;
   #identity: Promise<void> | undefined;
+  #localMode = false;
   readonly #registryKeys!: string[];
   readonly #compactionSubscribers!: CompactionSubscribers;
   readonly #shortTerm!: ShortTermStore;
@@ -304,8 +308,9 @@ export class SynapClient {
   readonly #fetchHooks!: FetchHooks;
 
   constructor(options: SynapClientOptions = {}) {
-    const credentials = resolveCredentials(options);
     const resolvedBaseUrl = resolveBaseUrl(options);
+    const localMode = isLocalMode(options.apiKey, resolvedBaseUrl);
+    const credentials = resolveCredentials(options, localMode);
     // Fail locally on a malformed id rather than sending it upstream.
     validateInstanceId(credentials.instanceId);
 
@@ -341,6 +346,7 @@ export class SynapClient {
       }
     }
     this.#registryKeys = options._force_new === true ? [] : [registryKey];
+    this.#localMode = localMode;
 
     this.#transport = new HttpTransport({
       credentials,
@@ -559,6 +565,7 @@ export class SynapClient {
       return cleared;
     });
     this.credits = createCreditsNamespace(this.#transport);
+    this.maca = createMacaNamespace(this.#transport);
     this.cache = createCacheNamespace(this.#anticipationCache);
     this.instance = createInstanceNamespace(
       () => this.#transport.currentCredentials(),
@@ -580,6 +587,12 @@ export class SynapClient {
     // then, not at construction, so a process that never listens or searches
     // never downloads it.
     this.instance._internal.setOnListen(() => this.#startLocalModel());
+    if (localMode) {
+      this.instance._internal.blockListen(
+        'Not available in the open-source server: listen() needs the gRPC stream and ' +
+          'anticipation, which it does not have.',
+      );
+    }
     this.instance._internal.setCompactionApplier((bundle) => {
       this.#shortTerm.applyCompaction(bundle);
     });
@@ -738,13 +751,17 @@ export class SynapClient {
 
   /** Runs whoami at most once, however many calls arrive together. */
   #resolveIdentity(): Promise<void> {
-    this.#identity ??= this.#whoami();
+    this.#identity ??= this.#whoami().catch((error: unknown) => {
+      // Only local mode throws. Forget the failure so a later call asks again.
+      this.#identity = undefined;
+      throw error;
+    });
     return this.#identity;
   }
 
   async #whoami(): Promise<void> {
     const credentials = this.#transport.currentCredentials();
-    if (credentials.clientId !== '' && credentials.instanceId !== '') return;
+    if (!this.#localMode && credentials.clientId !== '' && credentials.instanceId !== '') return;
     try {
       const whoami = (await this.#transport.request('whoami', {})) as Json;
       const resolvedClientId = String(whoami['client_id'] ?? '');
@@ -777,9 +794,26 @@ export class SynapClient {
           this.#registryKeys.push(resolvedInstanceId);
         }
       }
-    } catch {
+    } catch (error) {
       // Non-fatal, exactly as in Python: identity resolution is an
       // optimisation, and every route still authenticates on the API key.
+      // Local mode has no key to fall back on, so there it is an error.
+      if (this.#localMode) {
+        throw new AuthenticationError(
+          `Could not reach the Synap server at ${this.#transport.baseUrl}, or it did not ` +
+            `identify itself: GET /api/v1/auth/whoami failed (${(error as Error)?.message ?? String(error)}).`,
+          { cause: error },
+        );
+      }
+    }
+    if (this.#localMode) {
+      const known = this.#transport.currentCredentials();
+      if (known.clientId === '' || known.instanceId === '') {
+        throw new AuthenticationError(
+          `The Synap server at ${this.#transport.baseUrl} did not identify itself: ` +
+            'GET /api/v1/auth/whoami returned no client_id or instance_id.',
+        );
+      }
     }
   }
 
@@ -1340,7 +1374,7 @@ function resolveBaseUrl(options: SynapClientOptions): string | undefined {
   return fromEnv !== undefined && fromEnv !== '' ? fromEnv : undefined;
 }
 
-function resolveCredentials(options: SynapClientOptions): Credentials {
+function resolveCredentials(options: SynapClientOptions, localMode: boolean): Credentials {
   // Read at call time, not module load, so a late process.env mutation works.
   // `||`, not `??`: an empty apiKey falls back to the environment, as
   // Python's `api_key or os.environ.get(...)` does.
@@ -1348,14 +1382,15 @@ function resolveCredentials(options: SynapClientOptions): Credentials {
   // An AuthenticationError, as Python raises it (auth/manager.py), so one
   // `catch` handles "no usable key" in both SDKs. Until 0.5.13 this was an
   // InvalidInputError.
-  if (!apiKey) {
+  if (!apiKey && !localMode) {
     throw new AuthenticationError(
       'No Synap API key found. Set SYNAP_API_KEY in your environment, or pass ' +
         'apiKey to the SynapClient constructor.',
     );
   }
   return {
-    apiKey,
+    // In local mode the credential is the optional token, '' when there is none.
+    apiKey: apiKey || localToken(),
     clientId: options.clientId ?? getEnv('SYNAP_CLIENT_ID') ?? '',
     instanceId: options.instanceId ?? getEnv('SYNAP_INSTANCE_ID') ?? '',
   };

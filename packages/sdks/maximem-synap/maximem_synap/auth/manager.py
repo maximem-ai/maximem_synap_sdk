@@ -12,6 +12,7 @@ import logging
 import os
 from typing import Optional
 
+from .local_mode import is_local_mode, local_token
 from .models import Credentials, AuthContext
 from .storage import EnvironmentCredentialStorage
 from ..models.errors import AuthenticationError
@@ -25,7 +26,9 @@ class CredentialManager:
         self._credentials: Optional[Credentials] = None
         self._storage = EnvironmentCredentialStorage(instance_id)
 
-    def load(self, api_key: Optional[str] = None) -> Credentials:
+    def load(
+        self, api_key: Optional[str] = None, base_url: Optional[str] = None
+    ) -> Credentials:
         """Resolve credentials from the api_key kwarg or SYNAP_API_KEY.
 
         ``client_id`` is intentionally left empty here — the SDK calls
@@ -35,7 +38,11 @@ class CredentialManager:
         unreachable-server cases.
         """
         key = api_key or os.environ.get("SYNAP_API_KEY")
-        if not key:
+        if not key and is_local_mode(api_key, base_url):
+            # No key against the open-source server. The "key" carried on the
+            # credentials is its optional token, empty when none is set.
+            key = local_token()
+        elif not key:
             raise AuthenticationError(
                 "No Synap API key found. Set SYNAP_API_KEY in your environment "
                 "or pass api_key= to MaximemSynapSDK(). Generate a key at the "

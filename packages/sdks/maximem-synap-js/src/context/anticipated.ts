@@ -62,11 +62,27 @@ export function scopeLookupParams(
   }
 }
 
+/**
+ * An item's metadata, carrying its `scope` whichever shape it arrived in.
+ *
+ * The HTTP response puts `scope` inside `metadata`; a prefetched (gRPC) item
+ * carries it top-level and has no `metadata`. Readers look in `metadata`, so a
+ * cache hit read every client-scope item as unlabelled. Returns a copy, and a
+ * `scope` already in `metadata` wins. Python: `_wire_metadata` in
+ * `models/context.py`.
+ */
+function wireMetadata(item: Json): Json {
+  const md = item['metadata'];
+  const out: Json = md !== null && typeof md === 'object' && !Array.isArray(md) ? { ...(md as Json) } : {};
+  if (!out['scope'] && item['scope']) out['scope'] = item['scope'];
+  return out;
+}
+
 /** Turn a cache hit into the same raw shape the network path returns. */
 export function buildAnticipationResponse(hit: LookupResult): RawContext {
   const response: RawContext = {};
   for (const [type, items] of Object.entries(hit.itemsByType)) {
-    (response as Json)[type] = items;
+    (response as Json)[type] = items.map((item) => ({ ...item, metadata: wireMetadata(item as Json) }));
   }
   // `source: "anticipation"` is how a caller (and the metering that reads it)
   // can tell a locally served fetch from a billed one.
