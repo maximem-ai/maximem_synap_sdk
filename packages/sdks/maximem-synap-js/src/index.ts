@@ -48,6 +48,9 @@ export type {
   CreditsNamespace, EstimateOptions, LedgerOptions, CreditBalance, CreditBucket,
   CreditLedgerEntry, CreditLedgerPage, CreditEstimate, RedeemResult,
 } from './credits/interface.js';
+export type {
+  MacaNamespace, MacaJob, MacaGenerateOptions, MacaWaitOptions, MacaRelationship,
+} from './maca/interface.js';
 export type { CacheNamespace, CacheStats } from './cache/interface.js';
 export type {
   InstanceNamespace, ListenOptions, SendMessageOptions, RecordThinkingOptions,

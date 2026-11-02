@@ -44,6 +44,16 @@ logger = logging.getLogger("synap.sdk.transport.http")
 _CREDIT_ERRORS = frozenset({"insufficient_credits", "trial_limit_reached"})
 
 
+def _bearer_header(auth_context: AuthContext) -> Dict[str, str]:
+    """The Authorization header, or nothing when there is no credential.
+
+    The credential is empty only in local mode with no SYNAP_API_TOKEN set.
+    """
+    if not auth_context.api_key:
+        return {}
+    return {"Authorization": f"Bearer {auth_context.api_key}"}
+
+
 def _credit_payload(error_body: Any) -> Dict[str, Any]:
     """The credit gate's structured body, however the server nested it.
 
@@ -480,7 +490,7 @@ class HTTPTransport:
             self._cooldown_check(cooldown_key, correlation_id)
 
         headers = {
-            "Authorization": f"Bearer {auth_context.api_key}",
+            **_bearer_header(auth_context),
             "X-Correlation-ID": correlation_id,
             "X-Client-ID": auth_context.client_id,
             "X-Instance-ID": auth_context.instance_id,
@@ -1023,7 +1033,7 @@ class HTTPTransport:
         start_time = datetime.now(timezone.utc)
 
         headers = {
-            "Authorization": f"Bearer {auth_context.api_key}",
+            **_bearer_header(auth_context),
             "X-Correlation-ID": correlation_id,
             "X-Client-ID": auth_context.client_id,
             "X-Instance-ID": auth_context.instance_id,

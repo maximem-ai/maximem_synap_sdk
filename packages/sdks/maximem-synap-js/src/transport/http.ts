@@ -423,7 +423,8 @@ export class HttpTransport {
     options: { json?: boolean } = {},
   ): Record<string, string> {
     return {
-      Authorization: `Bearer ${this.#credentials.apiKey}`,
+      // Empty only in local mode with no SYNAP_API_TOKEN: send no header at all.
+      ...(this.#credentials.apiKey !== '' ? { Authorization: `Bearer ${this.#credentials.apiKey}` } : {}),
       'X-Client-ID': this.#credentials.clientId,
       'X-Instance-ID': this.#credentials.instanceId,
       'X-Correlation-ID': correlationId,

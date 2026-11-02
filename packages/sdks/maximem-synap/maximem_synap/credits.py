@@ -126,7 +126,9 @@ class CreditsInterface:
 
     async def get_balance(self) -> CreditBalance:
         """Return the current credit balance + bucket breakdown."""
-        result = await self._sdk._http_transport.get(path="/v1/credits/balance")
+        result = await self._sdk._http_transport.get(
+            "/v1/credits/balance", auth_context=await self._sdk._get_auth_context()
+        )
         return CreditBalance(
             client_id=result["client_id"],
             balance_credits=float(result["balance_credits"]),
@@ -162,7 +164,9 @@ class CreditsInterface:
             params["to"] = to_time.isoformat()
 
         result = await self._sdk._http_transport.get(
-            path="/v1/credits/ledger", params=params
+            "/v1/credits/ledger",
+            auth_context=await self._sdk._get_auth_context(),
+            params=params,
         )
         entries = [
             CreditLedgerEntry(
@@ -202,7 +206,9 @@ class CreditsInterface:
             "mode": mode,
         }
         result = await self._sdk._http_transport.post(
-            path="/v1/credits/estimate", body=body
+            "/v1/credits/estimate",
+            auth_context=await self._sdk._get_auth_context(),
+            json=body,
         )
         return CreditEstimate(
             credits_estimate=float(result["credits_estimate"]),
@@ -224,8 +230,9 @@ class CreditsInterface:
         error cleanly.
         """
         result = await self._sdk._http_transport.post(
-            path="/v1/credits/redeem",
-            body={"code": code},
+            "/v1/credits/redeem",
+            auth_context=await self._sdk._get_auth_context(),
+            json={"code": code},
         )
         return RedeemResult(
             redemption_id=result["redemption_id"],
