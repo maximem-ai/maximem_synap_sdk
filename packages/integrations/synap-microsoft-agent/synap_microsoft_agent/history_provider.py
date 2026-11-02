@@ -24,9 +24,10 @@ message is still tried before the first error is raised.
 from __future__ import annotations
 
 import logging
-from typing import Any, ClassVar, Optional, Sequence
+from typing import Any, ClassVar, Mapping, Optional, Sequence
 
 from agent_framework import HistoryProvider, Message
+from synap_microsoft_agent._scope_path import checked_scope_path
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import SynapIntegrationError, wrap_sdk_errors_async
 
@@ -63,6 +64,7 @@ class SynapHistoryProvider(HistoryProvider):
         store_context_messages: bool = False,
         store_context_from: Optional[set[str]] = None,
         store_outputs: bool = True,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> None:
         if sdk is None:
             raise ValueError("SynapHistoryProvider requires a non-None sdk")
@@ -81,6 +83,9 @@ class SynapHistoryProvider(HistoryProvider):
         self.user_id = user_id
         self.customer_id = customer_id
         self.conversation_id = conversation_id
+        # A deeper scope ladder's level; sent with the turn writes only when set.
+        # Loading history is conversation-only and takes none.
+        self.scope_path: Optional[dict[str, str]] = checked_scope_path(scope_path, "SynapHistoryProvider")
 
     async def get_messages(
         self,
@@ -182,6 +187,7 @@ class SynapHistoryProvider(HistoryProvider):
                         conversation_id=conv_id,
                         user_id=self.user_id,
                         customer_id=self.customer_id,
+                        **({"scope_path": dict(self.scope_path)} if self.scope_path else {}),
                     ):
                         continue
                     await self.sdk.conversation.record_message(
@@ -190,6 +196,7 @@ class SynapHistoryProvider(HistoryProvider):
                         content=text,
                         user_id=self.user_id,
                         customer_id=self.customer_id,
+                        **({"scope_path": dict(self.scope_path)} if self.scope_path else {}),
                     )
             except SynapIntegrationError as exc:
                 first_error = first_error or exc

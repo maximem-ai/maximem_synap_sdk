@@ -10,6 +10,7 @@
 import { agentModelOf, withAgentModel, type AgentModel } from '../agent-model.js';
 import {
   InvalidInputError, ListeningAlreadyActiveError, ListeningNotActiveError, SynapError,
+  SynapPermanentError,
 } from '../errors.js';
 import type { AnticipationCache } from '../context/anticipation-cache.js';
 import type { StreamCredentials, StreamState } from '../grpc/stream-client.js';
@@ -188,6 +189,8 @@ export interface InstanceInternals {
    * bundles begin to arrive, so the local embedding model loads then.
    */
   setOnListen(handle: () => void): void;
+  /** Set by the client in local mode: `listen()` then throws this message instead of opening a stream. */
+  blockListen(message: string): void;
   /**
    * Set by the client. Receives the server's message count for a conversation
    * after each streamed write has been stored.
@@ -343,6 +346,7 @@ export function createInstanceNamespace(
 
   let applyCompaction: ((bundle: Record<string, unknown>) => void) | null = null;
   let onListen: (() => void) | null = null;
+  let listenBlockedBy: string | null = null;
   let onConversationState: ((conversationId: string, messageCount: number) => void) | null =
     null;
 
@@ -358,6 +362,9 @@ export function createInstanceNamespace(
     },
     setOnListen(handle) {
       onListen = handle;
+    },
+    blockListen(message) {
+      listenBlockedBy = message;
     },
     setConversationStateHandler(handle) {
       onConversationState = handle;
@@ -453,6 +460,7 @@ export function createInstanceNamespace(
 
   const namespace: InstanceNamespace = {
     async listen(options: ListenOptions = {}) {
+      if (listenBlockedBy !== null) throw new SynapPermanentError(listenBlockedBy);
       if (client !== null) {
         // Python raises this from InstanceController when a second listen()
         // lands on an already-active stream.

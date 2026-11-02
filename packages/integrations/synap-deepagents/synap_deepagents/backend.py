@@ -68,7 +68,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from deepagents.backends.protocol import (
     FILE_NOT_FOUND,
@@ -174,6 +174,11 @@ class SynapBackend(BackendProtocol):
             ``customer_id`` is required — a backend with neither has no scope
             to read or write.
         customer_id: External customer ID.
+        scope_path: Optional level path for an account with a deeper scope
+            ladder, ``{level_key: value}`` (``ScopeAddress.scope_path``). Sent
+            on every read (``fetch(scope_path=...)``) and write
+            (``memories.create(scope=...)``) only when set. It satisfies the
+            "at least one scope" rule on its own.
         conversation_id: Optional conversation scope for recall.
         recall_filename: Basename that maps to the synthesized recall document.
             Defaults to ``"AGENTS.md"`` so it lines up with the path you pass to
@@ -204,7 +209,8 @@ class SynapBackend(BackendProtocol):
             only do that if you can tolerate a write not being readable back.
 
     Raises:
-        ValueError: If neither ``user_id`` nor ``customer_id`` is given.
+        ValueError: If none of ``user_id``, ``customer_id`` or ``scope_path`` is
+            given.
     """
 
     def __init__(
@@ -213,6 +219,7 @@ class SynapBackend(BackendProtocol):
         *,
         user_id: Optional[str] = None,
         customer_id: Optional[str] = None,
+        scope_path: Optional[Mapping[str, str]] = None,
         conversation_id: Optional[str] = None,
         recall_filename: str = DEFAULT_RECALL_FILENAME,
         recall_query: str = DEFAULT_RECALL_QUERY,
@@ -227,7 +234,7 @@ class SynapBackend(BackendProtocol):
     ) -> None:
         if sdk is None:
             raise ValueError("SynapBackend requires a non-None sdk")
-        if not user_id and not customer_id:
+        if not user_id and not customer_id and not scope_path:
             raise ValueError(
                 "SynapBackend requires at least one of user_id or customer_id — "
                 "a backend with no scope cannot read or write memory"
@@ -243,6 +250,7 @@ class SynapBackend(BackendProtocol):
         self.sdk = sdk
         self.user_id = user_id
         self.customer_id = customer_id
+        self.scope_path = dict(scope_path) if scope_path else None
         self.conversation_id = conversation_id
         self.recall_filename = recall_filename.strip()
         self.recall_query = recall_query.strip()
@@ -259,6 +267,10 @@ class SynapBackend(BackendProtocol):
     # Internals
     # ------------------------------------------------------------------
 
+    def _write_extra(self) -> Dict[str, Any]:
+        """The level path for a write (``memories.create`` calls it ``scope``)."""
+        return {"scope": self.scope_path} if self.scope_path else {}
+
     def _is_recall(self, path: str) -> bool:
         return _basename(path) == self.recall_filename
 
@@ -272,6 +284,8 @@ class SynapBackend(BackendProtocol):
         ``file_not_found``; see the module docstring for why nothing else is
         safe to return.
         """
+        # Only when set: a call without a path is exactly what it always was.
+        extra: Dict[str, Any] = {"scope_path": self.scope_path} if self.scope_path else {}
         try:
             response = await self.sdk.fetch(
                 conversation_id=self.conversation_id,
@@ -282,6 +296,7 @@ class SynapBackend(BackendProtocol):
                 mode=mode,
                 precision_level=self.precision_level,
                 include_conversation_context=self.include_conversation_context,
+                **extra,
             )
         except Exception as exc:  # noqa: BLE001 — read path must not raise
             logger.error(
@@ -422,6 +437,7 @@ class SynapBackend(BackendProtocol):
                 customer_id=self.customer_id,
                 document_type=self.document_type,
                 mode=self.ingest_mode,
+                **self._write_extra(),
             )
         self._cache.put(path, content)
         return WriteResult(path=path)
@@ -467,6 +483,7 @@ class SynapBackend(BackendProtocol):
                 customer_id=self.customer_id,
                 document_type=self.document_type,
                 mode=self.ingest_mode,
+                **self._write_extra(),
             )
 
         cached = self._cache.get(path)

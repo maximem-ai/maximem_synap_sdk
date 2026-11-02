@@ -15,7 +15,7 @@ error.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Mapping, Optional
 
 from maximem_synap import MaximemSynapSDK
 
@@ -33,6 +33,7 @@ def synap_search_tool(
     customer_id: str = "",
     mode: str = "accurate",
     max_results: int = 10,
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> FunctionTool:
     """Factory: returns an LLM-callable ``synap_search(query)`` tool.
 
@@ -40,11 +41,16 @@ def synap_search_tool(
     returns the formatted context string. On SDK failure, returns a
     natural-language placeholder instead of raising — keeps the call
     alive if Synap momentarily misbehaves.
+
+    ``scope_path`` (a deeper scope ladder's level path) is closed over here and
+    sent only when set. It is not a parameter of the tool, so the model cannot
+    choose a level.
     """
     if sdk is None:
         raise ValueError("synap_search_tool requires a non-None sdk")
     if not user_id:
         raise ValueError("synap_search_tool requires a non-empty user_id")
+    path = dict(scope_path) if scope_path else None
 
     @function_tool(
         name="synap_search",
@@ -68,6 +74,7 @@ def synap_search_tool(
                 search_query=[query] if query else None,
                 max_results=max_results,
                 mode=mode,
+                **({"scope_path": path} if path else {}),
             )
         except Exception as exc:  # noqa: BLE001 — read-side graceful degrade
             logger.error(
@@ -90,17 +97,22 @@ def synap_store_tool(
     user_id: str,
     customer_id: str = "",
     document_type: str = "ai-chat-conversation",
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> FunctionTool:
     """Factory: returns an LLM-callable ``synap_store(content, category)`` tool.
 
     Write failures surface as :class:`SynapIntegrationError` via
     ``wrap_sdk_errors_async`` — the model sees a tool error rather than
     silent success, consistent with Synap's write policy.
+
+    ``scope_path`` is closed over and sent as ``scope`` only when set; the model
+    cannot choose a level (it is not a tool parameter).
     """
     if sdk is None:
         raise ValueError("synap_store_tool requires a non-None sdk")
     if not user_id:
         raise ValueError("synap_store_tool requires a non-empty user_id")
+    path = dict(scope_path) if scope_path else None
 
     @function_tool(
         name="synap_store",
@@ -129,6 +141,7 @@ def synap_store_tool(
                 customer_id=customer_id,
                 document_type=document_type,
                 metadata={"category": category or "fact"},
+                **({"scope": path} if path else {}),
             )
         ingestion_id = getattr(result, "ingestion_id", None) or "unknown"
         return f"Stored memory (ingestion_id={ingestion_id})."

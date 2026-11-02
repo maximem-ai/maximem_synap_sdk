@@ -13,7 +13,12 @@ from synap_integrations_common.history import (
     is_synap_history,
     splice_history,
 )
-from synap_integrations_common.scope import default_scope
+from synap_integrations_common.scope import (
+    default_scope,
+    ensure_ids_match_path,
+    resolve_address,
+    scope_string,
+)
 from synap_integrations_common.stream_events import (
     end_session,
     ensure_stream,
@@ -33,6 +38,9 @@ __all__ = [
     "wrap_sdk_errors",
     "wrap_sdk_errors_async",
     "default_scope",
+    "resolve_address",
+    "ensure_ids_match_path",
+    "scope_string",
     "stream_is_active",
     "ensure_stream",
     "set_auto_listen",

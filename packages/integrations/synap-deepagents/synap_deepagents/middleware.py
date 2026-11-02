@@ -29,7 +29,7 @@ prompt and you would pay for two fetches to say the same thing twice.
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Any, Awaitable, Callable, List, NotRequired, Optional
+from typing import Annotated, Any, Awaitable, Callable, List, Mapping, NotRequired, Optional
 
 from langchain.agents.middleware.types import (
     AgentMiddleware,
@@ -133,6 +133,11 @@ class SynapMemoryMiddleware(AgentMiddleware[SynapMemoryState, ContextT, Response
         user_id: External user ID. At least one of ``user_id`` or
             ``customer_id`` is required.
         customer_id: External customer ID.
+        scope_path: Optional level path for an account with a deeper scope
+            ladder, ``{level_key: value}``. Sent on the fetch and on the
+            conversation half's turns, only when set. Satisfies the "at least
+            one scope" rule on its own, except for the conversation half, which
+            still needs a ``user_id``.
         conversation_id: Optional conversation scope. With ``user_id`` as well,
             this also turns on the conversation half: the user's question, the
             reasoning, each tool call and result and the answer are recorded on
@@ -177,6 +182,7 @@ class SynapMemoryMiddleware(AgentMiddleware[SynapMemoryState, ContextT, Response
         sdk: MaximemSynapSDK,
         user_id: Optional[str] = None,
         customer_id: Optional[str] = None,
+        scope_path: Optional[Mapping[str, str]] = None,
         conversation_id: Optional[str] = None,
         max_results: int = 20,
         mode: str = "fast",
@@ -187,7 +193,7 @@ class SynapMemoryMiddleware(AgentMiddleware[SynapMemoryState, ContextT, Response
     ) -> None:
         if sdk is None:
             raise ValueError("SynapMemoryMiddleware requires a non-None sdk")
-        if not user_id and not customer_id:
+        if not user_id and not customer_id and not scope_path:
             raise ValueError(
                 "SynapMemoryMiddleware requires at least one of user_id or "
                 "customer_id — there is no scope to retrieve from otherwise"
@@ -207,6 +213,7 @@ class SynapMemoryMiddleware(AgentMiddleware[SynapMemoryState, ContextT, Response
         self.sdk = sdk
         self.user_id = user_id
         self.customer_id = customer_id
+        self.scope_path = dict(scope_path) if scope_path else None
         self.conversation_id = conversation_id
         # The conversation half. Needs both ids: a turn belongs to a user.
         self._conversation: Optional[SynapStreamMiddleware] = (
@@ -215,6 +222,7 @@ class SynapMemoryMiddleware(AgentMiddleware[SynapMemoryState, ContextT, Response
                 conversation_id=conversation_id,
                 user_id=user_id,
                 customer_id=customer_id or "",
+                scope_path=scope_path,
             )
             if conversation_id and user_id
             else None
@@ -238,6 +246,7 @@ class SynapMemoryMiddleware(AgentMiddleware[SynapMemoryState, ContextT, Response
                 mode=self.mode,
                 precision_level=self.precision_level,
                 include_conversation_context=self.include_conversation_context,
+                **({"scope_path": self.scope_path} if self.scope_path else {}),
             )
         except Exception as exc:  # noqa: BLE001 — prompt assembly must not fail
             logger.error(

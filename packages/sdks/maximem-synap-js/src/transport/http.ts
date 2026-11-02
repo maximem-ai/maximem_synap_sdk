@@ -36,6 +36,9 @@ import {
   type KeepAliveOptions,
 } from './keepalive.js';
 import { checkCustomerId } from '../scoping.js';
+import {
+  LADDER_INVALIDATION_MIN_INTERVAL_MS, LADDER_RETRY_BACKOFF_MS, LADDER_TTL_MS, ladderFromWhoami, type ScopeLadder,
+} from '../scope-ladder.js';
 
 export const DEFAULT_BASE_URL = 'https://synap-cloud-prod.maximem.ai';
 
@@ -235,6 +238,132 @@ export class HttpTransport {
    */
   userContextIsolation: string | undefined = undefined;
 
+  // ── Scope ladder (Python: MaximemSynapSDK.get_scope_ladder) ───────────────
+  // Held here, like `userContextIsolation`, so the interface factories that
+  // receive the transport can reach it and the client's public surface carries
+  // only the method Python has.
+  #ladder: ScopeLadder | null = null;
+  // Loaded is separate from the value: "the server does not say" (null) is an
+  // answer too, and is cached for the same 300 s.
+  #ladderLoaded = false;
+  #ladderExpiresAt = 0;
+  #ladderRetryAt = 0;
+  // Bumped by every invalidation. A read that started under an older number is
+  // not stored when it finishes.
+  #ladderGeneration = 0;
+  #ladderInvalidated = false;
+  #ladderInvalidationReadAt = Number.NEGATIVE_INFINITY;
+  // The read in flight, shared by concurrent callers.
+  #ladderInflight:
+    | { promise: Promise<ScopeLadder | null>; generation: number; keepOnFailure: boolean }
+    | undefined = undefined;
+
+  /**
+   * Called as observer(error, carriedScopePath) for every 400 answer.
+   * `carriedScopePath` says whether the refused request named a scope path,
+   * which is how the client learns its cached ladder may be stale. Never
+   * allowed to throw.
+   */
+  onInvalidInput: ((error: SynapError, carriedScopePath: boolean) => void) | undefined = undefined;
+
+  /**
+   * A 400 answered a call that carried a scope path: the ladder we hold may be
+   * stale. The next read is at most one per LADDER_INVALIDATION_MIN_INTERVAL_MS,
+   * the last known ladder stays as the answer if it fails, and a read already
+   * in flight will not be stored.
+   *
+   * The server's refusal wording is deliberately not inspected. The gRPC
+   * stream does not surface HTTP 400, so a ladder error on the stream is not
+   * observed here.
+   */
+  invalidateScopeLadder(): void {
+    this.#ladderGeneration += 1;
+    this.#ladderInvalidated = true;
+    this.#ladderRetryAt = 0;
+  }
+
+  /**
+   * The account's ladder, from whoami, cached for 300 s (`null` included).
+   * Concurrent callers share one read. A failed re-read after expiry keeps the
+   * last known ladder (with a warning) and waits 60 s before trying again. A
+   * failure on the first read, or with `refresh`, is thrown.
+   */
+  async getScopeLadder(refresh: boolean, warn: (message: string) => void): Promise<ScopeLadder | null> {
+    const now = this.clock();
+    const cached = this.#ladder;
+    const loaded = this.#ladderLoaded;
+    if (!refresh && loaded) {
+      if (now < this.#ladderRetryAt) return cached;
+      if (this.#ladderInvalidated) {
+        // At most one invalidation-triggered re-read per interval.
+        if (now < this.#ladderInvalidationReadAt + LADDER_INVALIDATION_MIN_INTERVAL_MS) return cached;
+      } else if (now < this.#ladderExpiresAt) {
+        return cached;
+      }
+    }
+
+    const keepOnFailure = loaded && !refresh;
+    const inflight = this.#ladderInflight;
+    if (
+      inflight !== undefined
+      && inflight.generation === this.#ladderGeneration
+      && inflight.keepOnFailure === keepOnFailure
+    ) {
+      // Concurrent callers share the one read, and its outcome. Only callers
+      // with the same failure rule join it: a `refresh` caller must see a
+      // failed read thrown, so it never joins a read that would answer a
+      // failure with the stale ladder (and the other way round), and starts
+      // its own instead.
+      return inflight.promise;
+    }
+
+    const generation = this.#ladderGeneration;
+    if (this.#ladderInvalidated && !refresh) this.#ladderInvalidationReadAt = now;
+    const promise = this.#readScopeLadder(now, generation, cached, keepOnFailure, warn);
+    const entry = { promise, generation, keepOnFailure };
+    this.#ladderInflight = entry;
+    const clear = (): void => {
+      if (this.#ladderInflight === entry) this.#ladderInflight = undefined;
+    };
+    promise.then(clear, clear);
+    return promise;
+  }
+
+  async #readScopeLadder(
+    now: number,
+    generation: number,
+    cached: ScopeLadder | null,
+    keepOnFailure: boolean,
+    warn: (message: string) => void,
+  ): Promise<ScopeLadder | null> {
+    let whoami: Record<string, unknown>;
+    try {
+      const raw = await this.request('whoami', {});
+      whoami = typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+    } catch (error) {
+      if (keepOnFailure) {
+        warn(
+          `Could not re-read the scope ladder (${(error as Error)?.message ?? String(error)}); ` +
+            `keeping the last known one and retrying in ${LADDER_RETRY_BACKOFF_MS / 1000}s.`,
+        );
+        this.#ladderRetryAt = now + LADDER_RETRY_BACKOFF_MS;
+        return cached;
+      }
+      throw error;
+    }
+    const ladder = ladderFromWhoami(whoami, this.userContextIsolation, warn);
+    if (generation === this.#ladderGeneration) {
+      this.#ladder = ladder;
+      this.#ladderLoaded = true;
+      this.#ladderExpiresAt = now + LADDER_TTL_MS;
+      this.#ladderRetryAt = 0;
+      this.#ladderInvalidated = false;
+    }
+    // else: invalidated while this read was in flight. Its callers get the
+    // value, but it is not stored, so the next call re-reads.
+    return ladder;
+  }
+
   /**
    * Set by the client to its identity resolution (`initialize()`'s whoami).
    * Python refuses every call before `initialize()`; here the first request
@@ -397,6 +526,9 @@ export class HttpTransport {
 
     if (!response.ok) {
       const error = await toHttpError(response, correlationId);
+      if (response.status === 400 && error instanceof InvalidInputError) {
+        try { this.onInvalidInput?.(error, carriesScopePath(options.body)); } catch { /* an observer must never change the error */ }
+      }
       throw options.mapError?.(response.status, error) ?? error;
     }
 
@@ -423,7 +555,8 @@ export class HttpTransport {
     options: { json?: boolean } = {},
   ): Record<string, string> {
     return {
-      Authorization: `Bearer ${this.#credentials.apiKey}`,
+      // Empty only in local mode with no SYNAP_API_TOKEN: send no header at all.
+      ...(this.#credentials.apiKey !== '' ? { Authorization: `Bearer ${this.#credentials.apiKey}` } : {}),
       'X-Client-ID': this.#credentials.clientId,
       'X-Instance-ID': this.#credentials.instanceId,
       'X-Correlation-ID': correlationId,
@@ -545,6 +678,45 @@ function creditReason(payload: Record<string, unknown>): string | null {
   if (reason !== null) return reason;
   const error = stringOrNull(payload['error']);
   return error !== null && CREDIT_ERRORS.has(error) ? error : null;
+}
+
+/** A scope path is a non-empty object of level key to id; a multipart form sends it as a JSON string. */
+function isScopePath(value: unknown): boolean {
+  let v = value;
+  if (typeof v === 'string' && v.trimStart().startsWith('{')) {
+    try { v = JSON.parse(v); } catch { return false; }
+  }
+  return typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).length > 0;
+}
+
+/**
+ * Whether a request body names a scope path: a top-level `scope` (context
+ * fetches, record_message, ingest_transcript, memories, send_message) or one on
+ * a message of a batch. `data.delete` also has a `scope` field, but it is a
+ * plain string such as "user", so it is not a path. Mirrors Python's
+ * `_carries_scope_path`.
+ */
+export function carriesScopePath(body: unknown): boolean {
+  if (typeof FormData !== 'undefined' && body instanceof FormData) {
+    if (isScopePath(body.get('scope'))) return true;
+    // `memories.create` with file parts posts one `manifest` field: a JSON
+    // string whose `scope` key holds the path. Unreadable means "no path".
+    const manifest = body.get('manifest');
+    if (typeof manifest === 'string') {
+      try {
+        const parsed: unknown = JSON.parse(manifest);
+        return typeof parsed === 'object' && parsed !== null
+          && isScopePath((parsed as Record<string, unknown>)['scope']);
+      } catch { return false; }
+    }
+    return false;
+  }
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return false;
+  const o = body as Record<string, unknown>;
+  if (isScopePath(o['scope'])) return true;
+  return Object.values(o).some(
+    (v) => Array.isArray(v) && v.some((i) => typeof i === 'object' && i !== null && isScopePath((i as Record<string, unknown>)['scope'])),
+  );
 }
 
 async function toHttpError(response: Response, correlationId: string): Promise<SynapError> {

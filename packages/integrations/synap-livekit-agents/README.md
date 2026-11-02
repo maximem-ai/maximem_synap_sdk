@@ -75,6 +75,18 @@ Tool calls, tool results and reasoning are anticipation hints. The server does n
 - **Reads** (`preload_synap_context`, `synap_search_tool`) degrade gracefully. SDK failures log at `ERROR`, return an empty / "no relevant memory" placeholder, and the call proceeds.
 - **Writes** (`attach_synap_recording`, `synap_store_tool`) surface `SynapIntegrationError` via `wrap_sdk_errors_async`. The recording callback catches+logs (can't bubble an exception out of a sync LiveKit event emission without tearing down the session); the store tool lets the `SynapIntegrationError` propagate to the LLM runtime so the model sees a tool failure.
 
+## Deeper scope ladders
+
+If your account has levels beyond customer and user, pass `scope_path` (level key to value) to `preload_synap_context`, `attach_synap_recording`, `synap_search_tool` and `synap_store_tool`. It is sent only when set, adds no network call per turn, and the tools close it over so the model cannot choose a level.
+
+```python
+path = {"customer": "acme", "team": "payments", "user": "dana"}
+attach_synap_recording(session, sdk, user_id="dana", customer_id="acme", scope_path=path)
+tools = [synap_search_tool(sdk, user_id="dana", customer_id="acme", scope_path=path)]
+```
+
+Needs a `maximem-synap` release whose `fetch` accepts `scope_path`.
+
 ## Constructor args
 
 All helpers accept:

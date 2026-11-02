@@ -158,6 +158,30 @@ Synap SDK per set of credentials (API key and instance id), so the stream the
 exporter opens, and what comes back on it, serves the others' reads. The last
 component to shut down stops the stream and closes the SDK.
 
+## Deeper scope ladders
+
+On an account whose scope ladder has more levels than customer and user, give the editor and the stream exporter
+the level as `scope_path` (level key to value), in code or in YAML. It is sent with every read, write and recorded
+turn, and only when set. It is fixed when the component is built; a `scope_path` passed to `search` is ignored.
+
+```yaml
+memory:
+  synap:
+    _type: synap_memory
+    scope_path: {customer: acme, team: payments, user: alice}
+```
+
+```python
+editor = SynapMemoryEditor(sdk=sdk, scope_path={"customer": "acme", "team": "payments", "user": "alice"})
+```
+
+`maximem_synap.ScopeLadder.address(values)` builds `user_id`, `customer_id` and `scope_path` from level values.
+Without `scope_path` nothing changes.
+
+**Identity must match the path.** `search(user_id=...)`, each `MemoryItem.user_id` and the user NAT puts on each workflow event are supplied per call, while `scope_path` is fixed when the editor or exporter is built. The server lets the path win over flat ids, so a call for another user would read or write the path's user's memory. With a `scope_path` set, a `user` or `customer` id that differs from the path's `user` / `customer` level is refused: `search` and `add_items` raise `SynapIntegrationError` and nothing is sent, and the exporter skips the event and logs an error (it runs inside the workflow, where raising would end the run). Build one editor and one exporter per identity; do not share a path-scoped one across users. Messages carry short fingerprints, never the ids.
+
+**Needs a newer SDK.** A path needs a `maximem-synap` release that has `get_scope_ladder` and `scope_path` on `fetch`, `send_message` and `record_message` (and `scope` on `memories.create`). With an older SDK, a turn that carries a path is dropped and an error is logged: it is never filed at a wider scope. Leave `scope_path` unset on an older SDK.
+
 ## Error policy
 
 | Operation       | Synap failure          | Why                                       |

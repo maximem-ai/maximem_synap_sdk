@@ -6,7 +6,7 @@ confidence, scope, and temporal info.
 """
 
 import logging
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from langchain_core.callbacks.manager import (
     AsyncCallbackManagerForRetrieverRun,
@@ -40,6 +40,9 @@ class SynapRetriever(BaseRetriever):
     mode: str = "accurate"
     max_results: int = 20
     types: Optional[List[str]] = None
+    # The level to read on an account with a deeper scope ladder
+    # (``ScopeAddress.scope_path``). Sent to ``sdk.fetch`` only when set.
+    scope_path: Optional[Dict[str, str]] = None
 
     def _get_relevant_documents(
         self,
@@ -61,6 +64,9 @@ class SynapRetriever(BaseRetriever):
             "langchain.SynapRetriever", logger,
             user_id=self.user_id, query_len=len(query),
         ):
+            extra: Dict[str, Any] = {}
+            if self.scope_path:
+                extra["scope_path"] = dict(self.scope_path)
             response = await self.sdk.fetch(
                 conversation_id=self.conversation_id,
                 user_id=self.user_id,
@@ -70,6 +76,7 @@ class SynapRetriever(BaseRetriever):
                 types=self.types,
                 mode=self.mode,
                 include_conversation_context=False,
+                **extra,
             )
 
         docs: List[Document] = []

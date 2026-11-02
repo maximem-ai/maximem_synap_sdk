@@ -56,6 +56,10 @@ def test_all_list_is_complete():
         "create_synap_node",
         "create_synap_st_node",
         "synap_st_prompt",
+        "create_synap_turn_node",
+        "create_synap_tool_call_node",
+        "create_synap_tool_result_node",
+        "create_synap_reasoning_node",
     }
     assert set(pkg.__all__) == expected
 

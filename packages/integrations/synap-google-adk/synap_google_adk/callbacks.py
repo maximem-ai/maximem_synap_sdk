@@ -40,7 +40,7 @@ from __future__ import annotations
 import logging
 import weakref
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
@@ -69,6 +69,7 @@ def create_synap_callbacks(
     conversation_id: Optional[str] = None,
     *,
     report_tool_results: bool = True,
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Any]:
     """Return the ``before_model`` / ``after_model`` / ``before_tool`` / ``after_tool`` callbacks.
 
@@ -90,6 +91,10 @@ def create_synap_callbacks(
         report_tool_results: Whether tool results are reported. ⚠ A tool result
             is usually your own customer's data. It is an anticipation hint and
             never becomes a long-term memory, but it does leave your process.
+        scope_path: Optional level path for an account with a deeper scope
+            ladder, ``{level_key: value}``. Sent with the user and assistant
+            turns, only when set (tool calls, results and the compaction read
+            carry none: the conversation remembers its own level).
 
     Returns:
         A dict to splat into ``LlmAgent(...)``.
@@ -104,6 +109,8 @@ def create_synap_callbacks(
         "user_id": user_id,
         "customer_id": customer_id,
     }
+    # Only when set: a turn without a path is exactly what it always was.
+    turn_extra: Dict[str, Any] = {"scope_path": dict(scope_path)} if scope_path else {}
     # Tool calls and results arrive as separate callbacks with nothing tying
     # them together, so the pairing is kept here: one tool in flight per name,
     # which is what a sequential agent loop produces.
@@ -118,7 +125,7 @@ def create_synap_callbacks(
         Returns ``None`` always: a returned response would skip the model call.
         """
         try:
-            await _record_user_turn(sdk, callback_context, written, ids)
+            await _record_user_turn(sdk, callback_context, written, ids, turn_extra)
             await _splice_request(sdk, llm_request, ids["conversation_id"])
         except Exception:  # noqa: BLE001 — a callback must never end the run
             logger.warning("synap before_model callback failed", exc_info=True)
@@ -166,7 +173,7 @@ def create_synap_callbacks(
             return None
         text = _response_text(llm_response)
         if text:
-            await record_turn(sdk, role="assistant", content=text, **ids)
+            await record_turn(sdk, role="assistant", content=text, **ids, **turn_extra)
         return None
 
     return {
@@ -184,8 +191,11 @@ async def report_user_turn(
     conversation_id: str,
     user_id: str,
     customer_id: str = "",
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> bool:
     """Write the user's turn yourself. Returns whether it was written.
+
+    ``scope_path`` (a deeper scope ladder's level path) is sent only when set.
 
     The callbacks already write it, from the invocation's user content, so most
     callers never need this. It is for a run that does not use them; if you call
@@ -194,6 +204,7 @@ async def report_user_turn(
     written = await record_turn(
         sdk, role="user", content=content or "",
         conversation_id=conversation_id, user_id=user_id, customer_id=customer_id,
+        **({"scope_path": dict(scope_path)} if scope_path else {}),
     )
     if written:
         try:
@@ -205,6 +216,7 @@ async def report_user_turn(
 
 async def _record_user_turn(
     sdk: Any, callback_context: Any, written: "OrderedDict[str, None]", ids: Dict[str, str],
+    turn_extra: Optional[Dict[str, Any]] = None,
 ) -> None:
     """The invocation's user message, once per invocation (a tool lap calls the
     model again with the same one)."""
@@ -220,7 +232,7 @@ async def _record_user_turn(
         return
     if _manual_turns.get(sdk, {}).pop(ids["conversation_id"], None) == text:
         return  # report_user_turn already wrote it
-    await record_turn(sdk, role="user", content=text, **ids)
+    await record_turn(sdk, role="user", content=text, **ids, **(turn_extra or {}))
 
 
 def _role_of(content: Any) -> str:

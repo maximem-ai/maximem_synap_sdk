@@ -6,7 +6,7 @@ memory, rather than doing it automatically on every turn.
 """
 
 import logging
-from typing import Any, Optional, Type
+from typing import Any, Dict, Optional, Type
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, ConfigDict, Field
@@ -52,6 +52,9 @@ class SynapSearchTool(BaseTool):
     conversation_id: Optional[str] = None
     mode: str = "accurate"
     max_results: int = 10
+    # The level to read on a deeper scope ladder; sent to ``sdk.fetch`` only
+    # when set.
+    scope_path: Optional[Dict[str, str]] = None
 
     def _run(self, query: str, **kwargs: Any) -> str:
         return run_async(self._arun(query, **kwargs))
@@ -60,6 +63,9 @@ class SynapSearchTool(BaseTool):
         async with wrap_sdk_errors_async(
             "langchain.search_memory", logger, user_id=self.user_id
         ):
+            extra: Dict[str, Any] = {}
+            if self.scope_path:
+                extra["scope_path"] = dict(self.scope_path)
             response = await self.sdk.fetch(
                 conversation_id=self.conversation_id,
                 user_id=self.user_id,
@@ -68,6 +74,7 @@ class SynapSearchTool(BaseTool):
                 mode=self.mode,
                 max_results=self.max_results,
                 include_conversation_context=False,
+                **extra,
             )
         return response.formatted_context or "No relevant memories found."
 
@@ -94,6 +101,9 @@ class SynapStoreTool(BaseTool):
     sdk: MaximemSynapSDK
     user_id: str
     customer_id: Optional[str] = None
+    # The level to write to on a deeper scope ladder; sent to
+    # ``sdk.memories.create`` as ``scope=`` only when set.
+    scope_path: Optional[Dict[str, str]] = None
 
     def _run(self, content: str, **kwargs: Any) -> str:
         return run_async(self._arun(content, **kwargs))
@@ -102,9 +112,13 @@ class SynapStoreTool(BaseTool):
         async with wrap_sdk_errors_async(
             "langchain.store_memory", logger, user_id=self.user_id
         ):
+            extra: Dict[str, Any] = {}
+            if self.scope_path:
+                extra["scope"] = dict(self.scope_path)
             result = await self.sdk.memories.create(
                 document=content,
                 user_id=self.user_id,
                 customer_id=self.customer_id or "",
+                **extra,
             )
         return f"Memory stored (ingestion_id: {result.ingestion_id})"

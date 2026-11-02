@@ -55,7 +55,7 @@ instead of failing to import.
 
 import logging
 from collections import Counter
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from llama_index.core.memory.types import BaseMemory
@@ -130,6 +130,7 @@ class SynapChatMemory(BaseMemory):
     _conversation_id: str
     _user_id: str
     _customer_id: str
+    _scope_path: Optional[Dict[str, str]]
     _messages: List[ChatMessage]
 
     def __init__(
@@ -138,6 +139,7 @@ class SynapChatMemory(BaseMemory):
         conversation_id: str,
         user_id: str,
         customer_id: str = "",
+        scope_path: Optional[Mapping[str, str]] = None,
     ):
         if sdk is None:
             raise ValueError("SynapChatMemory requires a non-None sdk")
@@ -152,6 +154,10 @@ class SynapChatMemory(BaseMemory):
         self._conversation_id = conversation_id
         self._user_id = user_id
         self._customer_id = customer_id
+        # A deeper scope ladder's level (e.g. {"customer": "acme", "team":
+        # "payments", "user": "dana"}). Forwarded to the fetch and to the turn
+        # writes only when set; conversation-only reads take none.
+        self._scope_path = dict(scope_path) if scope_path else None
         self._messages = []
 
     @classmethod
@@ -161,6 +167,7 @@ class SynapChatMemory(BaseMemory):
         conversation_id: str = "",
         user_id: str = "",
         customer_id: str = "",
+        scope_path: Optional[Mapping[str, str]] = None,
         **kwargs: Any,
     ) -> "SynapChatMemory":
         if sdk is None:
@@ -173,7 +180,12 @@ class SynapChatMemory(BaseMemory):
             conversation_id=conversation_id,
             user_id=user_id,
             customer_id=customer_id,
+            scope_path=scope_path,
         )
+
+    def _path_kwargs(self) -> Dict[str, Any]:
+        """``{"scope_path": ...}`` when a path is set, else nothing."""
+        return {"scope_path": dict(self._scope_path)} if self._scope_path else {}
 
     def get(self, input: Optional[str] = None, **kwargs: Any) -> List[ChatMessage]:
         return run_async(self.aget(input, **kwargs))
@@ -194,6 +206,7 @@ class SynapChatMemory(BaseMemory):
                     customer_id=self._customer_id or None,
                     search_query=[input],
                     include_conversation_context=False,
+                    **self._path_kwargs(),
                 )
                 if response.formatted_context:
                     messages.append(ChatMessage(
@@ -328,6 +341,7 @@ class SynapChatMemory(BaseMemory):
             self._sdk, role=role, content=content,
             conversation_id=self._conversation_id,
             user_id=self._user_id, customer_id=self._customer_id,
+            **self._path_kwargs(),
         ):
             raise SynapIntegrationError(
                 "llamaindex.aput",

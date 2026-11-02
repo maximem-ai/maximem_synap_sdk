@@ -119,6 +119,28 @@ Two things to know:
 Every harness API is `@experimental` upstream. Pin a tested version and re-run the
 suite on each MAF minor.
 
+## Deeper scope ladders
+
+On an account whose scope ladder has more levels than customer and user, pass the level as `scope_path`
+(level key to value) to `SynapContextProvider`, `SynapHistoryProvider`, `SynapMemoryStore`, `SynapAgentFileStore`
+or `create_synap_harness_memory`. It is sent with every fetch, write and turn the object makes, and only when set.
+It is fixed when the object is built; the store's tools take no level from the model.
+
+```python
+path = {"customer": "acme", "team": "payments", "user": "alice"}
+provider = SynapContextProvider(sdk, user_id="alice", customer_id="acme", scope_path=path)
+memory = create_synap_harness_memory(sdk, user_id="alice", customer_id="acme", scope_path=path)
+```
+
+With a path, the store's owner label is built from the path values in the order given (`/acme/payments/alice`);
+the server orders levels by ladder position, so order does not matter to it, but the label is the store's local
+record partition key: the same levels in a different key order give a different label and a different local
+partition. A value must be a non-empty string without `/`; a bad path raises `ValueError` when the object is built.
+`maximem_synap.ScopeLadder.address(values)` builds `user_id`, `customer_id` and `scope_path` from level values.
+Without `scope_path` nothing changes.
+
+**Needs a newer SDK.** A path needs a `maximem-synap` release that has `get_scope_ladder` and `scope_path` on `fetch`, `send_message` and `record_message` (and `scope` on `memories.create`). With an older SDK, a turn that carries a path is dropped and an error is logged: it is never filed at a wider scope. Leave `scope_path` unset on an older SDK.
+
 ## Error policy
 
 - **Read-side failures** (`fetch`, `get_context_for_prompt`) degrade gracefully — logged at `ERROR`, empty result returned. An outage never crashes an agent turn.

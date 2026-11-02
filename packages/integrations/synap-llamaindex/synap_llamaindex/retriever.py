@@ -5,7 +5,7 @@ enabling memory-augmented retrieval in any LlamaIndex pipeline.
 """
 
 import logging
-from typing import Any, List, Optional
+from typing import Any, List, Mapping, Optional
 
 from llama_index.core.base.base_retriever import BaseRetriever
 from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
@@ -28,6 +28,7 @@ class SynapRetriever(BaseRetriever):
         mode: str = "accurate",
         max_results: int = 20,
         types: Optional[List[str]] = None,
+        scope_path: Optional[Mapping[str, str]] = None,
         **kwargs: Any,
     ):
         if sdk is None:
@@ -43,6 +44,9 @@ class SynapRetriever(BaseRetriever):
         self._mode = mode
         self._max_results = max_results
         self._types = types
+        # A deeper scope ladder's level, e.g. {"customer": "acme", "team":
+        # "payments", "user": "dana"}. Sent to `sdk.fetch` only when set.
+        self._scope_path = dict(scope_path) if scope_path else None
 
     def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
         return run_async(self._aretrieve(query_bundle))
@@ -61,6 +65,7 @@ class SynapRetriever(BaseRetriever):
                 types=self._types,
                 mode=self._mode,
                 include_conversation_context=False,
+                **({"scope_path": dict(self._scope_path)} if self._scope_path else {}),
             )
 
         nodes: List[NodeWithScore] = []

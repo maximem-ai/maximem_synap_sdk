@@ -81,7 +81,7 @@ import asyncio
 import contextlib
 import json
 import logging
-from typing import Any, Optional
+from typing import Any, Dict, Mapping, Optional
 
 from pydantic import Field
 
@@ -94,7 +94,7 @@ from nat.data_models.telemetry_exporter import TelemetryExporterBaseConfig
 from nat.observability.exporter.base_exporter import BaseExporter, IsolatedAttribute
 
 from maximem_synap import MaximemSynapSDK
-from synap_integrations_common import ensure_stream
+from synap_integrations_common import SynapIntegrationError, ensure_ids_match_path, ensure_stream
 from synap_integrations_common.stream_events import (
     record_turn,
     report_reasoning,
@@ -279,6 +279,9 @@ class SynapStreamExporter(BaseExporter):
             a B2C instance (``user_context_isolation=equals_customer``): the
             server refuses a call carrying one. NAT has no equivalent of it,
             so it can only be configured here.
+        scope_path: The conversation's level on a deeper scope ladder. Sent
+            with the user and assistant turns only (the server files a
+            conversation from those), and only when set.
         drain_timeout_s: How long ``stop()`` waits for queued events.
         context_state: NAT context state. Defaults to the ambient one.
     """
@@ -300,6 +303,7 @@ class SynapStreamExporter(BaseExporter):
         customer_id: str = "",
         drain_timeout_s: float = _DEFAULT_DRAIN_TIMEOUT_S,
         context_state: Optional[ContextState] = None,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> None:
         if sdk is None:
             raise ValueError("SynapStreamExporter requires a non-None sdk")
@@ -309,6 +313,7 @@ class SynapStreamExporter(BaseExporter):
         self.user_id = user_id
         self.customer_id = customer_id
         self.drain_timeout_s = drain_timeout_s
+        self.scope_path: Optional[Dict[str, str]] = dict(scope_path) if scope_path else None
 
     # ── ids ────────────────────────────────────────────────────────────────
 
@@ -326,6 +331,10 @@ class SynapStreamExporter(BaseExporter):
             "user_id": user_id or self.user_id,
             "customer_id": self.customer_id,
         }
+
+    def _turn_kwargs(self, ids: dict) -> dict:
+        """The ids plus `scope_path` (only when set), for the two turn writes."""
+        return {**ids, "scope_path": dict(self.scope_path)} if self.scope_path else ids
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
@@ -391,10 +400,24 @@ class SynapStreamExporter(BaseExporter):
     async def _report(self, step: IntermediateStep) -> None:
         event_type = step.event_type
         ids = self._ids(step)
+        # NAT's request context supplies the user per event; the path is fixed.
+        # A different user would be filed under the path's. SKIP the event with
+        # an error log rather than raise: the exporter runs inside the workflow's
+        # telemetry loop, where an exception ends the run for a reporting problem
+        # (and `_drain` would log it at debug only). Nothing reaches the SDK.
+        try:
+            ensure_ids_match_path(
+                self.scope_path, user_id=ids["user_id"], customer_id=ids["customer_id"],
+                where="nemo_agent_toolkit.stream")
+        except SynapIntegrationError as exc:
+            logger.error("synap stream exporter: event skipped, its ids do not match "
+                         "the configured scope_path: %s", exc)
+            return
 
         if event_type == IntermediateStepType.WORKFLOW_START:
             text = _user_text(step.data.input if step.data is not None else None)
-            if text and await record_turn(self.sdk, role="user", content=text, **ids):
+            if text and await record_turn(
+                self.sdk, role="user", content=text, **self._turn_kwargs(ids)):
                 note_written(ids["user_id"], "user", text)
             return
 
@@ -404,7 +427,8 @@ class SynapStreamExporter(BaseExporter):
             # the same thing twice.
             self._pending_reasoning.clear()
             text = _assistant_text(step.data.output if step.data is not None else None)
-            if text and await record_turn(self.sdk, role="assistant", content=text, **ids):
+            if text and await record_turn(
+                self.sdk, role="assistant", content=text, **self._turn_kwargs(ids)):
                 note_written(ids["user_id"], "assistant", text)
             return
 
@@ -495,6 +519,14 @@ class SynapStreamExporterConfig(TelemetryExporterBaseConfig, name="synap_stream"
             "where the server refuses a call that carries one."
         ),
     )
+    scope_path: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Deeper scope ladders: the conversation's level as level key to "
+            "value (e.g. customer: acme, team: payments, user: alice). Empty "
+            "means the plain user/customer ids."
+        ),
+    )
     drain_timeout_s: float = Field(
         default=_DEFAULT_DRAIN_TIMEOUT_S,
         description=(
@@ -529,6 +561,7 @@ async def synap_stream_exporter(config: SynapStreamExporterConfig, builder: Buil
             user_id=config.user_id,
             customer_id=config.customer_id,
             drain_timeout_s=config.drain_timeout_s,
+            scope_path=config.scope_path or None,
         )
 
 

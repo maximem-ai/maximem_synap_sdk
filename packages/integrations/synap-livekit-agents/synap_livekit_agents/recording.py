@@ -44,7 +44,7 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Any, Callable, Coroutine, Optional
+from typing import Any, Callable, Coroutine, Mapping, Optional
 
 from maximem_synap import MaximemSynapSDK
 
@@ -134,11 +134,14 @@ class _SessionReporter:
         user_id: str,
         customer_id: str,
         session: Any = None,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> None:
         self.sdk = sdk
         self.conversation_id = conversation_id
         self.user_id = user_id
         self.customer_id = customer_id
+        # Built once; sent with each turn only when set (no extra call per turn).
+        self._turn_extra: dict = {"scope_path": dict(scope_path)} if scope_path else {}
         # Read per turn, not here: AgentSession.llm can be set or swapped
         # after the listeners are attached.
         self._session = session
@@ -331,6 +334,7 @@ class _SessionReporter:
             user_id=self.user_id, customer_id=self.customer_id,
             # In metadata, not model=, so an older installed SDK accepts it.
             metadata={"agent_model": model} if model else None,
+            **self._turn_extra,
         )
 
     async def _report_call(self, name: str, args: dict, call_id: str) -> None:
@@ -361,6 +365,7 @@ def attach_synap_recording(
     user_id: str,
     customer_id: str = "",
     conversation_id: Optional[str] = None,
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> str:
     """Attach the Synap listeners to a LiveKit ``AgentSession``.
 
@@ -382,6 +387,11 @@ def attach_synap_recording(
             customer-less.
         conversation_id: Explicit conversation id for this call. Auto-
             generated (``livekit-<hex>``) when absent.
+        scope_path: Optional level path for an account with a deeper scope
+            ladder, ``{level_key: value}``. Sent with each user and assistant
+            turn only when set; the conversation stores it from the first turn.
+            Tool events and the compaction read carry none, and no extra
+            network call is made per turn.
 
     Returns:
         The ``conversation_id`` used by the listeners — hold onto it if
@@ -397,7 +407,8 @@ def attach_synap_recording(
         )
 
     conv_id = conversation_id or str(uuid.uuid4())
-    reporter = _SessionReporter(sdk, conv_id, user_id, customer_id, session=session)
+    reporter = _SessionReporter(sdk, conv_id, user_id, customer_id, session=session,
+                               scope_path=scope_path)
 
     # `EventEmitter.on` stores by event name and never validates it, so
     # registering an event a older LiveKit does not emit is inert rather than

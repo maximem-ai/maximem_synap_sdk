@@ -30,10 +30,11 @@ import dataclasses
 import json
 import logging
 import weakref
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
+    ensure_ids_match_path,
     is_synap_history,
     report_reasoning,
     report_tool_call,
@@ -79,6 +80,10 @@ class SynapRunHooks(RunHooks):  # type: ignore[misc,valid-type]
             data. It is an anticipation hint and never becomes a long-term
             memory, but it does leave your process. Turn this off if that is
             not something you want to send.
+        scope_path: The conversation's level on a deeper scope ladder, e.g.
+            ``{"customer": "acme", "team": "payments", "user": "dana"}``. Sent
+            with the user and assistant turns only (the server files a
+            conversation from those), and only when set.
 
     Example::
 
@@ -101,6 +106,7 @@ class SynapRunHooks(RunHooks):  # type: ignore[misc,valid-type]
         *,
         report_tool_results: bool = True,
         report_model_reasoning: bool = True,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> None:
         if sdk is None:
             raise ValueError("SynapRunHooks requires a non-None sdk")
@@ -112,6 +118,7 @@ class SynapRunHooks(RunHooks):  # type: ignore[misc,valid-type]
         self._conversation_id = conversation_id or ""
         self._report_tool_results = report_tool_results
         self._report_model_reasoning = report_model_reasoning
+        self._scope_path = dict(scope_path) if scope_path else None
         # Tool calls and their results arrive as separate hooks with no id
         # tying them together, so the pairing is kept here: one tool in flight
         # per name, which is what a sequential agent loop produces.
@@ -125,6 +132,13 @@ class SynapRunHooks(RunHooks):  # type: ignore[misc,valid-type]
             "user_id": self._user_id,
             "customer_id": self._customer_id,
         }
+
+    def _turn_ids(self) -> dict[str, Any]:
+        """The ids plus `scope_path` (only when set), for the two turn writes."""
+        ids: dict[str, Any] = self._ids()
+        if self._scope_path:
+            ids["scope_path"] = dict(self._scope_path)
+        return ids
 
     def run_config(self, **kwargs: Any) -> Any:
         """A ``RunConfig`` that sends the model Synap's compacted history.
@@ -162,7 +176,7 @@ class SynapRunHooks(RunHooks):  # type: ignore[misc,valid-type]
             if _manual_turns.get(self._sdk, {}).pop(self._conversation_id, None) == text:
                 return  # report_user_turn already wrote it
             await record_turn(
-                self._sdk, role="user", content=text, **self._ids(),
+                self._sdk, role="user", content=text, **self._turn_ids(),
                 metadata=_model_metadata(getattr(agent, "model", None)),
             )
         except Exception:  # noqa: BLE001 — a hook must never end the run
@@ -218,7 +232,7 @@ class SynapRunHooks(RunHooks):  # type: ignore[misc,valid-type]
         if not text:
             return
         await record_turn(
-            self._sdk, role="assistant", content=text, **self._ids(),
+            self._sdk, role="assistant", content=text, **self._turn_ids(),
             metadata=_model_metadata(getattr(agent, "model", None)),
         )
 
@@ -231,6 +245,7 @@ async def report_user_turn(
     user_id: str,
     customer_id: str = "",
     model: Any = None,
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> bool:
     """Write the user's turn yourself. Returns whether it was written.
 
@@ -240,11 +255,19 @@ async def report_user_turn(
 
     ``model`` is the agent's model (``agent.model``); pass it so Synap sizes
     compaction to that model's context window.
+
+    ``scope_path`` is the conversation's level on a deeper scope ladder; it is
+    sent only when set.
     """
+    # Both the ids and the path come from the caller here; the server lets the
+    # path win, so a mismatch would file this user's turn under the path's user.
+    ensure_ids_match_path(scope_path, user_id=user_id, customer_id=customer_id,
+                          where="openai_agents.report_user_turn")
     written = await record_turn(
         sdk, role="user", content=content or "",
         conversation_id=conversation_id, user_id=user_id, customer_id=customer_id,
         metadata=_model_metadata(model),
+        **({"scope_path": dict(scope_path)} if scope_path else {}),
     )
     if written:
         try:

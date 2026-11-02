@@ -182,6 +182,19 @@ SynapBackend(
 )
 ```
 
+## Deeper scope ladders
+
+If your account has more levels than customer and user, pass `scope_path` (level key to value, outermost first) next to, or instead of, the ids. It is sent on every read and write only when set; the backend, middleware and tools close it over, so the model never chooses a level.
+
+```python
+path = {"customer": "acme", "team": "payments", "user": "dana"}
+backend = SynapBackend(sdk, user_id="dana", customer_id="acme", scope_path=path)
+SynapMemoryMiddleware(sdk=sdk, user_id="dana", customer_id="acme", scope_path=path)
+SynapSearchTool(sdk=sdk, user_id="dana", customer_id="acme", scope_path=path)
+```
+
+Needs a `maximem-synap` release whose `fetch` accepts `scope_path`.
+
 ## Tests
 
 ```bash

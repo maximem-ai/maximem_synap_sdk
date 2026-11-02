@@ -14,7 +14,7 @@ must never prevent a live call from starting.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Mapping, Optional
 
 from maximem_synap import MaximemSynapSDK
 
@@ -39,6 +39,7 @@ async def preload_synap_context(
     max_results: int = 20,
     include_conversation_context: bool = False,
     search_query: Optional[str] = None,
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> Optional[ChatMessage]:
     """Prepend Synap long-term memory to ``chat_ctx`` as a system message.
 
@@ -58,6 +59,8 @@ async def preload_synap_context(
             conversation block alongside semantic memory.
         search_query: Optional pre-call query text. When absent, Synap
             returns the user's ambient context (no query bias).
+        scope_path: Optional level path for an account with a deeper scope
+            ladder, ``{level_key: value}``. Sent to ``sdk.fetch`` only when set.
 
     Returns:
         The inserted :class:`ChatMessage`, or ``None`` if nothing was
@@ -76,6 +79,7 @@ async def preload_synap_context(
             max_results=max_results,
             mode=mode,
             include_conversation_context=include_conversation_context,
+            **({"scope_path": dict(scope_path)} if scope_path else {}),
         )
     except Exception as exc:  # noqa: BLE001 — read-side graceful degrade
         logger.error(
