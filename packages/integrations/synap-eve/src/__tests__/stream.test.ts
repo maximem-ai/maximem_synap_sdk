@@ -40,7 +40,9 @@ function streamingSdk(opts: { listening?: boolean; throws?: boolean } = {}) {
   };
   // The REST write a turn falls back to when no stream is open.
   const conversation = { record_message: record("record_message") };
-  return { sdk: { instance, conversation } as SynapTurnSdkLike, calls, instance, conversation };
+  // `get_scope_ladder` is the marker of an SDK that carries `scope_path` (>= 0.7.1).
+  const sdk = { instance, conversation, get_scope_ladder: vi.fn() } as SynapTurnSdkLike;
+  return { sdk, calls, instance, conversation };
 }
 
 function sentTo(calls: StreamCall[], method: string): Record<string, unknown> | undefined {
@@ -634,5 +636,60 @@ describe("never breaks the run", () => {
       handler(hooks, "message.received")(userMessage("hi"), {}),
     ).resolves.toBeUndefined();
     expect(calls).toEqual([]);
+  });
+});
+
+// ── scopePath: the conversation's level on a deeper scope ladder ─────────────
+
+describe("scopePath", () => {
+  const PATH = { customer: "acme", team: "eng", user: "alice" };
+
+  it("reaches the user and the assistant turn on the stream, and no other event", async () => {
+    const { sdk, calls } = streamingSdk();
+    const hooks = createSynapStreamHooks({ sdk, scopePath: PATH });
+    const c = ctx();
+    await handler(hooks, "message.received")(userMessage("hi"), c);
+    await handler(hooks, "reasoning.completed")(reasoning("thinking"), c);
+    await handler(hooks, "actions.requested")(actionsRequested([TOOL_CALL]), c);
+    await handler(hooks, "action.result")(actionResult(TOOL_RESULT), c);
+    await handler(hooks, "message.completed")(assistantMessage("done"), c);
+    await handler(hooks, "session.completed")({ type: "session.completed" }, c);
+    expect(methodsIn(calls)).toEqual([
+      "send_message", "record_thinking", "record_tool_call", "record_tool_result",
+      "send_message", "end_session",
+    ]);
+    expect(calls[0]!.options).toMatchObject({ event_type: "user_message", scope_path: PATH });
+    expect(calls[4]!.options).toMatchObject({ event_type: "assistant_message", scope_path: PATH });
+    for (const i of [1, 2, 3]) {
+      expect(Object.keys(calls[i]!.options as object)).not.toContain("scope_path");
+    }
+    expect(calls[5]!.options).toBe(SESSION);
+  });
+
+  it("reaches conversation.record_message when there is no stream", async () => {
+    const { sdk, calls } = streamingSdk({ listening: false });
+    const hooks = createSynapStreamHooks({ sdk, scopePath: PATH });
+    await handler(hooks, "message.received")(userMessage("hi"), ctx());
+    await handler(hooks, "message.completed")(assistantMessage("yes"), ctx());
+    expect(calls.map((c) => c.options)).toEqual([
+      { conversation_id: SESSION, role: "user", content: "hi", user_id: "alice", scope_path: PATH },
+      { conversation_id: SESSION, role: "assistant", content: "yes", user_id: "alice", scope_path: PATH },
+    ]);
+  });
+
+  it("unset or empty: the stream event and the REST write carry no scope_path", async () => {
+    for (const scopePath of [undefined, {}]) {
+      const live = streamingSdk();
+      const liveHooks = createSynapStreamHooks({ sdk: live.sdk, scopePath });
+      await handler(liveHooks, "message.received")(userMessage("hi"), ctx());
+      expect(Object.keys(live.calls[0]!.options as object)).not.toContain("scope_path");
+
+      const rest = streamingSdk({ listening: false });
+      const restHooks = createSynapStreamHooks({ sdk: rest.sdk, scopePath });
+      await handler(restHooks, "message.received")(userMessage("hi"), ctx());
+      expect(rest.calls[0]!.options).toEqual({
+        conversation_id: SESSION, role: "user", content: "hi", user_id: "alice",
+      });
+    }
   });
 });

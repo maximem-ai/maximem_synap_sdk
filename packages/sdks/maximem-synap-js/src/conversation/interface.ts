@@ -4,6 +4,7 @@
  */
 
 import { InvalidInputError } from '../errors.js';
+import { normalizeConversationId } from '../util/conversation-id.js';
 import { validateConversationId } from '../util/validators.js';
 import type { HttpTransport } from '../transport/http.js';
 import { fetchContext, type FetchHooks } from '../context/fetch.js';
@@ -319,6 +320,7 @@ export class CompactionSubscribers {
   readonly #byConversation = new Map<string, CompactionCallback[]>();
 
   add(conversationId: string, callback: CompactionCallback): () => void {
+    conversationId = normalizeConversationId(conversationId);
     const list = this.#byConversation.get(conversationId);
     if (list === undefined) this.#byConversation.set(conversationId, [callback]);
     else list.push(callback);
@@ -337,6 +339,7 @@ export class CompactionSubscribers {
   }
 
   removeAll(conversationId?: string): number {
+    if (conversationId !== undefined) conversationId = normalizeConversationId(conversationId);
     if (conversationId === undefined) {
       let count = 0;
       for (const list of this.#byConversation.values()) count += list.length;
@@ -351,6 +354,7 @@ export class CompactionSubscribers {
 
   /** Fires subscribers in registration order. A throwing listener must not break the stream reader. */
   dispatch(conversationId: string, bundle: Json, onError: (e: unknown) => void): void {
+    conversationId = normalizeConversationId(conversationId);
     // Copy first: a callback that unsubscribes itself would otherwise mutate
     // the array mid-iteration and skip the next listener.
     for (const callback of [...(this.#byConversation.get(conversationId) ?? [])]) {

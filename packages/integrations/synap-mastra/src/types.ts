@@ -17,6 +17,8 @@ export interface SynapRecordMessageArgs {
   content: string;
   user_id: string;
   customer_id?: string;
+  /** The level of a deeper scope ladder this conversation belongs to. Sent only when set. */
+  scope_path?: Record<string, string>;
 }
 
 export interface SynapMemoryCreateArgs {
@@ -24,6 +26,11 @@ export interface SynapMemoryCreateArgs {
   user_id: string;
   customer_id?: string | null;
   metadata?: Record<string, unknown>;
+  /**
+   * The level of a deeper scope ladder to write at. NOTE the name: `scope` on
+   * `memories.create`, `scope_path` everywhere else. Sent only when set.
+   */
+  scope?: Record<string, string>;
 }
 
 export interface SynapMemoryCreateResult {
@@ -38,6 +45,8 @@ export interface SynapFetchArgs {
   max_results?: number;
   mode?: string;
   include_conversation_context?: boolean;
+  /** The level of a deeper scope ladder to read at. Sent only when set. */
+  scope_path?: Record<string, string>;
 }
 
 export interface SynapRecentMessage {
@@ -64,6 +73,12 @@ export interface SynapPromptContext {
 
 export interface SynapSdkLike {
   fetch(args: SynapFetchArgs): Promise<SynapFetchResponseLike>;
+  /**
+   * Present on `@maximem/synap-js-sdk` >= 0.7.1, the first release that sends
+   * `scope_path`. Not called here: its presence is how a `scopePath` on an older
+   * SDK, which would silently ignore it, is refused at construction.
+   */
+  get_scope_ladder?: (...args: never[]) => unknown;
   conversation: {
     record_message(args: SynapRecordMessageArgs): Promise<unknown>;
     context: {
@@ -89,4 +104,24 @@ export interface SynapIdentityOptions {
   customerId?: string;
   /** Synap fetch mode ("accurate" default, or "fast"). */
   mode?: string;
+  /**
+   * The level of your account's scope ladder to read and write at, for an
+   * account whose ladder has a level between customer and user, for example
+   * `{ customer: "acme", team: "eng", user: "u1" }`. Fixed at construction.
+   * Reads send it as `scope_path`, memory writes as `scope`, conversation
+   * turns as `scope_path`. For the tools it is never a parameter the model
+   * sees, and a `scope_path` in the model's arguments is ignored. Unset on a
+   * default ladder, where every call is exactly what it was.
+   */
+  scopePath?: Record<string, string>;
+}
+
+/** `{ [key]: path }` when a path was given and has entries, else `{}`, so an unchanged call stays unchanged. */
+export function withScopePath<K extends string>(
+  key: K,
+  path: Record<string, string> | undefined | null,
+): { [P in K]?: Record<string, string> } {
+  return path && Object.keys(path).length > 0
+    ? ({ [key]: { ...path } } as { [P in K]?: Record<string, string> })
+    : {};
 }

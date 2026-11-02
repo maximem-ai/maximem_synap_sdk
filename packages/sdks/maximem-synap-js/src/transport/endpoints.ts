@@ -49,6 +49,8 @@ export const ENDPOINTS = {
   credits_estimate: { method: "POST", path: "/v1/credits/estimate", idempotent: true },
   credits_redeem: { method: "POST", path: "/v1/credits/redeem", idempotent: false },
   telemetry_batch: { method: "POST", path: "/v1/telemetry/batch", idempotent: false },
+  maca_generate: { method: "POST", path: "/v1/maca/generate", idempotent: false },
+  maca_job: { method: "GET", path: "/v1/maca/jobs/{job_id}", idempotent: true },
 } as const satisfies Record<string, EndpointSpec>;
 
 export type EndpointName = keyof typeof ENDPOINTS;

@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any, Sequence
 from ..models.enums import ContextScope
 from .backend import CacheBackend, NullCacheBackend
 from .sqlite_backend import SQLiteCacheBackend
+from ..utils.validators import normalize_conversation_id
 
 
 logger = logging.getLogger("synap.sdk.cache")
@@ -247,6 +248,8 @@ class CacheManager:
             Cached bytes or None if not found
         """
         # For conversation scope, use user_id as the file key
+        if scope == CacheScope.CONVERSATION:
+            entity_id = normalize_conversation_id(entity_id)
         file_entity_id = entity_id
         if scope == CacheScope.CONVERSATION:
             # Caller must provide user_id in entity_id for conversation scope
@@ -284,6 +287,8 @@ class CacheManager:
             ttl_seconds: TTL in seconds (uses default if not provided)
             query: Optional query parameters
         """
+        if scope == CacheScope.CONVERSATION:
+            entity_id = normalize_conversation_id(entity_id)
         backend = self._get_backend(scope, entity_id)
         query_hash = self._hash_query(query)
         key = self._build_key(scope, entity_id, context_type, query_hash, scope_path)
@@ -312,6 +317,8 @@ class CacheManager:
         stale context. Found by audit 2026-08-23, and the comment below already
         described this exact failure for a different missing segment.
         """
+        if scope == CacheScope.CONVERSATION:
+            entity_id = normalize_conversation_id(entity_id)
         backend = self._get_backend(scope, entity_id)
 
         if context_type:

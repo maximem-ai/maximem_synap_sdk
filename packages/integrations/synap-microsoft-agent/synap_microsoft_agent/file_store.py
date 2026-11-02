@@ -89,8 +89,10 @@ import fnmatch
 import logging
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from synap_integrations_common import ensure_ids_match_path
+from synap_microsoft_agent._scope_path import checked_scope_path
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import wrap_sdk_errors_async
 
@@ -278,6 +280,7 @@ class SynapAgentFileStore(AgentFileStore):
         document_type: str = "document",
         ingest_mode: str = "fast",
         cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> None:
         if sdk is None:
             raise ValueError("SynapAgentFileStore requires a non-None sdk")
@@ -292,6 +295,11 @@ class SynapAgentFileStore(AgentFileStore):
         self.sdk = sdk
         self.user_id = user_id
         self.customer_id = customer_id
+        # A deeper scope ladder's level; sent with every Synap call, only when set.
+        self.scope_path: Optional[Dict[str, str]] = checked_scope_path(scope_path, "SynapAgentFileStore")
+        ensure_ids_match_path(
+            self.scope_path, user_id=user_id or None, customer_id=customer_id or None,
+            where="SynapAgentFileStore")
         self.recall_filename = recall_filename.strip()
         self.max_results = max_results
         self.mode = mode
@@ -324,6 +332,7 @@ class SynapAgentFileStore(AgentFileStore):
                 mode=mode,
                 precision_level=self.precision_level,
                 include_conversation_context=False,
+                **({"scope_path": dict(self.scope_path)} if self.scope_path else {}),
             )
         except Exception as exc:  # noqa: BLE001 — read path must not raise
             logger.error(
@@ -372,6 +381,7 @@ class SynapAgentFileStore(AgentFileStore):
                 customer_id=self.customer_id,
                 document_type=self.document_type,
                 mode=self.ingest_mode,
+                **({"scope": dict(self.scope_path)} if self.scope_path else {}),
             )
         ingestion_id = getattr(response, "ingestion_id", None)
         if ingestion_id is not None:

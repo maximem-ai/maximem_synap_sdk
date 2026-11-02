@@ -8,12 +8,14 @@ Documented contract (from hooks.py):
 - A tool call and its result share Agno's own `tool_call_id`.
 """
 
+from synap_integrations_common.conversation_id import coerce_conversation_id
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from synap_agno import create_synap_async_hooks, create_synap_hooks
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +113,7 @@ class TestTurnsStreamFirstRestFallback:
             ("assistant", "it ships tomorrow"),
         ]
         for c in calls:
-            assert c.kwargs["conversation_id"] == "sess-1"
+            assert c.kwargs["conversation_id"] == coerce_conversation_id("sess-1")
             assert c.kwargs["user_id"] == "alice"
             assert c.kwargs["customer_id"] == "acme"
 

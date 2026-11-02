@@ -53,6 +53,8 @@ export function makeSdk(opts: MakeSdkOptions = {}): SynapSdkLike {
   const ingestionId = opts.ingestionId ?? "ing-test-001";
   return {
     fetch: vi.fn().mockResolvedValue(fetchResponse),
+    // The marker of an SDK that carries `scope_path` (>= 0.7.1); see scope-guard.ts.
+    get_scope_ladder: vi.fn(),
     conversation: {
       context: { get_context_for_prompt: vi.fn().mockResolvedValue(ctx) },
     },

@@ -11,6 +11,7 @@ import type { GrpcStreamClient } from './grpc/stream-client.js';
 import type { StreamManager } from './stream.js';
 import { SDK_VERSION } from './version.js';
 import { newCorrelationId } from './util/correlation.js';
+import { ensureIdsMatchPath } from './scope-guard.js';
 
 export interface SynapMiddlewareOptions extends SynapModelOptions {
   credentials: Credentials;
@@ -38,6 +39,15 @@ export interface SynapMiddlewareOptions extends SynapModelOptions {
  * Turns go on the gRPC stream when it is open, else over REST; never both.
  */
 export function createSynapMiddleware(opts: SynapMiddlewareOptions): LanguageModelV1Middleware {
+  // The path and the ids are fixed together, and the server lets the path's
+  // `user` / `customer` win over the flat ids this middleware also sends. A
+  // disagreement would read and write another identity's memory, so refuse it
+  // before any request is made.
+  ensureIdsMatchPath(opts.scopePath, {
+    userId: opts.userId,
+    customerId: opts.customerId,
+    where: 'createSynapMiddleware',
+  });
   // The prompt as the caller sent it, keyed by the params object transformParams
   // returns (which the AI SDK hands to wrapGenerate/wrapStream unchanged), so
   // concurrent calls cannot swap each other's turns.
@@ -285,6 +295,7 @@ async function resolveContext(
     customerId: opts.customerId,
     conversationId: opts.conversationId,
     searchQuery,
+    scopePath: opts.scopePath,
   });
   if (cached) return cached;
 

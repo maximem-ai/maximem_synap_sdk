@@ -41,7 +41,10 @@ transcript through `memories.create`: Synap extracts from the conversation it ke
 transcript on top of the turns `SynapStreamHook` already wrote would be extracted twice. Turns the
 hook wrote are skipped one for one, so the two compose; without the hook, this is what gets the
 conversation to Synap. Pass the hook's `conversation_id` as the store's so both write to one
-conversation.
+conversation. **If you use both and leave the store's `conversation_id` out, every turn is written
+twice**: the store defaults to a fresh `strands-<uuid>` conversation, and a turn is only recognised
+as already written when it went to the same conversation. The store logs a warning, once per
+process, when it sees a hook and no `conversation_id`.
 
 ## Short-term context — `SynapShortTermHook`
 
@@ -105,6 +108,20 @@ agent = Agent(hooks=[hook, SynapShortTermHook(sdk, conversation_id="conv_abc")])
 > agent on one asyncio loop (a caller that wraps each turn in its own `asyncio.run()` stays on REST).
 > Beyond the turns, the hook feeds real-time *signal*; it does not store long-term memories
 > (that's `SynapMemoryStore` / the tools).
+
+## Deeper scope ladders
+
+If your account's scope ladder has levels beyond customer and user, pass the level as `scope_path` (`{level_key: value}`; key order does not matter) to `SynapMemoryStore`, `create_synap_tools` and `SynapStreamHook`. It is forwarded only when set, so nothing changes for callers who do not pass it. In the tools it is closed over: the model never sees it and cannot change it.
+
+```python
+path = {"customer": "acme", "team": "payments", "user": "dana"}
+store = SynapMemoryStore(sdk, user_id="dana", customer_id="acme", scope_path=path)
+hook = SynapStreamHook(sdk, "conv_abc", "dana", customer_id="acme", scope_path=path)
+```
+
+The server lets a path's `user` and `customer` levels win over flat ids, so `user_id` / `customer_id` that disagree with the path raise `SynapIntegrationError` at construction, before anything is sent.
+
+`SynapShortTermHook` and the history helper read through the conversation and take no path.
 
 ## Error policy
 

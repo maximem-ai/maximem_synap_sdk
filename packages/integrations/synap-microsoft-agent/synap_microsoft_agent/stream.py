@@ -43,6 +43,7 @@ import uuid
 from typing import Any, Mapping, Optional
 
 from agent_framework import FunctionMiddleware
+from synap_integrations_common import ensure_ids_match_path
 from synap_integrations_common.stream_events import (
     report_reasoning,
     report_tool_call,
@@ -78,13 +79,22 @@ async def report_message_turn(
     conversation_id: str,
     user_id: str,
     customer_id: str = "",
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> bool:
     """Put one turn on the stream. Returns whether it went out.
+
+    ``scope_path`` (the conversation's level on a deeper scope ladder) is
+    forwarded only when set. Tool and reasoning events carry none: the server
+    files a conversation from the two turn events alone.
 
     ``False`` means the caller still owns the write and should fall back to
     ``record_message``: no stream is open, the role has no stream event, or
     the send failed.
     """
+    # Ids and path both come from the caller; the server lets the path win, so a
+    # mismatch would file this user's turn under the path's user. Checked first.
+    ensure_ids_match_path(scope_path, user_id=user_id, customer_id=customer_id,
+                          where="microsoft_agent.report_message_turn")
     if role not in STREAMABLE_ROLES or not content or not conversation_id:
         return False
     return await report_turn(
@@ -94,6 +104,7 @@ async def report_message_turn(
         conversation_id=conversation_id,
         user_id=user_id,
         customer_id=customer_id,
+        **({"scope_path": dict(scope_path)} if scope_path else {}),
     )
 
 

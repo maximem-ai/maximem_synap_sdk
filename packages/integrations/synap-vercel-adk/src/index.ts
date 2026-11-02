@@ -6,6 +6,7 @@ export { createSynapMiddleware } from './middleware.js';
 export { AnticipationCache } from './context/anticipation-cache.js';
 export { fetchContext } from './context/http-fetcher.js';
 export { recordTurn } from './memory/turns.js';
+export { SynapScopeError } from './scope-guard.js';
 export {
   fetchCompactedHistory,
   spliceHistory,

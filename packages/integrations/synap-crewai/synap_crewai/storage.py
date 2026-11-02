@@ -48,15 +48,18 @@ We therefore:
 import logging
 import threading
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from crewai.memory.types import MemoryRecord, ScopeInfo
 
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
+    coerce_conversation_id,
     SynapIntegrationError,
     default_scope,
+    ensure_ids_match_path,
     run_async,
+    scope_string,
     wrap_sdk_errors_async,
 )
 
@@ -98,6 +101,15 @@ class SynapStorageBackend:
     Delegates memory persistence to Synap's ingestion system
     and retrieval to Synap's search system.
 
+    ``scope_path`` is for accounts whose scope ladder is deeper than customer
+    and user: the address of the level this backend reads and writes at, as
+    ``{level_key: value}``. It is sent with ``sdk.fetch(scope_path=...)`` and
+    ``sdk.memories.create(scope=...)`` only when set. The annotation CrewAI
+    sees on a recalled record (``MemoryRecord.scope``) is then built from the
+    path's VALUES in the order given (``/acme/payments/dana``); without a path
+    it is ``/customer/user`` as before. The order matters only for that
+    annotation: the server orders levels by their ladder position.
+
     Example::
 
         from crewai.memory import Memory
@@ -117,18 +129,28 @@ class SynapStorageBackend:
         customer_id: str = "",
         conversation_id: Optional[str] = None,
         mode: str = "fast",
+        *,
+        scope_path: Optional[Mapping[str, str]] = None,
     ):
         if sdk is None:
             raise ValueError("SynapStorageBackend requires a non-None sdk")
         if not user_id:
             raise ValueError("SynapStorageBackend requires a non-empty user_id")
+        ensure_ids_match_path(
+            scope_path, user_id=user_id, customer_id=customer_id or None,
+            where="SynapStorageBackend")
 
         self.sdk = sdk
         self.user_id = user_id
         self.customer_id = customer_id
         self.conversation_id = conversation_id
         self.mode = mode
-        self._default_scope = default_scope(user_id, customer_id or None)
+        self.scope_path: Optional[Dict[str, str]] = dict(scope_path) if scope_path else None
+        self._default_scope = (
+            scope_string(list(self.scope_path.values()))
+            if self.scope_path
+            else default_scope(user_id, customer_id or None)
+        )
         self._records: Dict[str, MemoryRecord] = {}
         self._session_warning_logged = False
         # CrewAI 1.10's encoding flow does ``with storage.write_lock:``; later releases
@@ -156,6 +178,7 @@ class SynapStorageBackend:
         run_async(self.asave(records))
 
     async def asave(self, records: List[MemoryRecord]) -> None:
+        extra: Dict[str, Any] = {"scope": self.scope_path} if self.scope_path else {}
         for record in records:
             async with wrap_sdk_errors_async(
                 "crewai.asave",
@@ -173,6 +196,7 @@ class SynapStorageBackend:
                         "importance": record.importance,
                         "source": record.source or "",
                     },
+                    **extra,
                 )
             self._records[record.id] = record
 
@@ -238,6 +262,7 @@ class SynapStorageBackend:
             types = [type_map.get(c, c) for c in categories if c in type_map]
             types = types or None
 
+        extra: Dict[str, Any] = {"scope_path": self.scope_path} if self.scope_path else {}
         async with wrap_sdk_errors_async(
             "crewai.asearch",
             logger,
@@ -245,7 +270,7 @@ class SynapStorageBackend:
             mode=self.mode,
         ):
             response = await self.sdk.fetch(
-                conversation_id=self.conversation_id,
+                conversation_id=coerce_conversation_id(self.conversation_id),
                 user_id=self.user_id,
                 customer_id=self.customer_id or None,
                 search_query=[query_text],
@@ -253,6 +278,7 @@ class SynapStorageBackend:
                 types=types,
                 mode=self.mode,
                 include_conversation_context=False,
+                **extra,
             )
 
         results: List[Tuple[MemoryRecord, float]] = []

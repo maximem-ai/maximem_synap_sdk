@@ -27,10 +27,13 @@ function swallows everything and logs.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import time
 from typing import Any, Dict, Mapping, Optional
+
+from synap_integrations_common.conversation_id import coerce_conversation_id
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,10 @@ _OPEN_TIMEOUT_S = 10.0
 # stream lived on after each one. Reopening per turn costs a connection each
 # time, so after this many the SDK stays on REST.
 _MAX_REOPENS = 3
+
+# Methods already reported as unable to carry `scope_path` (one error per
+# process each, not one per turn).
+_scope_path_unsupported_logged: set = set()
 
 # State for an SDK that refuses new attributes, keyed by id().
 _fallback_state: Dict[int, Dict[str, Any]] = {}
@@ -215,6 +222,41 @@ async def ensure_stream(sdk: Any) -> bool:
         return False
 
 
+def _accepts_scope_path(method: Any) -> bool:
+    """Whether ``method`` can take a ``scope_path`` keyword, by its signature.
+
+    A signature with a ``scope_path`` parameter or ``**kwargs`` accepts it. If
+    the signature cannot be read the answer is yes: the call is then tried, and
+    a method that does not take it raises ``TypeError``, which the caller
+    treats as "not sent" (a turn is never filed without its path).
+    """
+    try:
+        params = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return True
+    return "scope_path" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _can_carry_scope_path(method: Any, name: str) -> bool:
+    """True when a turn with a ``scope_path`` may be sent through ``method``.
+
+    When the installed SDK's method has no ``scope_path`` parameter the turn
+    must NOT go without it: it would be filed at the wrong, wider scope. Logs
+    one clear error per process per method and answers False.
+    """
+    if _accepts_scope_path(method):
+        return True
+    if name not in _scope_path_unsupported_logged:
+        _scope_path_unsupported_logged.add(name)
+        logger.error(
+            "synap: a turn carries a scope_path but the installed maximem-synap's "
+            "%s() does not accept `scope_path`. The turn is NOT sent, because "
+            "without its path it would be filed at the wrong, wider scope. "
+            "Upgrade maximem-synap.", name)
+    return False
+
+
 async def report_turn(
     sdk: Any,
     *,
@@ -224,14 +266,31 @@ async def report_turn(
     user_id: str = "",
     customer_id: str = "",
     metadata: Optional[Mapping[str, str]] = None,
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> bool:
     """Report a user or assistant turn. Returns whether it was sent.
 
     `assistant_message` is the event the anticipation agent acts on: it is the
     moment a turn ends and the next one can be predicted. An integration that
     reports everything else and not this one gets no anticipation at all.
+
+    ``scope_path`` names the conversation's level on an account with a deeper
+    scope ladder (``ScopeAddress.scope_path``). It is forwarded to
+    ``send_message(scope_path=...)`` only when set; a call without it passes
+    exactly the keyword arguments it always did. If it is set and the installed
+    SDK's ``send_message`` has no such parameter, nothing is sent (see
+    ``_can_carry_scope_path``) and this returns False.
     """
     event_type = "user_message" if role == "user" else "assistant_message"
+    extra: Dict[str, Any] = {}
+    if scope_path:
+        try:
+            if not _can_carry_scope_path(sdk.instance.send_message, "send_message"):
+                return False
+            extra["scope_path"] = dict(scope_path)
+        except Exception:  # noqa: BLE001 — a hook must never break the agent run
+            logger.debug("synap report_turn scope_path check failed", exc_info=True)
+            return False
     return await _send(
         sdk, "send_message",
         content=content,
@@ -241,7 +300,73 @@ async def report_turn(
         user_id=user_id,
         customer_id=customer_id,
         metadata=dict(metadata or {}),
+        **extra,
     )
+
+
+async def record_turn_via(
+    sdk: Any,
+    *,
+    role: str,
+    content: str,
+    conversation_id: str = "",
+    user_id: str = "",
+    customer_id: str = "",
+    metadata: Optional[Mapping[str, str]] = None,
+    scope_path: Optional[Mapping[str, str]] = None,
+) -> str:
+    """Like :func:`record_turn`, but says how the turn travelled: ``"stream"``,
+    ``"rest"`` or ``"failed"`` (also for an empty turn or a missing conversation).
+
+    Write a user or assistant turn: on the stream (opened if need be), over
+    REST when the stream cannot carry it.
+
+    A turn is the conversation itself, not telemetry about it: without it the
+    server has nothing to compact and the SDK nothing to search. Stream first,
+    REST second, never both: the server persists a streamed turn from its
+    event. Never raises.
+
+    ``scope_path`` (the conversation's level on a deeper ladder) is forwarded
+    to ``send_message`` and to ``record_message`` only when set, so a call
+    without it is unchanged. A transport whose SDK method has no
+    ``scope_path`` parameter is not used for a turn that has one (it would be
+    filed at the wrong, wider scope): one error is logged per process and, if
+    no transport can carry it, nothing is sent and this returns "failed".
+
+    Not carried on the other events (``report_tool_call``,
+    ``report_tool_result``, ``report_reasoning``, ``end_session``): the SDK's
+    ``record_tool_call`` / ``record_tool_result`` / ``record_thinking`` take
+    no ``scope_path`` (sdk.py), and the server reads the stream event's
+    ``scope`` only when it persists a ``user_message`` / ``assistant_message``
+    (the conversation row is written from those two event types alone), so a
+    path on them would be ignored.
+    """
+    if not content or not content.strip():
+        return "failed"
+    if await report_turn(sdk, role=role, content=content, conversation_id=conversation_id,
+                         user_id=user_id, customer_id=customer_id, metadata=metadata,
+                         scope_path=scope_path):
+        return "stream"
+    if not conversation_id:
+        return "failed"  # the REST write needs one; the stream would have minted it
+    # REST wants a UUID; the stream took the caller's own id and the server
+    # filed it under the UUID it derives, which this is.
+    kwargs = {"conversation_id": coerce_conversation_id(conversation_id), "role": "user" if role == "user" else "assistant",
+              "content": content, "user_id": user_id}
+    if customer_id:
+        kwargs["customer_id"] = customer_id
+    if metadata:
+        kwargs["metadata"] = dict(metadata)
+    try:
+        if scope_path:
+            if not _can_carry_scope_path(sdk.conversation.record_message, "record_message"):
+                return "failed"
+            kwargs["scope_path"] = dict(scope_path)
+        await sdk.conversation.record_message(**kwargs)
+        return "rest"
+    except Exception:  # noqa: BLE001 — a hook must never break the agent run
+        logger.warning("synap turn write failed (conversation_id=%s)", conversation_id, exc_info=True)
+        return "failed"
 
 
 async def record_turn(
@@ -253,34 +378,18 @@ async def record_turn(
     user_id: str = "",
     customer_id: str = "",
     metadata: Optional[Mapping[str, str]] = None,
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> bool:
     """Write a user or assistant turn: on the stream (opened if need be), over
     REST when the stream cannot carry it. Returns whether it was written.
 
-    A turn is the conversation itself, not telemetry about it: without it the
-    server has nothing to compact and the SDK nothing to search. Stream first,
-    REST second, never both: the server persists a streamed turn from its
-    event. Never raises.
+    See :func:`record_turn_via` for the rules (it is this function, returning
+    how the turn travelled).
     """
-    if not content or not content.strip():
-        return False
-    if await report_turn(sdk, role=role, content=content, conversation_id=conversation_id,
-                         user_id=user_id, customer_id=customer_id, metadata=metadata):
-        return True
-    if not conversation_id:
-        return False  # the REST write needs one; the stream would have minted it
-    kwargs = {"conversation_id": conversation_id, "role": "user" if role == "user" else "assistant",
-              "content": content, "user_id": user_id}
-    if customer_id:
-        kwargs["customer_id"] = customer_id
-    if metadata:
-        kwargs["metadata"] = dict(metadata)
-    try:
-        await sdk.conversation.record_message(**kwargs)
-        return True
-    except Exception:  # noqa: BLE001 — a hook must never break the agent run
-        logger.warning("synap turn write failed (conversation_id=%s)", conversation_id, exc_info=True)
-        return False
+    return await record_turn_via(
+        sdk, role=role, content=content, conversation_id=conversation_id,
+        user_id=user_id, customer_id=customer_id, metadata=metadata,
+        scope_path=scope_path) != "failed"
 
 
 async def report_tool_call(

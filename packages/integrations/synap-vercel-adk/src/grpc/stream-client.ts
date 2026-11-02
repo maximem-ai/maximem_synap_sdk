@@ -156,6 +156,8 @@ export class GrpcStreamClient {
           tool_args_json: event.tool_args_json ?? '',
           tool_result_json: event.tool_result_json ?? '',
           tool_call_id: event.tool_call_id ?? '',
+          // Field 14, only when set, so an event without a path is the message it always was.
+          ...(event.scope && Object.keys(event.scope).length > 0 ? { scope: event.scope } : {}),
         },
       };
       (this.call as { write: (msg: unknown) => void }).write(msg);
@@ -358,6 +360,7 @@ export class GrpcStreamClient {
       sourceBundleIds: bundle.bundle_id ? [bundle.bundle_id] : [],
       totalTokens: bundle.total_tokens ?? 0,
       bundleConfidence: bundle.bundle_confidence ?? 0,
+      scopeRung: bundle.anticipation_scope_rung ?? '',
       originPatternId: bundle.origin_pattern_id ?? '',
       storedAt: Date.now(),
       ttl,

@@ -12,6 +12,7 @@ Contract:
 
 from __future__ import annotations
 
+from synap_integrations_common.conversation_id import coerce_conversation_id
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -21,6 +22,7 @@ from strands.hooks import BeforeInvocationEvent, BeforeToolCallEvent, MessageAdd
 from synap_integrations_common import set_auto_listen
 
 from synap_strands_agents.stream import SynapStreamHook
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 def _streaming(mock_sdk, *, listening=True, send=None):
@@ -114,7 +116,7 @@ async def test_no_stream_writes_each_turn_over_rest_once(mock_sdk):
     assert [(c.kwargs["role"], c.kwargs["content"]) for c in calls] == [
         ("user", "hello"), ("assistant", "hi alice")]
     for c in calls:
-        assert c.kwargs["conversation_id"] == "conv_1"
+        assert c.kwargs["conversation_id"] == coerce_conversation_id("conv_1")
         assert c.kwargs["user_id"] == "alice"
         assert c.kwargs["customer_id"] == "acme"
 

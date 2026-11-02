@@ -6,10 +6,10 @@ Python 3.12+ typing features in newer versions.
 """
 
 import logging
-from typing import Optional
+from typing import Mapping, Optional
 
 from maximem_synap import MaximemSynapSDK
-from synap_integrations_common import wrap_sdk_errors_async
+from synap_integrations_common import ensure_ids_match_path, wrap_sdk_errors_async
 
 logger = logging.getLogger(__name__)
 
@@ -19,12 +19,18 @@ def create_search_tool(
     user_id: str,
     customer_id: str = "",
     conversation_id: Optional[str] = None,
+    *,
+    scope_path: Optional[Mapping[str, str]] = None,
 ):
     """Create a memory search function for OpenAI Agents.
 
     Returns an async callable that can be wrapped with FunctionTool
     or ``@function_tool``. SDK failures are wrapped in
     :class:`SynapIntegrationError`.
+
+    ``scope_path`` (the level on a deeper scope ladder) is fixed here, when
+    the tool is built, and sent to ``sdk.fetch`` only when set. It is not a
+    parameter of the tool, so the model can neither see nor change it.
 
     Example::
 
@@ -41,6 +47,11 @@ def create_search_tool(
         raise ValueError("create_search_tool requires a non-None sdk")
     if not user_id:
         raise ValueError("create_search_tool requires a non-empty user_id")
+    # The server lets the path's user/customer win over the flat ids.
+    ensure_ids_match_path(scope_path, user_id=user_id, customer_id=customer_id or None,
+                          where="create_search_tool")
+    # Closed over: never a tool parameter, never read from the model's call.
+    path = dict(scope_path) if scope_path else None
 
     async def search_memory(query: str) -> str:
         """Search the user's memory for relevant context.
@@ -61,6 +72,7 @@ def create_search_tool(
                 search_query=[query],
                 mode="accurate",
                 include_conversation_context=False,
+                **({"scope_path": dict(path)} if path else {}),
             )
         return response.formatted_context or "No relevant memories found."
 
@@ -71,16 +83,25 @@ def create_store_tool(
     sdk: MaximemSynapSDK,
     user_id: str,
     customer_id: str = "",
+    *,
+    scope_path: Optional[Mapping[str, str]] = None,
 ):
     """Create a memory store function for OpenAI Agents.
 
     Returns an async callable that can be wrapped with FunctionTool.
     SDK failures are wrapped in :class:`SynapIntegrationError`.
+
+    ``scope_path`` (the level on a deeper scope ladder) is fixed here and sent
+    to ``sdk.memories.create`` as ``scope=`` only when set. It is not a
+    parameter of the tool, so the model cannot choose the level it writes to.
     """
     if sdk is None:
         raise ValueError("create_store_tool requires a non-None sdk")
     if not user_id:
         raise ValueError("create_store_tool requires a non-empty user_id")
+    ensure_ids_match_path(scope_path, user_id=user_id, customer_id=customer_id or None,
+                          where="create_store_tool")
+    path = dict(scope_path) if scope_path else None
 
     async def store_memory(content: str) -> str:
         """Store important information about the user for future reference.
@@ -98,6 +119,7 @@ def create_store_tool(
                 document=content,
                 user_id=user_id,
                 customer_id=customer_id,
+                **({"scope": dict(path)} if path else {}),
             )
         return f"Memory stored (ingestion_id: {result.ingestion_id})"
 

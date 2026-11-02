@@ -7,6 +7,7 @@ from deepagents.backends.protocol import FILE_NOT_FOUND
 from synap_integrations_common import SynapIntegrationError
 
 from synap_deepagents.backend import DEFAULT_RECALL_QUERY, SynapBackend, _normalize, _WriteCache
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 RECALL = "/AGENTS.md"
 
@@ -515,7 +516,7 @@ async def test_scope_ids_are_passed_to_fetch(mock_sdk):
     kwargs = mock_sdk.fetch.await_args.kwargs
     assert kwargs["user_id"] == "alice"
     assert kwargs["customer_id"] == "acme"
-    assert kwargs["conversation_id"] == "conv-1"
+    assert kwargs["conversation_id"] == coerce_conversation_id("conv-1")
 
 
 async def test_scope_ids_are_passed_to_create(mock_sdk):

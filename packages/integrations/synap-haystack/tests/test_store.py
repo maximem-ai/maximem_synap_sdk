@@ -19,6 +19,7 @@ from haystack.dataclasses import ChatMessage
 
 from synap_haystack import SynapMemoryStore
 from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 from synap_integrations_common.testing import (
     make_fact,
@@ -119,7 +120,7 @@ class TestAddMemories:
             conversation_id="other-conv",
         )
         kw = mock_sdk.conversation.record_message.call_args.kwargs
-        assert kw["conversation_id"] == "other-conv"
+        assert kw["conversation_id"] == coerce_conversation_id("other-conv")
 
     def test_per_call_user_id_override(self, store, mock_sdk):
         store.add_memories(

@@ -66,7 +66,7 @@ import asyncio
 import dataclasses
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from crewai.events import (
     AgentReasoningCompletedEvent,
@@ -82,6 +82,7 @@ from crewai.events import (
 
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
+    ensure_ids_match_path,
     fetch_compacted_history,
     is_synap_history,
     record_turn,
@@ -129,6 +130,9 @@ class SynapCrewAIListener(BaseEventListener):
             Without it the server cannot say which conversation an event is
             part of, and no session is opened.
         customer_id: B2B only. Not accepted on a B2C instance.
+        scope_path: Deeper scope ladders only: the level the conversation
+            belongs to, as ``{level_key: value}``. Sent with the user and
+            assistant turns only when set.
         loop: The event loop ``sdk.instance.listen()`` runs on. Defaults to
             the running loop at construction, which is the right one whenever
             you build the listener from the same async code that started the
@@ -166,11 +170,15 @@ class SynapCrewAIListener(BaseEventListener):
         loop: Optional[asyncio.AbstractEventLoop] = None,
         report_tool_results: bool = True,
         report_kickoff_inputs: bool = True,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> None:
         if sdk is None:
             raise ValueError("SynapCrewAIListener requires a non-None sdk")
         if not user_id:
             raise ValueError("SynapCrewAIListener requires a non-empty user_id")
+        ensure_ids_match_path(
+            scope_path, user_id=user_id, customer_id=customer_id or None,
+            where="SynapCrewAIListener")
         if not conversation_id:
             raise ValueError(
                 "SynapCrewAIListener requires a non-empty conversation_id"
@@ -182,6 +190,7 @@ class SynapCrewAIListener(BaseEventListener):
         self._user_id = user_id
         self._conversation_id = conversation_id
         self._customer_id = customer_id
+        self._scope_path: Optional[Dict[str, str]] = dict(scope_path) if scope_path else None
         self._report_tool_results = report_tool_results
         self._report_kickoff_inputs = report_kickoff_inputs
         self._loop = loop or _running_loop()
@@ -245,6 +254,17 @@ class SynapCrewAIListener(BaseEventListener):
             "user_id": self._user_id,
             "customer_id": self._customer_id,
         }
+
+    def _turn_ids(self) -> dict:
+        """``_ids()`` for a user or assistant turn: plus the ladder path, only when set.
+
+        Only ``record_turn`` takes ``scope_path``; tool calls, results and
+        reasoning keep the plain ids.
+        """
+        ids = self._ids()
+        if self._scope_path:
+            ids["scope_path"] = dict(self._scope_path)
+        return ids
 
     def _dispatch(self, coro: Any) -> None:
         """Hand a report to the listening loop and return.
@@ -452,7 +472,7 @@ class SynapCrewAIListener(BaseEventListener):
         raises.
         """
         self._dispatch(
-            record_turn(self._sdk, role=role, content=text, **self._ids())
+            record_turn(self._sdk, role=role, content=text, **self._turn_ids())
         )
 
     def _report_tool_outcome(self, event: Any, result: Any) -> None:
@@ -494,6 +514,7 @@ async def report_user_turn(
     conversation_id: str,
     user_id: str,
     customer_id: str = "",
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> bool:
     """Write what the user actually said, before you kick the crew off.
 
@@ -506,7 +527,13 @@ async def report_user_turn(
     answers with no questions is not much to anticipate from. When you have
     the real request, send it with this instead and build the listener with
     ``report_kickoff_inputs=False``.
+
+    ``scope_path`` (deeper scope ladders only) is sent with the turn when set.
     """
+    ensure_ids_match_path(
+        scope_path, user_id=user_id or None, customer_id=customer_id or None,
+        where="report_user_turn")
+    extra: Dict[str, Any] = {"scope_path": dict(scope_path)} if scope_path else {}
     return await record_turn(
         sdk,
         role="user",
@@ -514,6 +541,7 @@ async def report_user_turn(
         conversation_id=conversation_id,
         user_id=user_id,
         customer_id=customer_id,
+        **extra,
     )
 
 

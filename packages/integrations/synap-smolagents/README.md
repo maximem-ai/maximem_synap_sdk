@@ -45,6 +45,20 @@ agent.run("Remind me what plan I'm on and my open ticket.")
 Because `CodeAgent` calls tools as plain Python, `search_memory` / `store_memory`
 compose naturally into agent-written code.
 
+## Deeper scope ladders
+
+If your account's scope ladder has levels beyond customer and user, pass the level as `scope_path` (`{level_key: value}`; key order does not matter). It is forwarded only when set, so nothing changes for callers who do not pass it. In the tools it is closed over: the model never sees it and cannot change it.
+
+```python
+path = {"customer": "acme", "team": "payments", "user": "dana"}
+tools = create_synap_tools(sdk, "dana", customer_id="acme", scope_path=path)
+callbacks = synap_step_callbacks(sdk, "dana", "conv_abc", customer_id="acme", scope_path=path)
+```
+
+The server lets a path's `user` and `customer` levels win over flat ids, so `user_id` / `customer_id` that disagree with the path raise `SynapIntegrationError` at construction, before anything is sent.
+
+`synap_st_instructions` and the history helpers read through the conversation and take no path. Tool-call, result and reasoning events carry none either.
+
 ## Notes
 
 - **Synchronous framework.** Smolagents runs synchronously and its tools do not

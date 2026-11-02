@@ -16,7 +16,8 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 
-import type { SynapIdentityOptions } from "./types.js";
+import { withScopePath, type SynapIdentityOptions } from "./types.js";
+import { assertSdkSupportsScopePath, ensureIdsMatchPath } from "./scope-guard.js";
 
 export interface CreateSynapMcpServerOptions extends SynapIdentityOptions {
   /** Server name (default: "synap"). Affects the mcp__<name>__<tool> prefix. */
@@ -33,6 +34,8 @@ interface ToolContext {
   customerId: string;
   conversationId?: string;
   mode: string;
+  /** Closed over: the model cannot choose a level. Sent as `scope_path` on search, `scope` on remember. */
+  scopePath?: Record<string, string>;
 }
 
 /**
@@ -41,7 +44,22 @@ interface ToolContext {
  * in an MCP server.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function buildSynapTools(ctx: ToolContext): SdkMcpToolDefinition<any>[] {
+export function buildSynapTools(input: ToolContext): SdkMcpToolDefinition<any>[] {
+  // Snapshot at build time. The ids-vs-path check below runs once, so the values
+  // it checked must be the values every call uses: a caller mutating the object
+  // it passed in (or the path inside it) afterwards must not change what is sent.
+  const ctx: ToolContext = {
+    ...input,
+    scopePath: input.scopePath ? { ...input.scopePath } : input.scopePath,
+  };
+  // Fixed at construction, so a disagreement is a configuration mistake: the
+  // server would use the path's `user` / `customer` over the ids sent beside it.
+  assertSdkSupportsScopePath(ctx.sdk, ctx.scopePath, "buildSynapTools");
+  ensureIdsMatchPath(ctx.scopePath, {
+    userId: ctx.userId,
+    customerId: ctx.customerId,
+    where: "buildSynapTools",
+  });
   const searchSchema = {
     query: z.string().describe("Search query"),
     max_results: z
@@ -88,6 +106,7 @@ export function buildSynapTools(ctx: ToolContext): SdkMcpToolDefinition<any>[] {
           max_results: maxResults,
           mode: ctx.mode,
           include_conversation_context: false,
+          ...withScopePath("scope_path", ctx.scopePath),
         });
         const text = (response.formatted_context ?? "").trim();
         return {
@@ -144,6 +163,7 @@ export function buildSynapTools(ctx: ToolContext): SdkMcpToolDefinition<any>[] {
           user_id: ctx.userId,
           customer_id: ctx.customerId || null,
           metadata,
+          ...withScopePath("scope", ctx.scopePath),
         });
         return {
           content: [
@@ -186,6 +206,7 @@ export function createSynapMcpServer(
     name = "synap",
     version = "0.1.0",
     mode = "accurate",
+    scopePath,
   } = options;
 
   if (!sdk) {
@@ -201,6 +222,7 @@ export function createSynapMcpServer(
     customerId,
     conversationId,
     mode,
+    scopePath,
   });
 
   return createSdkMcpServer({ name, version, tools });

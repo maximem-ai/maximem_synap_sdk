@@ -39,6 +39,7 @@ describe('index.ts — value exports', () => {
       'buildSynapTools',
       'createSynapShortTermHook',
       'setAutoListen',
+      'SynapScopeError',
     ]);
     const actual = Object.keys(publicApi).filter((k) => !k.startsWith('__'));
     const undocumented = actual.filter((k) => !documented.has(k));

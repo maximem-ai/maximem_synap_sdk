@@ -2,6 +2,8 @@ import type { Credentials, FetchedContext, SynapModelOptions, RawContextItem, Ra
 import { rawItemToContextItem } from '../transform/messages.js';
 import { SDK_VERSION } from '../version.js';
 import { newCorrelationId } from '../util/correlation.js';
+import { scopeField } from '../util/scope.js';
+import { ensureIdsMatchPath } from '../scope-guard.js';
 
 const DEFAULT_BASE_URL = 'https://synap-cloud-prod.maximem.ai';
 
@@ -16,6 +18,14 @@ interface FetchContextParams {
 
 export async function fetchContext(params: FetchContextParams): Promise<FetchedContext> {
   const { credentials, modelOptions, searchQuery, baseUrl = DEFAULT_BASE_URL } = params;
+
+  // The server lets the path's `user` / `customer` win over the ids in the same
+  // body; refuse a request whose ids and path name different identities.
+  ensureIdsMatchPath(modelOptions.scopePath, {
+    userId: modelOptions.userId,
+    customerId: modelOptions.customerId,
+    where: 'fetchContext',
+  });
 
   // Determine which scope endpoint to hit
   const { endpoint, body } = buildRequest(modelOptions, searchQuery);
@@ -47,6 +57,8 @@ function buildRequest(opts: SynapModelOptions, searchQuery: string[]): {
     max_results: opts.maxContextResults ?? 10,
     types: opts.contextTypes ?? ['all'],
     mode: 'fast',
+    // On all four scopes, only when set (and non-empty).
+    ...scopeField(opts.scopePath),
   };
 
   // Pick the most specific scope available

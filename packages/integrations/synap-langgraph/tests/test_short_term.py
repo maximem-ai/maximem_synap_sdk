@@ -23,6 +23,7 @@ from synap_langgraph.short_term import (
     synap_st_prompt,
 )
 from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +144,7 @@ class TestPromptCacheHit:
         prompt = synap_st_prompt(sdk, "conv_abc", style="bullet_points", system="X")
         await prompt(_state_with_messages())
         sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-            conversation_id="conv_abc",
+            conversation_id=coerce_conversation_id("conv_abc"),
             style="bullet_points",
         )
 
@@ -331,7 +332,7 @@ class TestNode:
         node = create_synap_st_node(sdk, "conv_abc", style="structured")
         await node({})
         sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-            conversation_id="conv_abc",
+            conversation_id=coerce_conversation_id("conv_abc"),
             style="structured",
         )
 
