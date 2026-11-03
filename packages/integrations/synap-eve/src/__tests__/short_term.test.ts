@@ -123,3 +123,17 @@ describe("createSynapInstructions (dynamic resolver)", () => {
     expect(out).toBeNull();
   });
 });
+
+describe("a conversation-only read carries no scope path", () => {
+  // The conversation remembers the level it was filed under, so the short-term
+  // read takes only the conversation id (and a style). A package whose hooks
+  // and tools are configured with a scopePath must not change that.
+  it("asks for exactly conversation_id and style", async () => {
+    const sdk = makeSdk();
+    await fetchSynapShortTerm({ sdk, conversationId: "conv-1" });
+    expect(sdk.conversation.context.get_context_for_prompt).toHaveBeenCalledWith({
+      conversation_id: "conv-1",
+      style: "narrative",
+    });
+  });
+});

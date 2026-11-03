@@ -17,6 +17,7 @@ import pytest
 
 from synap_haystack.short_term import SynapShortTermContext
 from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +125,7 @@ class TestRun:
         comp = SynapShortTermContext(sdk, "conv_abc", style="bullet_points")
         comp.run()
         sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-            conversation_id="conv_abc",
+            conversation_id=coerce_conversation_id("conv_abc"),
             style="bullet_points",
         )
 
@@ -133,7 +134,7 @@ class TestRun:
         comp = SynapShortTermContext(sdk, "conv_abc", style="structured")
         comp.run()
         sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-            conversation_id="conv_abc",
+            conversation_id=coerce_conversation_id("conv_abc"),
             style="structured",
         )
 

@@ -118,6 +118,22 @@ describe('serving from the cache', () => {
     const response = buildAnticipationResponse(hit);
     expect(response.facts).toHaveLength(1);
   });
+
+  // A prefetched item carries `scope` top-level; readers look in `metadata`,
+  // where the HTTP response puts it. Python: test_cache_hit_scope_metadata.py.
+  it('puts each item scope in metadata, as the network path does', () => {
+    const items = [
+      { item_id: 'kb1', content: 'Refunds must be filed within 30 days', scope: 'client' },
+      { item_id: 'u1', content: 'x', scope: 'user', metadata: { scope: 'client' } },
+      { item_id: 'n1', content: 'x' },
+    ];
+    const hit = { itemsByType: { facts: items }, bundleIds: ['b1'], score: 1, coverage: 1 };
+    const facts = buildAnticipationResponse(hit).facts as Array<Record<string, unknown>>;
+    expect(facts.map((f) => (f['metadata'] as Record<string, unknown>)['scope']))
+      .toEqual(['client', 'client', undefined]);
+    // The cached items themselves are not changed.
+    expect(items[0]).not.toHaveProperty('metadata');
+  });
 });
 
 /**

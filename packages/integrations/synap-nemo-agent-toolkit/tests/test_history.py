@@ -9,6 +9,7 @@ dropped first, as in ``test_stream.py``.
 
 from __future__ import annotations
 
+from synap_integrations_common.conversation_id import coerce_conversation_id
 import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -39,6 +40,7 @@ from synap_nemo_agent_toolkit import _ledger  # noqa: E402
 from synap_nemo_agent_toolkit.editor import SynapMemoryEditor  # noqa: E402
 from synap_nemo_agent_toolkit.history import SynapHistoryMiddlewareConfig  # noqa: E402
 from synap_nemo_agent_toolkit.stream import SynapStreamExporter  # noqa: E402
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 BLOCK = "## Conversation so far (compacted 2026-10-22)\nThe user is planning a trip to Lisbon."
 seen: list = []
@@ -186,7 +188,7 @@ async def test_nats_own_conversation_id_wins_over_the_configured_one(sdk_factory
         await run_agent(conversation(), conversation_id="configured")
     finally:
         ContextState.get().conversation_id.reset(token)
-    assert sdk.conversation.context.get_context_for_prompt.await_args.kwargs["conversation_id"] == "nat-conv"
+    assert sdk.conversation.context.get_context_for_prompt.await_args.kwargs["conversation_id"] == coerce_conversation_id("nat-conv")
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +210,7 @@ async def test_a_conversation_item_is_recorded_as_a_turn_not_ingested_as_a_docum
     finally:
         ContextState.get().conversation_id.reset(token)
     kwargs = sdk.conversation.record_message.await_args.kwargs
-    assert (kwargs["role"], kwargs["content"], kwargs["conversation_id"]) == ("user", "hello", "nat-conv")
+    assert (kwargs["role"], kwargs["content"], kwargs["conversation_id"]) == ("user", "hello", coerce_conversation_id("nat-conv"))
     sdk.memories.create.assert_not_awaited()
 
 

@@ -150,6 +150,20 @@ unauthenticated channel (`auth.current` is `null`), pass an explicit `userId`:
 export default createSynapStoreTool({ sdk, userId: "alice", customerId: "acme" });
 ```
 
+## Deeper scope ladders
+
+If your account has a scope level between customer and user (for example `team`), pass the path once. It is fixed when the tool or hook is built; the model never sees it.
+
+```ts
+const scopePath = { customer: "acme", team: "eng", user: "u1" };
+export default createSynapSearchTool({ sdk, scopePath });   // also createSynapStoreTool
+// hooks: createSynapStreamHooks({ sdk, scopePath }) files the conversation at that level
+```
+
+Leave it out on a default ladder: calls are unchanged. Needs `@maximem/synap-js-sdk` >= 0.7.1, the first release whose unified fetch sends the right path (0.7.0 sends the person path to the customer sub-fetch) (a peer dependency). With an older SDK a `scopePath` would be silently ignored and read and write at the wrong level, so building with one throws.
+
+The server reads the path's `user` and `customer` over any id sent beside them. So a path that contains `user` or `customer` must agree with the ids: the tools throw (`SynapScopeError`) and the stream hooks report nothing, and log an error with short fingerprints only, when the session principal or a `userId` / `customerId` you pass is a different identity. The check applies only to those two keys. A tool or hook module is built once and serves every session, so a path with a `user` in it fits an agent that serves that one user; it cannot be shared by several.
+
 ## Error policy
 
 | Operation | Behavior |

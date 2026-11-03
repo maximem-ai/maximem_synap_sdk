@@ -34,6 +34,7 @@ from claude_agent_sdk import HookMatcher
 from claude_agent_sdk.types import HookContext, UserPromptSubmitHookInput
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
+    coerce_conversation_id,
     SynapIntegrationError,
     wrap_sdk_errors_async,
 )
@@ -84,7 +85,7 @@ async def _fetch_response(
             style=style,
         ):
             response = await sdk.conversation.context.get_context_for_prompt(
-                conversation_id=conversation_id,
+                conversation_id=coerce_conversation_id(conversation_id),
                 style=style,
             )
     except SynapIntegrationError:

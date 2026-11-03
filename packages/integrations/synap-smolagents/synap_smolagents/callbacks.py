@@ -80,10 +80,10 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Mapping, Optional
 
 from maximem_synap import MaximemSynapSDK
-from synap_integrations_common import run_async
+from synap_integrations_common import ensure_ids_match_path, run_async
 from synap_integrations_common.stream_events import (
     record_turn,
     report_reasoning,
@@ -162,6 +162,7 @@ def create_synap_recorder(
     report_tool_results: bool = True,
     ingest_steps: bool = False,
     compact_history: bool = True,
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> Callable[..., None]:
     """Build a Smolagents step callback that records each run to Synap.
 
@@ -189,6 +190,11 @@ def create_synap_recorder(
         compact_history: Attach :func:`attach_synap_history` to the agent on the
             first step, so the model sees Synap's compaction in place of the
             agent's earlier steps once the conversation has one.
+        scope_path: For an account with a deeper scope ladder: the level the
+            conversation belongs to, as ``{level_key: value}``. Forwarded with
+            the user and assistant turns, and with the step ingest
+            (``ingest_steps``, as ``scope``), only when set. Tool-call, result
+            and reasoning events carry no path (the server ignores one there).
 
     Returns:
         A callable ``recorder(memory_step, agent=None)`` for ``step_callbacks``.
@@ -201,12 +207,18 @@ def create_synap_recorder(
         raise ValueError("create_synap_recorder requires a non-empty user_id")
     if not conversation_id or not str(conversation_id).strip():
         raise ValueError("create_synap_recorder requires a non-empty conversation_id")
+    ensure_ids_match_path(
+        scope_path, user_id=user_id, customer_id=customer_id or None,
+        where="create_synap_recorder")
 
     ids = {
         "conversation_id": conversation_id,
         "user_id": user_id,
         "customer_id": customer_id,
     }
+    path = dict(scope_path) if scope_path else None
+    # The two turns carry the path; the other events have no place for one.
+    turn_ids = {**ids, "scope_path": dict(path)} if path else ids
     # One task and one answer per run, remembered so neither is reported twice.
     # A run is told apart by the TaskStep it appended to memory, a new object each
     # time, so a second `agent.run()` reports its own task and answer even when
@@ -226,7 +238,7 @@ def create_synap_recorder(
             new_run = (run is not seen["run"]) if run is not None else (task != seen["task"])
             if isinstance(task, str) and task.strip() and new_run:
                 seen["run"], seen["task"], seen["answer"] = run, task, None
-                await record_turn(sdk, role="user", content=task.strip(), **ids)
+                await record_turn(sdk, role="user", content=task.strip(), **turn_ids)
 
         step_number = getattr(memory_step, "step_number", None)
 
@@ -270,7 +282,7 @@ def create_synap_recorder(
         answer = _final_answer_text(memory_step)
         if answer and answer != seen["answer"]:
             seen["answer"] = answer
-            await record_turn(sdk, role="assistant", content=answer, **ids)
+            await record_turn(sdk, role="assistant", content=answer, **turn_ids)
 
     def recorder(memory_step: Any, agent: Optional[Any] = None) -> None:
         if compact_history and agent is not None:
@@ -306,6 +318,7 @@ def create_synap_recorder(
                     document_type="ai-chat-conversation",
                     document_id=f"smolagents-{conversation_id}-{step_number}",
                     metadata={_MARKER: True, "step": step_number},
+                    **({"scope": dict(path)} if path else {}),
                 )
             )
         except Exception as exc:  # noqa: BLE001: in-loop callback, log and never raise

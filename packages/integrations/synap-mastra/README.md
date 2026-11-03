@@ -128,6 +128,20 @@ new SynapMemory({
 });
 ```
 
+## Deeper scope ladders
+
+If your account has a scope level between customer and user (for example `team`), pass the path once at construction. The tools never show it to the model.
+
+```ts
+const scopePath = { customer: "acme", team: "eng", user: "u1" };
+const memory = new SynapMemory({ sdk, userId: "u1", customerId: "acme", scopePath });
+const tools = { search: synapSearchTool({ sdk, userId: "u1", scopePath }) };  // also synapStoreTool
+```
+
+Leave it out on a default ladder: calls are unchanged. Needs `@maximem/synap-js-sdk` >= 0.7.1, the first release whose unified fetch sends the right path (0.7.0 sends the person path to the customer sub-fetch) (a peer dependency). With an older SDK a `scopePath` would be silently ignored and read and write at the wrong level, so building with one throws.
+
+The server reads the path's `user` and `customer` over any id sent beside them, so `userId` and `customerId` must agree with those two keys of the path. A disagreement throws `SynapScopeError` when the memory or tool is built, before any call. An empty `customerId` is allowed.
+
 ## Error policy
 
 - **`SynapMemory.recall` / `getSystemMessage`** — read-side, degrade gracefully (empty recall / null system message) with an `ERROR` log on failure.

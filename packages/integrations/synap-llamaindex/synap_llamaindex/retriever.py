@@ -5,13 +5,18 @@ enabling memory-augmented retrieval in any LlamaIndex pipeline.
 """
 
 import logging
-from typing import Any, List, Optional
+from typing import Any, List, Mapping, Optional
 
 from llama_index.core.base.base_retriever import BaseRetriever
 from llama_index.core.schema import NodeWithScore, QueryBundle, TextNode
 
 from maximem_synap import MaximemSynapSDK
-from synap_integrations_common import run_async, wrap_sdk_errors_async
+from synap_integrations_common import (
+    ensure_ids_match_path,
+    rest_conversation_id,
+    run_async,
+    wrap_sdk_errors_async,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,12 +33,17 @@ class SynapRetriever(BaseRetriever):
         mode: str = "accurate",
         max_results: int = 20,
         types: Optional[List[str]] = None,
+        scope_path: Optional[Mapping[str, str]] = None,
         **kwargs: Any,
     ):
         if sdk is None:
             raise ValueError("SynapRetriever requires a non-None sdk")
         if not user_id:
             raise ValueError("SynapRetriever requires a non-empty user_id")
+        # The server lets the path's user/customer win over the flat ids.
+        ensure_ids_match_path(
+            scope_path, user_id=user_id, customer_id=customer_id or None,
+            where="SynapRetriever")
 
         super().__init__(**kwargs)
         self._sdk = sdk
@@ -43,6 +53,9 @@ class SynapRetriever(BaseRetriever):
         self._mode = mode
         self._max_results = max_results
         self._types = types
+        # A deeper scope ladder's level, e.g. {"customer": "acme", "team":
+        # "payments", "user": "dana"}. Sent to `sdk.fetch` only when set.
+        self._scope_path = dict(scope_path) if scope_path else None
 
     def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
         return run_async(self._aretrieve(query_bundle))
@@ -53,7 +66,7 @@ class SynapRetriever(BaseRetriever):
             user_id=self._user_id, query_len=len(query_bundle.query_str),
         ):
             response = await self._sdk.fetch(
-                conversation_id=self._conversation_id,
+                conversation_id=rest_conversation_id(self._conversation_id) or None,
                 user_id=self._user_id,
                 customer_id=self._customer_id,
                 search_query=[query_bundle.query_str],
@@ -61,6 +74,7 @@ class SynapRetriever(BaseRetriever):
                 types=self._types,
                 mode=self._mode,
                 include_conversation_context=False,
+                **({"scope_path": dict(self._scope_path)} if self._scope_path else {}),
             )
 
         nodes: List[NodeWithScore] = []

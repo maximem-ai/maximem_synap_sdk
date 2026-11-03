@@ -43,6 +43,7 @@ from langchain_core.runnables import Runnable, RunnableLambda
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
     SynapIntegrationError,
+    coerce_conversation_id,
     wrap_sdk_errors_async,
 )
 
@@ -103,7 +104,8 @@ async def _fetch_st_block(
             style=style,
         ):
             response = await sdk.conversation.context.get_context_for_prompt(
-                conversation_id=conversation_id,
+                # the SDK's REST read wants a UUID; the caller's id may be any string
+                conversation_id=coerce_conversation_id(conversation_id),
                 style=style,
             )
     except SynapIntegrationError:

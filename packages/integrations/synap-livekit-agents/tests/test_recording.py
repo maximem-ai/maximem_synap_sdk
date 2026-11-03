@@ -13,6 +13,7 @@ Documented error-handling contract (from recording.py docstring):
 
 from __future__ import annotations
 
+from synap_integrations_common.conversation_id import coerce_conversation_id
 import asyncio
 import logging
 import uuid
@@ -22,6 +23,7 @@ import pytest
 
 from synap_integrations_common import set_auto_listen
 from synap_livekit_agents.recording import attach_synap_recording
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +302,7 @@ class TestHappyPathSync:
             _make_event(_make_item(role="user", text_content="hi")),
         )
         kw = sdk.conversation.record_message.call_args.kwargs
-        assert kw["conversation_id"] == "conv-explicit"
+        assert kw["conversation_id"] == coerce_conversation_id("conv-explicit")
 
     def test_callable_text_content_is_invoked(self):
         sdk = _make_sdk()
@@ -371,7 +373,7 @@ class TestHappyPathAsync:
         kw = sdk.conversation.record_message.call_args.kwargs
         assert kw["user_id"] == "u42"
         assert kw["customer_id"] == "c99"
-        assert kw["conversation_id"] == "conv-99"
+        assert kw["conversation_id"] == coerce_conversation_id("conv-99")
         assert kw["content"] == "async content"
         assert kw["role"] == "user"
 

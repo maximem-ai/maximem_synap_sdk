@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
+from synap_integrations_common import coerce_conversation_id
 import pytest
 
 
@@ -56,6 +57,10 @@ def test_all_list_is_complete():
         "create_synap_node",
         "create_synap_st_node",
         "synap_st_prompt",
+        "create_synap_turn_node",
+        "create_synap_tool_call_node",
+        "create_synap_tool_result_node",
+        "create_synap_reasoning_node",
     }
     assert set(pkg.__all__) == expected
 
@@ -118,7 +123,7 @@ async def test_create_synap_node_happy_path_via_re_export():
     assert result == {"synap_context": "memory context"}
     kw = sdk.fetch.call_args.kwargs
     assert kw["search_query"] == ["what is my budget?"]
-    assert kw["conversation_id"] == "conv-1"
+    assert kw["conversation_id"] == coerce_conversation_id("conv-1")
 
 
 @pytest.mark.asyncio

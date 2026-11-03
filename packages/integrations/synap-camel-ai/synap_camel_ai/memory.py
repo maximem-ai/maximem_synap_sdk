@@ -102,7 +102,7 @@ import dataclasses
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from uuid import UUID, uuid4, uuid5
 
 from camel.memories import (
@@ -116,6 +116,7 @@ from camel.types import ModelType, OpenAIBackendRole
 from camel.utils import OpenAITokenCounter
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
+    ensure_ids_match_path,
     CompactedHistory,
     SynapIntegrationError,
     fetch_compacted_history,
@@ -257,6 +258,11 @@ class SynapAgentMemory(ChatHistoryMemory):
         on_error: ``"fallback"`` (default) makes the turn write best-effort;
             ``"raise"`` raises :class:`SynapIntegrationError` when a turn could
             not be written.
+        scope_path: Deeper scope ladders only: the level this agent's memory
+            belongs to, as ``{level_key: value}`` (see
+            ``maximem_synap.ScopeAddress.scope_path``). Sent with the recall
+            fetch and with the user and assistant turns only when set; leave it
+            unset and every call is exactly what it was.
 
     Attach via ``ChatAgent(memory=SynapAgentMemory(...))`` — the constructor path
     only. Do **not** assign ``agent.memory = ...`` after construction; that setter
@@ -278,11 +284,15 @@ class SynapAgentMemory(ChatHistoryMemory):
         window_size: Optional[int] = None,
         storage=None,
         on_error: str = "fallback",
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> None:
         if sdk is None:
             raise ValueError("SynapAgentMemory requires a non-None sdk")
         if not user_id or not str(user_id).strip():
             raise ValueError("SynapAgentMemory requires a non-empty user_id")
+        ensure_ids_match_path(
+            scope_path, user_id=user_id, customer_id=customer_id or None,
+            where="SynapAgentMemory")
         if on_error not in ("fallback", "raise"):
             raise ValueError(
                 f"SynapAgentMemory: on_error must be 'fallback' or 'raise', "
@@ -299,6 +309,7 @@ class SynapAgentMemory(ChatHistoryMemory):
         self.sdk = sdk
         self.user_id = user_id
         self.customer_id = customer_id
+        self.scope_path: Optional[Dict[str, str]] = dict(scope_path) if scope_path else None
         self.conversation_id = conversation_id
         self.mode = mode
         self.max_results = max_results
@@ -441,6 +452,7 @@ class SynapAgentMemory(ChatHistoryMemory):
             )
 
     async def _record_turn(self, role: str, content: str) -> bool:
+        extra: Dict[str, Any] = {"scope_path": self.scope_path} if self.scope_path else {}
         return await record_turn(
             self.sdk,
             role=role,
@@ -448,6 +460,7 @@ class SynapAgentMemory(ChatHistoryMemory):
             conversation_id=self._conversation_id,
             user_id=self.user_id,
             customer_id=self.customer_id,
+            **extra,
         )
 
     # ── reads: local conversation + prepended Synap recall ───────────────────
@@ -485,6 +498,7 @@ class SynapAgentMemory(ChatHistoryMemory):
         history = asyncio.ensure_future(
             fetch_compacted_history(self.sdk, self._conversation_id)
         )
+        extra: Dict[str, Any] = {"scope_path": self.scope_path} if self.scope_path else {}
         try:
             response = await self.sdk.fetch(
                 user_id=self.user_id,
@@ -493,6 +507,7 @@ class SynapAgentMemory(ChatHistoryMemory):
                 max_results=self.max_results,
                 mode=self.mode,
                 include_conversation_context=False,
+                **extra,
             )
         except BaseException:
             history.cancel()

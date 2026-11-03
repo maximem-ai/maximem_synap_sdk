@@ -13,6 +13,7 @@ returns anything else silently changes what the agent does.
 
 from __future__ import annotations
 
+from synap_integrations_common.conversation_id import coerce_conversation_id
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -20,6 +21,7 @@ import pytest
 
 from synap_integrations_common import set_auto_listen
 from synap_google_adk import create_synap_callbacks, report_user_turn
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 def sdk(listening: bool = True, auto_listen: bool = False):
@@ -179,7 +181,7 @@ class TestWithoutAStream:
         assert [(c.kwargs["role"], c.kwargs["content"]) for c in calls] == [
             ("user", "where is my order"), ("assistant", "shipped"),
         ]
-        assert all(c.kwargs["conversation_id"] == "c1" for c in calls)
+        assert all(c.kwargs["conversation_id"] == coerce_conversation_id("c1") for c in calls)
         s.instance.send_message.assert_not_awaited()
 
     @pytest.mark.asyncio

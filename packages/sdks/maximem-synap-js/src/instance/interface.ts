@@ -10,11 +10,13 @@
 import { agentModelOf, withAgentModel, type AgentModel } from '../agent-model.js';
 import {
   InvalidInputError, ListeningAlreadyActiveError, ListeningNotActiveError, SynapError,
+  SynapPermanentError,
 } from '../errors.js';
 import type { AnticipationCache } from '../context/anticipation-cache.js';
 import type { StreamCredentials, StreamState } from '../grpc/stream-client.js';
 import { getEnv } from '../util/env.js';
 import { newCorrelationId } from '../util/correlation.js';
+import { normalizeConversationId } from '../util/conversation-id.js';
 import {
   MAX_STREAM_IMAGE_BYTES, normaliseContent, toInlineParts, type ContentPart,
 } from '../memories/parts.js';
@@ -188,6 +190,8 @@ export interface InstanceInternals {
    * bundles begin to arrive, so the local embedding model loads then.
    */
   setOnListen(handle: () => void): void;
+  /** Set by the client in local mode: `listen()` then throws this message instead of opening a stream. */
+  blockListen(message: string): void;
   /**
    * Set by the client. Receives the server's message count for a conversation
    * after each streamed write has been stored.
@@ -343,6 +347,7 @@ export function createInstanceNamespace(
 
   let applyCompaction: ((bundle: Record<string, unknown>) => void) | null = null;
   let onListen: (() => void) | null = null;
+  let listenBlockedBy: string | null = null;
   let onConversationState: ((conversationId: string, messageCount: number) => void) | null =
     null;
 
@@ -358,6 +363,9 @@ export function createInstanceNamespace(
     },
     setOnListen(handle) {
       onListen = handle;
+    },
+    blockListen(message) {
+      listenBlockedBy = message;
     },
     setConversationStateHandler(handle) {
       onConversationState = handle;
@@ -390,6 +398,21 @@ export function createInstanceNamespace(
    * Best effort. A session that cannot be opened must not stop the event that
    * triggered it, so the conversation stays unmarked and the next event retries.
    */
+  /**
+   * The key a session was opened under, whichever spelling (the raw id or the
+   * UUID derived from it) names the conversation now. Keys stay as opened: the
+   * wire carries the id the caller used.
+   */
+  function openSessionKey(conversationId: string): string | undefined {
+    if (!conversationId) return undefined;
+    if (openSessions.has(conversationId)) return conversationId;
+    const wanted = normalizeConversationId(conversationId);
+    for (const key of openSessions.keys()) {
+      if (normalizeConversationId(key) === wanted) return key;
+    }
+    return undefined;
+  }
+
   function ensureSession(
     conversationId: string, userId: string, customerId: string,
   ): void {
@@ -400,7 +423,7 @@ export function createInstanceNamespace(
     // a session the server never had. The next event that carries a user_id
     // opens it.
     if (!conversationId || !userId || client === null) return;
-    if (openSessions.has(conversationId)) return;
+    if (openSessionKey(conversationId) !== undefined) return;
     // The same helper the correlation ids use: a session id is an identifier
     // for tracing, never a security value, and that helper is the one that is
     // safe on Edge and Workers, where `node:crypto` breaks the build.
@@ -453,6 +476,7 @@ export function createInstanceNamespace(
 
   const namespace: InstanceNamespace = {
     async listen(options: ListenOptions = {}) {
+      if (listenBlockedBy !== null) throw new SynapPermanentError(listenBlockedBy);
       if (client !== null) {
         // Python raises this from InstanceController when a second listen()
         // lands on an already-active stream.
@@ -539,9 +563,10 @@ export function createInstanceNamespace(
     },
 
     async end_session(conversationId: string) {
-      const sessionId = openSessions.get(conversationId);
-      if (sessionId === undefined || client === null) return;
-      openSessions.delete(conversationId);
+      const openedAs = openSessionKey(conversationId);
+      const sessionId = openedAs === undefined ? undefined : openSessions.get(openedAs);
+      if (openedAs === undefined || sessionId === undefined || client === null) return;
+      openSessions.delete(openedAs);
       try {
         client.sendSessionControl({
           action: 'end',
@@ -605,7 +630,7 @@ export function createInstanceNamespace(
           user_id: options.user_id ?? options.userId ?? '',
           customer_id: options.customer_id ?? options.customerId ?? '',
           session_id: options.session_id ?? options.sessionId
-            ?? openSessions.get(conversationId) ?? '',
+            ?? openSessions.get(openSessionKey(conversationId) ?? '') ?? '',
           metadata: withAgentModel(metadata, agentModelOf(options), agentModel(), true) ?? {},
           timestamp_ms: Date.now(),
           tool_name: options.tool_name ?? options.toolName ?? '',

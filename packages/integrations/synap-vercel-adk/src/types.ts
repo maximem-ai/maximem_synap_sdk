@@ -29,6 +29,16 @@ export interface SynapModelOptions {
   customerId?: string;
   /** Conversation ID for session-scoped context */
   conversationId?: string;
+  /**
+   * The level of your account's scope ladder to read and write at, for an
+   * account whose ladder has a level between customer and user, for example
+   * `{ customer: 'acme', team: 'eng', user: 'u1' }`. Sent as `scope` in the
+   * context fetch and conversation record bodies and on the stream's
+   * conversation event (user and assistant turns only); it also keeps a
+   * bundle anticipated for another level out of this context. Unset on a
+   * default ladder, where every request is exactly what it was.
+   */
+  scopePath?: Record<string, string>;
   /** Which context types to fetch. Defaults to all. */
   contextTypes?: Array<'facts' | 'preferences' | 'episodes' | 'emotions' | 'temporal_events'>;
   /** Max context items to fetch. Defaults to 10. */
@@ -113,6 +123,8 @@ export interface CachedBundle {
   /** Server-assigned 0..1 confidence. Carried for telemetry; not used for ranking
    *  (matches the Python SDK, which ranks on BM25 only). */
   bundleConfidence: number;
+  /** The rung the server retrieved the bundle at, as `rungKey` writes it; '' when it named none. */
+  scopeRung?: string;
   /** MACA pattern that produced this bundle. Carried for per-pattern attribution. */
   originPatternId: string;
   storedAt: number;
@@ -167,6 +179,8 @@ export interface ConversationEventMsg {
   tool_result_json?: string;
   /** proto: ConversationEvent.tool_call_id. Ties a result to its call. */
   tool_call_id?: string;
+  /** proto: ConversationEvent.scope (map, field 14). Sent only when set. */
+  scope?: Record<string, string>;
 }
 
 export interface ContextBundleMsg {
@@ -185,6 +199,8 @@ export interface ContextBundleMsg {
   bundle_confidence: number;
   origin_pattern_id: string;
   ttl_hint_seconds: number;
+  /** proto: ContextBundleProto.anticipation_scope_rung (24). Empty when the bundle named no rung. */
+  anticipation_scope_rung?: string;
 }
 
 // Client → server learning-loop telemetry (StreamEvent oneof fields 4 & 5).

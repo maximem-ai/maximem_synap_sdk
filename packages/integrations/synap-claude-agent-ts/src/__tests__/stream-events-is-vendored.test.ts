@@ -31,6 +31,9 @@ const PACKAGES = ['synap-claude-agent-ts', 'synap-mastra', 'synap-eve'] as const
 const VENDORED = [
   ['stream-events.ts', join('src', 'stream-events.ts')],
   ['stream-events.test.ts', join('src', '__tests__', 'stream-events.test.ts')],
+  // The scope guard (ids vs path, SDK floor) and its tests: same reasoning.
+  ['scope-guard.ts', join('src', 'scope-guard.ts')],
+  ['scope-guard.test.ts', join('src', '__tests__', 'scope-guard.test.ts')],
   // This file too. Otherwise somebody can weaken the guard in one package and
   // the other two never notice, which is the same drift one level up.
   ['stream-events-is-vendored.test.ts',

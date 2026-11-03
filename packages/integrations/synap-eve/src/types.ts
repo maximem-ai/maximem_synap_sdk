@@ -26,6 +26,13 @@ export interface SynapFetchArgs {
   max_results?: number;
   mode?: string;
   include_conversation_context?: boolean;
+  /**
+   * The level of a deeper scope ladder to read at. Only for an account whose
+   * ladder has a level between customer and user; sent only when set. Needs
+   * `@maximem/synap-js-sdk` >= the release that adds `scope_path` to
+   * `sdk.fetch`.
+   */
+  scope_path?: Record<string, string>;
 }
 
 export interface SynapMemoryCreateArgs {
@@ -33,6 +40,11 @@ export interface SynapMemoryCreateArgs {
   user_id: string;
   customer_id?: string | null;
   metadata?: Record<string, unknown>;
+  /**
+   * The level of a deeper scope ladder to write at. NOTE the name: `scope` on
+   * `memories.create`, `scope_path` everywhere else. Sent only when set.
+   */
+  scope?: Record<string, string>;
 }
 
 export interface SynapMemoryCreateResult {
@@ -63,6 +75,12 @@ export interface SynapPromptContext {
 
 export interface SynapSdkLike {
   fetch(args: SynapFetchArgs): Promise<SynapFetchResponseLike>;
+  /**
+   * Present on `@maximem/synap-js-sdk` >= 0.7.1, the first release that sends
+   * `scope_path`. Not called here: its presence is how a `scopePath` on an older
+   * SDK, which would silently ignore it, is refused at construction.
+   */
+  get_scope_ladder?: (...args: never[]) => unknown;
   conversation: {
     context: {
       get_context_for_prompt(args: {

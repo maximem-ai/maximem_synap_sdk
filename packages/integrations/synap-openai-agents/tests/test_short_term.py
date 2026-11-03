@@ -21,6 +21,7 @@ import pytest
 
 from synap_openai_agents.short_term import synap_st_instructions
 from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +138,7 @@ class TestHappyPath:
         instr = synap_st_instructions(sdk, "conv_xyz", style="bullet_points", system="X")
         await instr(MagicMock(), MagicMock())
         sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-            conversation_id="conv_xyz",
+            conversation_id=coerce_conversation_id("conv_xyz"),
             style="bullet_points",
         )
 
@@ -147,7 +148,7 @@ class TestHappyPath:
         instr = synap_st_instructions(sdk, "conv_abc", system="X")
         await instr(MagicMock(), MagicMock())
         sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-            conversation_id="conv_abc",
+            conversation_id=coerce_conversation_id("conv_abc"),
             style="narrative",
         )
 
@@ -189,7 +190,7 @@ class TestHappyPath:
         instr = synap_st_instructions(sdk, "conv_abc", style="structured")
         await instr(MagicMock(), MagicMock())
         sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-            conversation_id="conv_abc",
+            conversation_id=coerce_conversation_id("conv_abc"),
             style="structured",
         )
 

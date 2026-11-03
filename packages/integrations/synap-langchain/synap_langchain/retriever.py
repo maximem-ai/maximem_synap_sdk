@@ -6,7 +6,7 @@ confidence, scope, and temporal info.
 """
 
 import logging
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from langchain_core.callbacks.manager import (
     AsyncCallbackManagerForRetrieverRun,
@@ -14,10 +14,10 @@ from langchain_core.callbacks.manager import (
 )
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
-from pydantic import ConfigDict
+from pydantic import ConfigDict, model_validator
 
 from maximem_synap import MaximemSynapSDK
-from synap_integrations_common import run_async, wrap_sdk_errors_async
+from synap_integrations_common import ensure_ids_match_path, run_async, wrap_sdk_errors_async, coerce_conversation_id
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,22 @@ class SynapRetriever(BaseRetriever):
     mode: str = "accurate"
     max_results: int = 20
     types: Optional[List[str]] = None
+    # The level to read on an account with a deeper scope ladder
+    # (``ScopeAddress.scope_path``). Sent to ``sdk.fetch`` only when set.
+    scope_path: Optional[Dict[str, str]] = None
+
+    def _check_ids(self) -> None:
+        # The server lets the path's user/customer win over these ids. Checked at
+        # construction and again before every SDK call, because the fields are
+        # plain attributes that can be reassigned after construction.
+        ensure_ids_match_path(
+            self.scope_path, user_id=self.user_id,
+            customer_id=self.customer_id or None, where="SynapRetriever")
+
+    @model_validator(mode="after")
+    def _ids_match_scope_path(self) -> "SynapRetriever":
+        self._check_ids()
+        return self
 
     def _get_relevant_documents(
         self,
@@ -57,12 +73,16 @@ class SynapRetriever(BaseRetriever):
         *,
         run_manager: AsyncCallbackManagerForRetrieverRun,
     ) -> List[Document]:
+        self._check_ids()
         async with wrap_sdk_errors_async(
             "langchain.SynapRetriever", logger,
             user_id=self.user_id, query_len=len(query),
         ):
+            extra: Dict[str, Any] = {}
+            if self.scope_path:
+                extra["scope_path"] = dict(self.scope_path)
             response = await self.sdk.fetch(
-                conversation_id=self.conversation_id,
+                conversation_id=coerce_conversation_id(self.conversation_id),
                 user_id=self.user_id,
                 customer_id=self.customer_id,
                 search_query=[query],
@@ -70,6 +90,7 @@ class SynapRetriever(BaseRetriever):
                 types=self.types,
                 mode=self.mode,
                 include_conversation_context=False,
+                **extra,
             )
 
         docs: List[Document] = []

@@ -10,6 +10,9 @@ Contract:
 
 from __future__ import annotations
 
+from synap_integrations_common.conversation_id import coerce_conversation_id
+import uuid
+
 import pytest
 
 from strands.memory import MemoryEntry, MemoryManager
@@ -23,6 +26,7 @@ from synap_integrations_common.testing import (
 )
 
 from synap_strands_agents.store import SynapMemoryStore
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 def _user(text):
@@ -155,7 +159,7 @@ async def test_add_messages_records_the_turns_and_does_not_ingest_a_transcript(m
 
     assert _written(mock_sdk) == [("user", "what's the weather"), ("assistant", "sunny")]
     kwargs = mock_sdk.conversation.record_message.await_args.kwargs
-    assert kwargs["conversation_id"] == "conv_1"
+    assert kwargs["conversation_id"] == coerce_conversation_id("conv_1")
     assert kwargs["user_id"] == "alice"
     assert kwargs["customer_id"] == "acme"
     mock_sdk.memories.create.assert_not_awaited()
@@ -167,7 +171,8 @@ async def test_add_messages_without_a_conversation_id_keeps_one_per_store(mock_s
     await store.add_messages([_assistant("two")])
 
     ids = {c.kwargs["conversation_id"] for c in mock_sdk.conversation.record_message.await_args_list}
-    assert len(ids) == 1 and next(iter(ids)).startswith("strands-")
+    # the store's own "strands-<hex>" id, sent to REST as the UUID the server derives from it
+    assert len(ids) == 1 and uuid.UUID(next(iter(ids)))
 
 
 async def test_add_messages_skips_what_the_stream_hook_already_wrote(mock_sdk):

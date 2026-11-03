@@ -9,6 +9,7 @@ export {
   type SynapClientOptions, type SynapLogger, type SynapLogLevel, type ConfigureOptions, type UnifiedFetchOptions,
 } from './client.js';
 export { SDK_VERSION } from './version.js';
+export { ScopeLadder, ScopeAddress, type ScopeLevel } from './scope-ladder.js';
 
 export * from './errors.js';
 
@@ -48,6 +49,9 @@ export type {
   CreditsNamespace, EstimateOptions, LedgerOptions, CreditBalance, CreditBucket,
   CreditLedgerEntry, CreditLedgerPage, CreditEstimate, RedeemResult,
 } from './credits/interface.js';
+export type {
+  MacaNamespace, MacaJob, MacaGenerateOptions, MacaWaitOptions, MacaRelationship,
+} from './maca/interface.js';
 export type { CacheNamespace, CacheStats } from './cache/interface.js';
 export type {
   InstanceNamespace, ListenOptions, SendMessageOptions, RecordThinkingOptions,

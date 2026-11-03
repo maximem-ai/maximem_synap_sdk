@@ -39,6 +39,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 
+from ..utils.validators import normalize_conversation_id
+
 logger = logging.getLogger("synap.sdk.cache.short_term_store")
 
 DEFAULT_MAX_CONVERSATIONS = 100
@@ -178,6 +180,7 @@ class ShortTermContextStore:
         """Return the cached entry or ``None``. Age-evicts on read."""
         if not conversation_id:
             return None
+        conversation_id = normalize_conversation_id(conversation_id)
         with self._lock:
             entry = self._cache.get(conversation_id)
             if entry is None:
@@ -229,6 +232,7 @@ class ShortTermContextStore:
         """
         if not conversation_id:
             return
+        conversation_id = normalize_conversation_id(conversation_id)
         ts = timestamp or self._now()
         if self._archive is not None:
             try:
@@ -268,6 +272,7 @@ class ShortTermContextStore:
         """
         if not conversation_id:
             return
+        conversation_id = normalize_conversation_id(conversation_id)
         with self._lock:
             entry = self._cache.get(conversation_id)
             if entry is not None:
@@ -331,6 +336,7 @@ class ShortTermContextStore:
         if not conv_id:
             logger.debug("apply_compaction: bundle has no conversation_id, ignoring")
             return
+        conv_id = normalize_conversation_id(conv_id)
 
         end_ts = _parse_iso(cc.get("end_timestamp") or cc.get("compacted_at"))
         compacted_at = _parse_iso(cc.get("compacted_at"))
@@ -433,6 +439,7 @@ class ShortTermContextStore:
         """
         if not conversation_id:
             return
+        conversation_id = normalize_conversation_id(conversation_id)
         with self._lock:
             entry = self._cache.get(conversation_id)
             if entry is None or entry.shared:
@@ -448,6 +455,7 @@ class ShortTermContextStore:
             entry.synced = True
 
     def invalidate(self, conversation_id: str) -> None:
+        conversation_id = normalize_conversation_id(conversation_id)
         with self._lock:
             self._cache.pop(conversation_id, None)
 

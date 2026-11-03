@@ -30,6 +30,7 @@ from typing import Literal, Optional
 
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
+    coerce_conversation_id,
     SynapIntegrationError,
     run_async,
     wrap_sdk_errors_async,
@@ -82,7 +83,7 @@ async def _fetch_st_block(
             style=style,
         ):
             response = await sdk.conversation.context.get_context_for_prompt(
-                conversation_id=conversation_id,
+                conversation_id=coerce_conversation_id(conversation_id),
                 style=style,
             )
     except SynapIntegrationError:

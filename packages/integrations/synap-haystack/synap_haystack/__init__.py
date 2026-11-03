@@ -21,6 +21,15 @@ Store-centric, matching the official ``mem0-haystack`` shape:
   the conversation for a prompt builder.
 
 The components accept a ready ``store=...`` or an ``sdk=...`` + scope kwargs.
+
+Deeper scope ladders: if your account has levels beyond customer and user, pass
+``scope_path`` (level key to value). It is sent on every search and every turn
+only when set::
+
+    path = {"customer": "acme", "team": "payments", "user": "dana"}
+    store = SynapMemoryStore(sdk, user_id="dana", customer_id="acme", scope_path=path)
+
+Needs a ``maximem-synap`` release whose ``fetch`` accepts ``scope_path``.
 """
 
 from synap_haystack.store import SynapMemoryStore

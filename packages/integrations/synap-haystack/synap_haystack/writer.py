@@ -23,12 +23,13 @@ Semantics:
 """
 
 import logging
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from haystack import Document, component
 from haystack.dataclasses import ChatMessage
 
 from maximem_synap import MaximemSynapSDK
+from synap_haystack.retriever import _component_to_dict
 from synap_haystack.store import SynapMemoryStore
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,9 @@ class SynapMemoryWriter:
 
         # or share an existing store:
         writer = SynapMemoryWriter(store=store, conversation_id="c1")
+
+    ``scope_path`` (a deeper scope ladder's level path) goes to the store this
+    builds; with a ready ``store``, set it on the store (passing both raises).
     """
 
     def __init__(
@@ -57,6 +61,7 @@ class SynapMemoryWriter:
         customer_id: str = "",
         *,
         store: Optional[SynapMemoryStore] = None,
+        scope_path: Optional[Mapping[str, str]] = None,
     ):
         if not conversation_id and (store is None or store.conversation_id is None):
             raise ValueError(
@@ -65,11 +70,16 @@ class SynapMemoryWriter:
             )
 
         if store is not None:
+            if scope_path:
+                raise ValueError(
+                    "SynapMemoryWriter: scope_path with a ready store is ambiguous; "
+                    "set scope_path on the store"
+                )
             self.store = store
         else:
             if sdk is None:
                 raise ValueError("SynapMemoryWriter requires either a store or an sdk")
-            if not user_id and not customer_id:
+            if not user_id and not customer_id and not scope_path:
                 raise ValueError(
                     "SynapMemoryWriter requires a non-empty user_id or customer_id"
                 )
@@ -78,9 +88,13 @@ class SynapMemoryWriter:
                 user_id=user_id or None,
                 customer_id=customer_id,
                 conversation_id=conversation_id,
+                **({"scope_path": scope_path} if scope_path else {}),
             )
         # Per-run conversation id: explicit arg wins, else the store's default.
         self.conversation_id = conversation_id or self.store.conversation_id
+
+    def to_dict(self) -> Dict[str, Any]:
+        return _component_to_dict(self)
 
     @component.output_types(
         written_count=int,

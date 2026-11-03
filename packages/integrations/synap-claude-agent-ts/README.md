@@ -98,6 +98,20 @@ const options = {
 
 Use both together for automatic context injection plus explicit agent read/write.
 
+## Deeper scope ladders
+
+If your account has a scope level between customer and user (for example `team`), pass the path once at construction. The MCP tools never show it to the model.
+
+```ts
+const scopePath = { customer: "acme", team: "eng", user: "u1" };
+const hooks = createSynapHooks({ sdk, userId: "u1", customerId: "acme", scopePath });
+const server = createSynapMcpServer({ sdk, userId: "u1", customerId: "acme", scopePath });
+```
+
+Leave it out on a default ladder: calls are unchanged. Needs `@maximem/synap-js-sdk` >= 0.7.1, the first release whose unified fetch sends the right path (0.7.0 sends the person path to the customer sub-fetch) (a peer dependency). With an older SDK a `scopePath` would be silently ignored and read and write at the wrong level, so building with one throws.
+
+The server reads the path's `user` and `customer` over any id sent beside them, so `userId` and `customerId` must agree with those two keys of the path. A disagreement throws `SynapScopeError` when the hooks or the MCP server are built, before any call. An empty `customerId` is allowed.
+
 ## Error policy
 
 - **Hooks** never throw — SDK failures log and fall through (no context injected, no prompt recorded).

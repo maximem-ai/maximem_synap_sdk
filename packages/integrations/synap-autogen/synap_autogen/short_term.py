@@ -36,6 +36,7 @@ from autogen_core.model_context import (
 from autogen_core.models import AssistantMessage, LLMMessage
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
+    coerce_conversation_id,
     SynapIntegrationError,
     fetch_compacted_history,
     wrap_sdk_errors_async,
@@ -175,7 +176,7 @@ class SynapShortTermChatContext(ChatCompletionContext):
                 style=self._style,
             ):
                 response = await self._sdk.conversation.context.get_context_for_prompt(
-                    conversation_id=self._conversation_id,
+                    conversation_id=coerce_conversation_id(self._conversation_id),
                     style=self._style,
                 )
             history = await fetch_compacted_history(

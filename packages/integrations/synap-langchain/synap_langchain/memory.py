@@ -14,7 +14,7 @@ Error-handling split:
 """
 
 import logging
-from typing import List, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -22,6 +22,8 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
     SynapIntegrationError,
+    coerce_conversation_id,
+    ensure_ids_match_path,
     record_turn,
     run_async,
 )
@@ -45,6 +47,8 @@ class SynapChatMessageHistory(BaseChatMessageHistory):
         conversation_id: str,
         user_id: str,
         customer_id: str = "",
+        *,
+        scope_path: Optional[Mapping[str, str]] = None,
     ):
         if sdk is None:
             raise ValueError("SynapChatMessageHistory requires a non-None sdk")
@@ -56,11 +60,17 @@ class SynapChatMessageHistory(BaseChatMessageHistory):
             raise ValueError(
                 "SynapChatMessageHistory requires a non-empty user_id"
             )
+        ensure_ids_match_path(
+            scope_path, user_id=user_id, customer_id=customer_id or None,
+            where="SynapChatMessageHistory")
 
         self.sdk = sdk
         self.conversation_id = conversation_id
         self.user_id = user_id
         self.customer_id = customer_id
+        # The conversation's level on a deeper scope ladder; passed to the
+        # turn helpers only when set.
+        self.scope_path = dict(scope_path) if scope_path else None
 
     @classmethod
     def from_instance(
@@ -69,6 +79,8 @@ class SynapChatMessageHistory(BaseChatMessageHistory):
         conversation_id: str,
         user_id: str,
         customer_id: str = "",
+        *,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> "SynapChatMessageHistory":
         """Create from an instance ID. Initializes the SDK automatically."""
         sdk = MaximemSynapSDK(instance_id=instance_id)
@@ -77,6 +89,7 @@ class SynapChatMessageHistory(BaseChatMessageHistory):
             conversation_id=conversation_id,
             user_id=user_id,
             customer_id=customer_id,
+            scope_path=scope_path,
         )
 
     @property
@@ -87,7 +100,8 @@ class SynapChatMessageHistory(BaseChatMessageHistory):
         """Best-effort retrieve. Failures return an empty list + ERROR log."""
         try:
             prompt_ctx = await self.sdk.conversation.context.get_context_for_prompt(
-                conversation_id=self.conversation_id,
+                # the SDK's REST read wants a UUID; the caller's id may be any string
+                conversation_id=coerce_conversation_id(self.conversation_id),
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(
@@ -147,6 +161,9 @@ class SynapChatMessageHistory(BaseChatMessageHistory):
             text = message_text(msg)
             if not text.strip():
                 continue  # tool calls only: no words to record
+            extra: Dict[str, Any] = {}
+            if self.scope_path:
+                extra["scope_path"] = dict(self.scope_path)
             if not await record_turn(
                 self.sdk,
                 role=role,
@@ -154,6 +171,7 @@ class SynapChatMessageHistory(BaseChatMessageHistory):
                 conversation_id=self.conversation_id,
                 user_id=self.user_id,
                 customer_id=self.customer_id,
+                **extra,
             ):
                 raise SynapIntegrationError(
                     "langchain.aadd_messages",

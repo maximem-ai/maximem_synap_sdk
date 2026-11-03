@@ -127,6 +127,23 @@ synap.wrap(model, { userId: 'user_123', customerId: 'acme_corp' })
 
 All three can be combined — Synap fetches and merges context from all applicable scopes.
 
+### Deeper scope ladders
+
+If your account has a scope level between customer and user (for example `team`), pass the path once. It is sent as `scope` on context fetches and on your conversation turns, and a bundle anticipated for another level is never served to this one.
+
+```typescript
+synap.wrap(model, {
+  userId: 'u1', customerId: 'acme',
+  scopePath: { customer: 'acme', team: 'eng', user: 'u1' },
+})
+```
+
+Leave it out on a default ladder: requests are unchanged. The server must accept a path for your account (nested scoping on, ladder ratified). This package makes its own HTTP and gRPC calls and does not use `@maximem/synap-js-sdk`, so there is no SDK version to meet.
+
+The server reads the path's `user` and `customer` over any id sent beside them, so `userId` and `customerId` must agree with those two keys of the path. A disagreement throws `SynapScopeError` from `wrap()` / `createSynapMiddleware`, before any request. An empty `customerId` is allowed.
+
+**Anticipation cache on an account with nested scoping live.** When nested scoping is live for your instance (switched on, and your ladder ratified), the server stamps every bundle it pushes with the level it was built for, and the cache serves a bundle only to a request that names that same level. A caller that sends ids only (no `scopePath`) therefore never gets a cache hit: each call falls back to the HTTP context fetch, which is slower and costs more per call. It does not leak anything; it is the fail-closed direction. To get cache hits, pass the `scopePath` for the level you read at. Accounts without nested scoping are unaffected.
+
 ---
 
 ## gRPC stream (opens by default)

@@ -21,6 +21,7 @@ import pytest
 from synap_crewai.short_term import build_synap_st_backstory
 from synap_integrations_common import SynapIntegrationError
 from synap_integrations_common.testing import failing_sdk  # noqa: F401
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +130,7 @@ class TestHappyPath:
         sdk = _fake_sdk()
         await build_synap_st_backstory(sdk, "conv_xyz123")
         sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-            conversation_id="conv_xyz123",
+            conversation_id=coerce_conversation_id("conv_xyz123"),
             style="narrative",
         )
 
@@ -138,7 +139,7 @@ class TestHappyPath:
         sdk = _fake_sdk()
         await build_synap_st_backstory(sdk, "conv_abc", style="bullet_points")
         sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-            conversation_id="conv_abc",
+            conversation_id=coerce_conversation_id("conv_abc"),
             style="bullet_points",
         )
 
