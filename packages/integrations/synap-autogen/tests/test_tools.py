@@ -36,6 +36,7 @@ from synap_autogen.tools import (
     _await_with_cancellation,
 )
 from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +191,7 @@ class TestSynapSearchToolHappyPath:
         sdk = _make_sdk_for_search("ctx")
         tool = SynapSearchTool(sdk=sdk, user_id="u1", conversation_id="conv_xyz")
         await tool.run(SearchMemoryArgs(query="q"), ct)
-        assert sdk.fetch.call_args.kwargs["conversation_id"] == "conv_xyz"
+        assert sdk.fetch.call_args.kwargs["conversation_id"] == coerce_conversation_id("conv_xyz")
 
     @pytest.mark.asyncio
     async def test_forwards_mode(self, ct):

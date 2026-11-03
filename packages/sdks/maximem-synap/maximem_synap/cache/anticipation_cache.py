@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from ..behavior import semantic_match_params, thresholds
 from .bm25 import BM25, tokenize
+from ..utils.validators import normalize_conversation_id
 
 logger = logging.getLogger("synap.sdk.cache.anticipation")
 
@@ -230,7 +231,8 @@ def _unowned_elsewhere(entry_entity: str, entry_conversation: Optional[str],
     conversation, could be answered from another user's conversation.
     """
     return (entry_entity == "_any" and entry_conversation is not None
-            and entry_conversation != conversation_id)
+            and normalize_conversation_id(entry_conversation)
+            != normalize_conversation_id(conversation_id))
 
 
 def invalidate_on_write_enabled() -> bool:

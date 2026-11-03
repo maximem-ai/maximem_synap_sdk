@@ -2,6 +2,7 @@ export { createSynapHooks } from "./hooks.js";
 export type { CreateSynapHooksOptions } from "./hooks.js";
 export { createSynapMcpServer, buildSynapTools } from "./mcp-server.js";
 export { setAutoListen } from "./stream-events.js";
+export { SynapScopeError } from "./scope-guard.js";
 export type { CreateSynapMcpServerOptions } from "./mcp-server.js";
 export { createSynapShortTermHook } from "./short_term.js";
 export type {

@@ -3,6 +3,7 @@
 import pytest
 from maximem_synap.models.context import ContextForPromptResponse
 from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 from synap_deepagents.short_term import (
     compose_system_prompt,
@@ -81,7 +82,7 @@ async def test_fetch_passes_conversation_id(mock_sdk):
     await fetch_st_block(mock_sdk, "conv-abc")
     assert mock_sdk.conversation.context.get_context_for_prompt.await_args.kwargs[
         "conversation_id"
-    ] == "conv-abc"
+    ] == coerce_conversation_id("conv-abc")
 
 
 async def test_fetch_returns_empty_when_unavailable(mock_sdk):

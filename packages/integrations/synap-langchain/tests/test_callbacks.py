@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from synap_langchain.callbacks import SynapCallbackHandler, _extract_text
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +146,7 @@ async def test_on_chat_model_start_records_last_human_message(handler, mock_sdk)
     )
 
     mock_sdk.conversation.record_message.assert_awaited_once_with(
-        conversation_id="conv-1",
+        conversation_id=coerce_conversation_id("conv-1"),
         role="user",
         content="hello world",
         user_id="user-1",
@@ -220,7 +221,7 @@ async def test_on_llm_end_records_assistant_response(handler, mock_sdk):
     await handler.on_llm_end(response=response, run_id=uuid4())
 
     mock_sdk.conversation.record_message.assert_awaited_once_with(
-        conversation_id="conv-1",
+        conversation_id=coerce_conversation_id("conv-1"),
         role="assistant",
         content="I can help with that",
         user_id="user-1",

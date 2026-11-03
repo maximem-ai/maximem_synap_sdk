@@ -24,6 +24,7 @@ import pytest
 
 from synap_integrations_common import SynapIntegrationError
 from synap_pydantic_ai.deps import SynapDeps, register_synap_tools
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +269,7 @@ class TestSearchMemoryHappyPath:
         await search_fn(ctx, "query")
 
         call_kwargs = sdk.fetch.call_args.kwargs
-        assert call_kwargs["conversation_id"] == "conv-99"
+        assert call_kwargs["conversation_id"] == coerce_conversation_id("conv-99")
 
     @pytest.mark.asyncio
     async def test_passes_mode_accurate(self):
@@ -517,7 +518,7 @@ class TestInjectMemoryContextHappyPath:
         await inject_fn(ctx)
 
         call_kwargs = sdk.fetch.call_args.kwargs
-        assert call_kwargs["conversation_id"] == "conv-inject"
+        assert call_kwargs["conversation_id"] == coerce_conversation_id("conv-inject")
 
 
 class TestInjectMemoryContextFailurePath:

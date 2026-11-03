@@ -39,7 +39,7 @@ from typing import Any, List, Literal, Optional, Tuple
 from strands.hooks import BeforeInvocationEvent, HookProvider, HookRegistry
 
 from maximem_synap import MaximemSynapSDK
-from synap_integrations_common import SynapIntegrationError, wrap_sdk_errors_async
+from synap_integrations_common import SynapIntegrationError, wrap_sdk_errors_async, coerce_conversation_id
 
 from synap_strands_agents.history import install_synap_history
 
@@ -90,7 +90,7 @@ async def _fetch_st_block(
             style=style,
         ):
             response = await sdk.conversation.context.get_context_for_prompt(
-                conversation_id=conversation_id,
+                conversation_id=coerce_conversation_id(conversation_id),
                 style=style,
             )
     except SynapIntegrationError:

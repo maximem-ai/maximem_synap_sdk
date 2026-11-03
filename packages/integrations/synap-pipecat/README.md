@@ -8,7 +8,7 @@ Synap integration for [Pipecat](https://docs.pipecat.ai) — preload long-term m
 pip install synap-pipecat
 ```
 
-Requires `pipecat-ai>=0.0.80`, `maximem-synap>=0.2.0`.
+Requires `pipecat-ai>=0.0.80`, `maximem-synap>=0.7.1`.
 
 ## Quickstart
 
@@ -75,9 +75,24 @@ With `context=` given, after each turn it records the recorder checks whether Sy
 - **Writes** (`SynapRecorder`) that fail on both the stream and REST are logged and pushed upstream as an `ErrorFrame` carrying a `SynapIntegrationError`; the pipeline itself stays alive (errors propagate as frames, not exceptions).
 - Non-matching frames pass through untouched in both processors — standard Pipecat `push_frame` contract.
 
+## Deeper scope ladders
+
+If your account's scope ladder has levels beyond customer and user, pass the level to read and write at as `scope_path` (key order does not matter; the server orders by ladder position). It is forwarded to `sdk.fetch` and to the user and assistant turns, only when set; nothing changes for callers who do not pass it, and no extra network call is made per turn.
+
+```python
+path = {"customer": "acme", "team": "payments", "user": "dana"}  # e.g. from ScopeAddress.scope_path
+memory = SynapMemoryProcessor(sdk, user_id="dana", customer_id="acme", context=ctx, scope_path=path)
+recorder = SynapRecorder(sdk, user_id="dana", customer_id="acme", context=ctx, scope_path=path)
+```
+
+The server lets a path's `user` and `customer` levels win over flat ids, so `user_id` / `customer_id` that disagree with the path raise `SynapIntegrationError` at construction, before anything is sent. If you reassign `processor.user_id` or `.customer_id` later, the processor skips that read or turn and logs an ERROR (it never raises inside the pipeline).
+
+`SynapShortTermProcessor` reads through the conversation, which remembers its own level, so it takes no `scope_path`. Needs a `maximem-synap` release whose `sdk.fetch` accepts `scope_path`.
+
 ## Constructor args (both processors)
 
 - `sdk`: a configured `MaximemSynapSDK`
 - `user_id`: required — Synap memory is user-scoped
 - `customer_id`: B2B instances only, where it is required. Not accepted on a B2C instance, which rejects it with HTTP 400.
+- `scope_path` *(memory processor, recorder)*: optional `{level_key: value}` for a deeper scope ladder; see above
 - `conversation_id` *(recorder, short-term processor)*: optional explicit id for the recorder (auto-generated when absent), required for the short-term processor: pass the same value to both

@@ -16,6 +16,8 @@ sys.path.insert(0, os.path.join(_here, "../../synap-integrations-common"))
 from synap_integrations_common.testing import (  # noqa: F401
     mock_sdk,
     failing_sdk,
+    recording_sdk,
+    make_ladder,
     make_fact,
     make_preference,
     make_episode,

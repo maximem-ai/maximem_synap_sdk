@@ -6,13 +6,13 @@ memory, rather than doing it automatically on every turn.
 """
 
 import logging
-from typing import Any, Optional, Type
+from typing import Any, Dict, Optional, Type
 
 from langchain_core.tools import BaseTool
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from maximem_synap import MaximemSynapSDK
-from synap_integrations_common import run_async, wrap_sdk_errors_async
+from synap_integrations_common import ensure_ids_match_path, run_async, wrap_sdk_errors_async, coerce_conversation_id
 
 logger = logging.getLogger(__name__)
 
@@ -52,22 +52,43 @@ class SynapSearchTool(BaseTool):
     conversation_id: Optional[str] = None
     mode: str = "accurate"
     max_results: int = 10
+    # The level to read on a deeper scope ladder; sent to ``sdk.fetch`` only
+    # when set.
+    scope_path: Optional[Dict[str, str]] = None
+
+    def _check_ids(self) -> None:
+        # The server lets the path's user/customer win over these ids. Checked at
+        # construction and again before every SDK call, because the fields are
+        # plain attributes that can be reassigned after construction.
+        ensure_ids_match_path(
+            self.scope_path, user_id=self.user_id,
+            customer_id=self.customer_id or None, where="SynapSearchTool")
+
+    @model_validator(mode="after")
+    def _ids_match_scope_path(self) -> "SynapSearchTool":
+        self._check_ids()
+        return self
 
     def _run(self, query: str, **kwargs: Any) -> str:
         return run_async(self._arun(query, **kwargs))
 
     async def _arun(self, query: str, **kwargs: Any) -> str:
+        self._check_ids()
         async with wrap_sdk_errors_async(
             "langchain.search_memory", logger, user_id=self.user_id
         ):
+            extra: Dict[str, Any] = {}
+            if self.scope_path:
+                extra["scope_path"] = dict(self.scope_path)
             response = await self.sdk.fetch(
-                conversation_id=self.conversation_id,
+                conversation_id=coerce_conversation_id(self.conversation_id),
                 user_id=self.user_id,
                 customer_id=self.customer_id,
                 search_query=[query],
                 mode=self.mode,
                 max_results=self.max_results,
                 include_conversation_context=False,
+                **extra,
             )
         return response.formatted_context or "No relevant memories found."
 
@@ -94,17 +115,38 @@ class SynapStoreTool(BaseTool):
     sdk: MaximemSynapSDK
     user_id: str
     customer_id: Optional[str] = None
+    # The level to write to on a deeper scope ladder; sent to
+    # ``sdk.memories.create`` as ``scope=`` only when set.
+    scope_path: Optional[Dict[str, str]] = None
+
+    def _check_ids(self) -> None:
+        # The server lets the path's user/customer win over these ids. Checked at
+        # construction and again before every SDK call, because the fields are
+        # plain attributes that can be reassigned after construction.
+        ensure_ids_match_path(
+            self.scope_path, user_id=self.user_id,
+            customer_id=self.customer_id or None, where="SynapStoreTool")
+
+    @model_validator(mode="after")
+    def _ids_match_scope_path(self) -> "SynapStoreTool":
+        self._check_ids()
+        return self
 
     def _run(self, content: str, **kwargs: Any) -> str:
         return run_async(self._arun(content, **kwargs))
 
     async def _arun(self, content: str, **kwargs: Any) -> str:
+        self._check_ids()
         async with wrap_sdk_errors_async(
             "langchain.store_memory", logger, user_id=self.user_id
         ):
+            extra: Dict[str, Any] = {}
+            if self.scope_path:
+                extra["scope"] = dict(self.scope_path)
             result = await self.sdk.memories.create(
                 document=content,
                 user_id=self.user_id,
                 customer_id=self.customer_id or "",
+                **extra,
             )
         return f"Memory stored (ingestion_id: {result.ingestion_id})"

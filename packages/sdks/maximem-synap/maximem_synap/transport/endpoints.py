@@ -37,4 +37,6 @@ ENDPOINTS: Final[Dict[str, Dict[str, object]]] = {
     "credits_estimate": {"method": "POST", "path": "/v1/credits/estimate", "idempotent": True},
     "credits_redeem": {"method": "POST", "path": "/v1/credits/redeem", "idempotent": False},
     "telemetry_batch": {"method": "POST", "path": "/v1/telemetry/batch", "idempotent": False},
+    "maca_generate": {"method": "POST", "path": "/v1/maca/generate", "idempotent": False},
+    "maca_job": {"method": "GET", "path": "/v1/maca/jobs/{job_id}", "idempotent": True},
 }

@@ -34,7 +34,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from typing import List, Optional
+from typing import List, Mapping, Optional
 
 from maximem_synap import MaximemSynapSDK
 
@@ -52,7 +52,7 @@ from pipecat.frames.frames import (
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
-from synap_integrations_common import SynapIntegrationError, is_synap_history
+from synap_integrations_common import SynapIntegrationError, ensure_ids_match_path, is_synap_history
 from synap_integrations_common.stream_events import (
     record_turn,
     report_reasoning,
@@ -81,6 +81,23 @@ _SYSTEM_MEMORY_PREAMBLE = (
 )
 
 
+def _ids_match(proc: "FrameProcessor", where: str) -> bool:
+    """Whether the processor's ids agree with its scope path.
+
+    The ids are public attributes and can be reassigned after construction. A
+    processor must not break the pipeline, so a mismatch is skipped and logged
+    at ERROR with only the helper's fingerprints, never the ids.
+    """
+    try:
+        ensure_ids_match_path(
+            proc.scope_path, user_id=proc.user_id,
+            customer_id=proc.customer_id or None, where=where)
+    except SynapIntegrationError as exc:
+        logger.error("%s skipped: %s", where, exc)
+        return False
+    return True
+
+
 class SynapMemoryProcessor(FrameProcessor):
     """Injects Synap context into an ``LLMContext`` on each transcription.
 
@@ -106,6 +123,10 @@ class SynapMemoryProcessor(FrameProcessor):
         max_results: Cap on ``sdk.fetch`` per turn.
         include_conversation_context: Whether to request Synap's recent
             conversation block alongside the semantic memory.
+        scope_path: For an account with a deeper scope ladder than customer
+            and user: the level to read at, as ``{level_key: value}`` (see
+            ``ScopeAddress.scope_path``). Forwarded to ``sdk.fetch`` only when
+            set. Leave unset on the default ladder.
     """
 
     def __init__(
@@ -118,6 +139,7 @@ class SynapMemoryProcessor(FrameProcessor):
         mode: str = "accurate",
         max_results: int = 10,
         include_conversation_context: bool = False,
+        scope_path: Optional[Mapping[str, str]] = None,
         name: Optional[str] = None,
         **kwargs,
     ) -> None:
@@ -125,6 +147,9 @@ class SynapMemoryProcessor(FrameProcessor):
             raise ValueError("SynapMemoryProcessor requires a non-None sdk")
         if not user_id:
             raise ValueError("SynapMemoryProcessor requires a non-empty user_id")
+        ensure_ids_match_path(
+            scope_path, user_id=user_id, customer_id=customer_id or None,
+            where="SynapMemoryProcessor")
         super().__init__(name=name, **kwargs)
         self.sdk = sdk
         self.user_id = user_id
@@ -133,6 +158,7 @@ class SynapMemoryProcessor(FrameProcessor):
         self.mode = mode
         self.max_results = max_results
         self.include_conversation_context = include_conversation_context
+        self.scope_path = dict(scope_path) if scope_path else None
         self._last_injected_message: Optional[dict] = None
 
     def set_context(self, context: LLMContext) -> None:
@@ -173,6 +199,9 @@ class SynapMemoryProcessor(FrameProcessor):
         if self._context is None:
             return
 
+        if not _ids_match(self, "SynapMemoryProcessor._inject_context"):
+            return
+        extra = {"scope_path": dict(self.scope_path)} if self.scope_path else {}
         try:
             response = await self.sdk.fetch(
                 user_id=self.user_id,
@@ -181,6 +210,7 @@ class SynapMemoryProcessor(FrameProcessor):
                 max_results=self.max_results,
                 mode=self.mode,
                 include_conversation_context=self.include_conversation_context,
+                **extra,
             )
         except Exception as exc:  # noqa: BLE001 — read-side graceful degrade
             logger.error(
@@ -247,6 +277,10 @@ class SynapRecorder(FrameProcessor):
             user/assistant aggregators). Used to recover the user turn when
             ``TranscriptionFrame`` never reaches this processor. It is also
             the context Synap's compaction is spliced into.
+        scope_path: For an account with a deeper scope ladder: the level the
+            conversation belongs to, as ``{level_key: value}``. Forwarded with
+            the user and assistant turns only when set. (Tool-call, result and
+            reasoning events carry no path; the server ignores one there.)
     """
 
     def __init__(
@@ -257,6 +291,7 @@ class SynapRecorder(FrameProcessor):
         customer_id: str = "",
         conversation_id: Optional[str] = None,
         context: Optional[LLMContext] = None,
+        scope_path: Optional[Mapping[str, str]] = None,
         name: Optional[str] = None,
         **kwargs,
     ) -> None:
@@ -264,12 +299,16 @@ class SynapRecorder(FrameProcessor):
             raise ValueError("SynapRecorder requires a non-None sdk")
         if not user_id:
             raise ValueError("SynapRecorder requires a non-empty user_id")
+        ensure_ids_match_path(
+            scope_path, user_id=user_id, customer_id=customer_id or None,
+            where="SynapRecorder")
         super().__init__(name=name, **kwargs)
         self.sdk = sdk
         self.user_id = user_id
         self.customer_id = customer_id
         self.conversation_id = conversation_id or str(uuid.uuid4())
         self._context = context
+        self.scope_path = dict(scope_path) if scope_path else None
 
         self._user_buffer: Optional[str] = None
         self._assistant_parts: List[str] = []
@@ -465,6 +504,8 @@ class SynapRecorder(FrameProcessor):
 
         if not user_text and not assistant_text:
             return
+        if not _ids_match(self, "SynapRecorder._flush"):
+            return  # the turn is dropped rather than filed under another identity
 
         # Stream first (opened here if the caller did not), REST only for what
         # the stream could not take, never both: the server persists the turn
@@ -473,6 +514,7 @@ class SynapRecorder(FrameProcessor):
         if user_text:
             self._last_recorded_user = " ".join(user_text.split())
         failed = False
+        turn_extra = {"scope_path": dict(self.scope_path)} if self.scope_path else {}
         for role, text in (("user", user_text), ("assistant", assistant_text)):
             if role == "assistant" and from_context:
                 await self._report_context_tools()  # before the reply they led to
@@ -480,6 +522,7 @@ class SynapRecorder(FrameProcessor):
                 self.sdk, role=role, content=text,
                 conversation_id=self.conversation_id,
                 user_id=self.user_id, customer_id=self.customer_id,
+                **turn_extra,
             ):
                 failed = True
         if failed:

@@ -7,7 +7,8 @@
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 
-import type { SynapIdentityOptions } from "./types.js";
+import { withScopePath, type SynapIdentityOptions } from "./types.js";
+import { assertSdkSupportsScopePath, ensureIdsMatchPath } from "./scope-guard.js";
 
 export interface SynapToolsOptions extends SynapIdentityOptions {
   /**
@@ -19,9 +20,11 @@ export interface SynapToolsOptions extends SynapIdentityOptions {
 }
 
 export function synapSearchTool(options: SynapToolsOptions) {
-  const { sdk, userId, customerId = "", conversationId, mode = "accurate" } = options;
+  const { sdk, userId, customerId = "", conversationId, mode = "accurate", scopePath } = options;
   if (!sdk) throw new Error("synapSearchTool requires a non-null sdk");
   if (!userId) throw new Error("synapSearchTool requires a non-empty userId");
+  assertSdkSupportsScopePath(sdk, scopePath, "synapSearchTool");
+  ensureIdsMatchPath(scopePath, { userId, customerId, where: "synapSearchTool" });
 
   return createTool({
     id: "synap_search",
@@ -58,6 +61,7 @@ export function synapSearchTool(options: SynapToolsOptions) {
           max_results: maxResults,
           mode,
           include_conversation_context: false,
+          ...withScopePath("scope_path", scopePath),
         });
         const text = (response.formatted_context ?? "").trim();
         return { formattedContext: text, available: !!text };
@@ -71,9 +75,11 @@ export function synapSearchTool(options: SynapToolsOptions) {
 }
 
 export function synapStoreTool(options: SynapToolsOptions) {
-  const { sdk, userId, customerId = "" } = options;
+  const { sdk, userId, customerId = "", scopePath } = options;
   if (!sdk) throw new Error("synapStoreTool requires a non-null sdk");
   if (!userId) throw new Error("synapStoreTool requires a non-empty userId");
+  assertSdkSupportsScopePath(sdk, scopePath, "synapStoreTool");
+  ensureIdsMatchPath(scopePath, { userId, customerId, where: "synapStoreTool" });
 
   return createTool({
     id: "synap_store",
@@ -108,6 +114,7 @@ export function synapStoreTool(options: SynapToolsOptions) {
           user_id: userId,
           customer_id: customerId || null,
           metadata,
+          ...withScopePath("scope", scopePath),
         });
         return { recorded: true, ingestionId: result.ingestion_id ?? "" };
       } catch (err) {

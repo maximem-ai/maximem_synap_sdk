@@ -75,6 +75,7 @@ from autogen_core.models import (
 
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
+    ensure_ids_match_path,
     is_synap_history,
     record_turn,
     report_reasoning,
@@ -159,6 +160,10 @@ class SynapStreamingChatContext(ChatCompletionContext):
             part of, and no session is opened.
         user_id: Synap user scope. **Required.**
         customer_id: B2B only. Not accepted on a B2C instance.
+        scope_path: Deeper scope ladders only: the level the conversation
+            belongs to, as ``{level_key: value}``. Sent with the user and
+            assistant turns only when set; tool and reasoning events are
+            unchanged.
         inner: Optional inner context to wrap.
         report_tool_results: Whether tool results are reported. On by default,
             because a result is what tells anticipation how the turn is
@@ -189,6 +194,7 @@ class SynapStreamingChatContext(ChatCompletionContext):
         inner: Optional[ChatCompletionContext] = None,
         report_tool_results: bool = True,
         report_thoughts: bool = True,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> None:
         if sdk is None:
             raise ValueError("SynapStreamingChatContext requires a non-None sdk")
@@ -198,12 +204,16 @@ class SynapStreamingChatContext(ChatCompletionContext):
             )
         if not user_id or not str(user_id).strip():
             raise ValueError("SynapStreamingChatContext requires a non-empty user_id")
+        ensure_ids_match_path(
+            scope_path, user_id=user_id, customer_id=customer_id or None,
+            where="SynapStreamingChatContext")
 
         super().__init__()
         self._sdk = sdk
         self._conversation_id = conversation_id
         self._user_id = user_id
         self._customer_id = customer_id
+        self._scope_path: Optional[dict] = dict(scope_path) if scope_path else None
         self._inner = inner or UnboundedChatCompletionContext()
         self._report_tool_results = report_tool_results
         self._report_thoughts = report_thoughts
@@ -220,6 +230,17 @@ class SynapStreamingChatContext(ChatCompletionContext):
             "user_id": self._user_id,
             "customer_id": self._customer_id,
         }
+
+    def _turn_ids(self) -> dict:
+        """``_ids()`` for a user or assistant turn: plus the ladder path, only when set.
+
+        Only ``record_turn`` takes ``scope_path``; tool calls, results and
+        thoughts keep the plain ids.
+        """
+        ids = self._ids()
+        if self._scope_path:
+            ids["scope_path"] = dict(self._scope_path)
+        return ids
 
     # ── ChatCompletionContext: reads and state are pass-through ─────────
 
@@ -283,7 +304,7 @@ class SynapStreamingChatContext(ChatCompletionContext):
                     return
                 _remember(self._conversation_id, id(self), source, text)
                 await record_turn(
-                    self._sdk, role="user", content=text, **self._ids()
+                    self._sdk, role="user", content=text, **self._turn_ids()
                 )
             return
 
@@ -331,7 +352,7 @@ class SynapStreamingChatContext(ChatCompletionContext):
                 self._last_assistant_text = text
                 _remember(self._conversation_id, id(self), self._agent_source, text)
                 await record_turn(
-                    self._sdk, role="assistant", content=text, **self._ids()
+                    self._sdk, role="assistant", content=text, **self._turn_ids()
                 )
             return
 
@@ -367,7 +388,7 @@ class SynapStreamingChatContext(ChatCompletionContext):
                 return
             self._last_assistant_text = text
             _remember(self._conversation_id, id(self), self._agent_source, text)
-            await record_turn(self._sdk, role="assistant", content=text, **self._ids())
+            await record_turn(self._sdk, role="assistant", content=text, **self._turn_ids())
         except Exception:  # noqa: BLE001 — a tap must never break the run
             logger.debug("synap_autogen: writing the tool-call reply failed", exc_info=True)
 
@@ -406,7 +427,7 @@ class SynapStreamingChatContext(ChatCompletionContext):
         self._last_assistant_text = text
         _remember(self._conversation_id, id(self), self._agent_source, text)
         return await record_turn(
-            self._sdk, role="assistant", content=text, **self._ids()
+            self._sdk, role="assistant", content=text, **self._turn_ids()
         )
 
 

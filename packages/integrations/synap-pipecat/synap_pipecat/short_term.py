@@ -38,6 +38,7 @@ from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from synap_integrations_common import (
+    coerce_conversation_id,
     SynapIntegrationError,
     wrap_sdk_errors_async,
 )
@@ -179,7 +180,7 @@ class SynapShortTermProcessor(FrameProcessor):
                 style=self.style,
             ):
                 response = await self.sdk.conversation.context.get_context_for_prompt(
-                    conversation_id=self.conversation_id,
+                    conversation_id=coerce_conversation_id(self.conversation_id),
                     style=self.style,
                 )
             if getattr(response, "available", False):

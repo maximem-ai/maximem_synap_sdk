@@ -41,7 +41,7 @@ throws aborts the whole run.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 from uuid import UUID
 
 from langchain_core.messages import BaseMessage
@@ -138,6 +138,13 @@ class SynapLangGraphCallbackHandler(SynapCallbackHandler):
     rather than sharing one across several: the user-turn de-duplication is
     per instance.
 
+    ``scope_path`` (optional) names the conversation's level on an account with
+    a deeper scope ladder; it is sent with the user and assistant turns only.
+
+    ⚠ This handler hears LangChain model and tool callbacks. A graph whose LLM
+    is NOT a LangChain model (an in-house client) reports nothing through it:
+    use the nodes in :mod:`synap_langgraph.reporting` there.
+
     All five events, all verified firing inside a compiled graph: the user
     turn (``on_chat_model_start``), the reasoning step (read off the
     AIMessage in ``on_llm_end``, because ``on_agent_action`` never fires
@@ -157,12 +164,21 @@ class SynapLangGraphCallbackHandler(SynapCallbackHandler):
         conversation_id: str,
         user_id: str,
         customer_id: str = "",
+        *,
+        scope_path: Optional[Mapping[str, str]] = None,
     ):
+        # ``scope_path`` (the conversation's level on a deeper scope ladder)
+        # rides on the user and assistant turns, which the base handler
+        # records. The tool and reasoning events cannot carry a path.
+        # Passed on only when set, so a handler without a path is built exactly
+        # as before.
+        extra: Dict[str, Any] = {"scope_path": scope_path} if scope_path else {}
         super().__init__(
             sdk=sdk,
             conversation_id=conversation_id,
             user_id=user_id,
             customer_id=customer_id,
+            **extra,
         )
 
     async def on_llm_end(

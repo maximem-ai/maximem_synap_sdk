@@ -67,6 +67,7 @@ import {
   resolveUserId,
   type EveSessionLike,
 } from "./types.js";
+import { SynapScopeError, assertSdkSupportsScopePath, ensureIdsMatchPath, fingerprint } from "./scope-guard.js";
 
 /** One action the model asked for, as `actions.requested` carries it. */
 type EveActionRequest = HookEvent<"actions.requested">["data"]["actions"][number];
@@ -120,6 +121,15 @@ export interface SynapStreamHooksOptions {
    * has.
    */
   endSessionOnComplete?: boolean;
+  /**
+   * The level of your account's scope ladder this conversation belongs to, for
+   * an account whose ladder has a level between customer and user. Sent on the
+   * user and assistant turns only (the stream event's `scope`, or
+   * `conversation.record_message(scope_path)` when the stream cannot carry the
+   * turn); the server files a conversation from its first turn and keeps that
+   * level. Unset on a default ladder, where nothing changes.
+   */
+  scopePath?: Record<string, string>;
 }
 
 /**
@@ -142,6 +152,7 @@ type SendMessageArgs = {
   user_id?: string;
   customer_id?: string;
   metadata?: Record<string, string>;
+  scope_path?: Record<string, string>;
 };
 type RecordToolResultArgs = {
   result: unknown;
@@ -165,6 +176,7 @@ type RecordMessageArgs = {
   conversation_id?: string;
   user_id?: string;
   customer_id?: string;
+  scope_path?: Record<string, string>;
 };
 type StreamInstance = NonNullable<SynapStreamSdkLike["instance"]>;
 
@@ -210,6 +222,7 @@ interface Scope {
   conversationId: string;
   userId: string;
   customerId: string;
+  scopePath?: Record<string, string>;
 }
 
 /**
@@ -223,7 +236,16 @@ export function createSynapStreamHooks(options: SynapStreamHooksOptions) {
     throw new TypeError("createSynapStreamHooks requires a non-null sdk");
   }
   const sdk = options.sdk;
+  assertSdkSupportsScopePath(sdk, options.scopePath, "createSynapStreamHooks");
+  ensureIdsMatchPath(options.scopePath, {
+    userId: options.userId,
+    customerId: options.customerId,
+    where: "createSynapStreamHooks",
+  });
   const sent = new RecentKeys();
+  // A refused identity is logged once per distinct (user, customer) pair, not
+  // once per event: a run emits dozens of events.
+  const refused = new RecentKeys();
 
   /**
    * The ids every event carries, or `undefined` when this turn cannot be
@@ -235,7 +257,34 @@ export function createSynapStreamHooks(options: SynapStreamHooksOptions) {
     const userId = resolveUserId(options.userId, session);
     const conversationId = resolveConversationId(options.conversationId, session);
     if (!userId || !conversationId) return undefined;
-    return { conversationId, userId, customerId: options.customerId ?? "" };
+    // The principal varies per call but the path was fixed when the hooks were
+    // built, and the server lets the path's `user` / `customer` win over the ids
+    // an event carries. A mismatch would file this run under another identity,
+    // so report nothing for it. A hook must not break the run: skip and log,
+    // with fingerprints only, never the raw ids.
+    try {
+      ensureIdsMatchPath(options.scopePath, {
+        userId,
+        customerId: options.customerId,
+        where: "createSynapStreamHooks",
+      });
+    } catch (error) {
+      const key = `${fingerprint(userId)}:${fingerprint(options.customerId ?? "")}`;
+      if (!refused.has(key)) {
+        refused.add(key);
+        const detail = error instanceof SynapScopeError ? error.message : "scope check failed";
+        console.error(`[synap-eve] events for this session are not reported: ${detail}`);
+      }
+      return undefined;
+    }
+    return {
+      conversationId,
+      userId,
+      customerId: options.customerId ?? "",
+      ...(options.scopePath && Object.keys(options.scopePath).length > 0
+        ? { scopePath: options.scopePath }
+        : {}),
+    };
   }
 
   /**

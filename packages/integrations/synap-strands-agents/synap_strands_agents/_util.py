@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Tuple
 
 from synap_integrations_common import is_synap_history
+
+logger = logging.getLogger(__name__)
 
 #: What :class:`SynapShortTermHook` wraps the block it folds into a user message in.
 ST_OPEN = "<synap_short_term_context>"
@@ -49,20 +52,35 @@ def message_text(message: Any) -> str:
 # handed. Strands' MemoryManager sends the same turns to ``add_messages`` for
 # extraction; Synap already has them, and ingesting them twice extracts them
 # twice. Counted, not a set: two "ok" turns are two writes.
-_written: Dict[Tuple[str, str, str], int] = {}
+#
+# A write is the same write only if it went to the same place: the key holds
+# the user, the conversation and the scope path (canonical form: sorted items)
+# as well as the role and text. Keyed on text alone, a short reply such as "ok"
+# written by one store was taken for the copy of another store's, in another
+# conversation or at another level, and that second write never happened.
+# It stays a module-level ledger because the hook and the store are separate
+# objects that share no state but this; narrowing it further would need a new
+# argument on one of them.
+_written: Dict[Tuple[Any, ...], int] = {}
 _LEDGER_LIMIT = 4096
 
 
-def note_written(user_id: str, role: str, text: str) -> None:
+def _key(user_id: str, conversation_id: str, scope_path: Any, role: str, text: str) -> Tuple[Any, ...]:
+    path = tuple(sorted((str(k), str(v)) for k, v in scope_path.items())) if scope_path else ()
+    return (user_id, conversation_id or "", path, role, text)
+
+
+def note_written(user_id: str, conversation_id: str, scope_path: Any, role: str, text: str) -> None:
     if len(_written) >= _LEDGER_LIMIT:
         _written.clear()  # a hook with no store would otherwise grow this forever
-    key = (user_id, role, text)
+    key = _key(user_id, conversation_id, scope_path, role, text)
     _written[key] = _written.get(key, 0) + 1
 
 
-def consume_written(user_id: str, role: str, text: str) -> bool:
-    """Whether this turn was already written; each write is consumed once."""
-    key = (user_id, role, text)
+def consume_written(user_id: str, conversation_id: str, scope_path: Any, role: str, text: str) -> bool:
+    """Whether this turn was already written (same user, conversation, path,
+    role and text); each write is consumed once."""
+    key = _key(user_id, conversation_id, scope_path, role, text)
     count = _written.get(key, 0)
     if not count:
         return False
@@ -71,3 +89,33 @@ def consume_written(user_id: str, role: str, text: str) -> bool:
     else:
         _written[key] = count - 1
     return True
+
+
+# A store with no ``conversation_id`` writes its turns under its own fresh id,
+# and the ledger above only matches writes to the same conversation, so next to
+# a SynapStreamHook every turn is written twice, once per conversation. We
+# cannot fix that for the caller (which conversation is "the" one is theirs to
+# say), so say it once, loudly, when both exist.
+_hook_active = False
+_warned_unshared = False
+
+
+def mark_hook_active() -> None:
+    """Called when a :class:`SynapStreamHook` is built in this process."""
+    global _hook_active
+    _hook_active = True
+
+
+def warn_if_unshared_conversation(conversation_id_given: bool) -> None:
+    """Warn once per process: a stream hook exists and a store got no ``conversation_id``."""
+    global _warned_unshared
+    if conversation_id_given or _warned_unshared or not _hook_active:
+        return
+    _warned_unshared = True
+    logger.warning(
+        "SynapMemoryStore was created without a conversation_id while a SynapStreamHook "
+        "is active in this process. The store writes its turns under its own conversation, "
+        "so every turn is recorded twice (once by the hook, once by the store). Pass the "
+        "hook's conversation_id to SynapMemoryStore(conversation_id=...) so the two share "
+        "one conversation and each turn is written once."
+    )

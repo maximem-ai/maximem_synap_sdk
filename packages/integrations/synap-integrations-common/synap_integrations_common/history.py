@@ -27,6 +27,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional, Sequence, Tuple, TypeVar
 
+from synap_integrations_common.conversation_id import coerce_conversation_id
+
 logger = logging.getLogger(__name__)
 
 M = TypeVar("M")
@@ -76,7 +78,7 @@ async def fetch_compacted_history(
         return None
     try:
         ctx = await sdk.conversation.context.get_context_for_prompt(
-            conversation_id=conversation_id,
+            conversation_id=coerce_conversation_id(conversation_id),
         )
     except Exception:  # noqa: BLE001 — the framework's own history still stands
         logger.warning("synap: compacted history unavailable (conversation_id=%s)",

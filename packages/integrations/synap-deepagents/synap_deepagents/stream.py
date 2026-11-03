@@ -89,7 +89,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Awaitable, Callable, List, Optional
+from typing import Any, Awaitable, Callable, List, Mapping, Optional
 
 from langchain.agents.middleware.types import (
     AgentMiddleware,
@@ -102,6 +102,7 @@ from langchain.agents.middleware.types import (
 )
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
+    ensure_ids_match_path,
     fetch_compacted_history,
     record_turn,
     report_reasoning,
@@ -281,6 +282,10 @@ class SynapStreamMiddleware(AgentMiddleware[AgentState, ContextT, ResponseT]):
         customer_id: B2B instances only, where it is REQUIRED. NOT accepted on a
             B2C instance (``user_context_isolation=equals_customer``): the server
             rejects a call carrying one. Leave it unset there.
+        scope_path: Optional level path for an account with a deeper scope
+            ladder, ``{level_key: value}``. Sent with the user and assistant
+            turns (the conversation stores it from the first one), only when
+            set. Tool calls, tool results and reasoning carry no path.
 
     Turns go on the gRPC stream, which the first event opens (no ``listen()``
     call is needed; ``SYNAP_AUTO_LISTEN=false`` turns that off), REST only when
@@ -309,6 +314,7 @@ class SynapStreamMiddleware(AgentMiddleware[AgentState, ContextT, ResponseT]):
         conversation_id: str,
         user_id: str,
         customer_id: str = "",
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> None:
         if sdk is None:
             raise ValueError("SynapStreamMiddleware requires a non-None sdk")
@@ -318,12 +324,16 @@ class SynapStreamMiddleware(AgentMiddleware[AgentState, ContextT, ResponseT]):
             )
         if not user_id or not str(user_id).strip():
             raise ValueError("SynapStreamMiddleware requires a non-empty user_id")
+        ensure_ids_match_path(
+            scope_path, user_id=user_id, customer_id=customer_id or None,
+            where="SynapStreamMiddleware")
 
         super().__init__()
         self.sdk = sdk
         self.conversation_id = conversation_id
         self.user_id = user_id
         self.customer_id = customer_id
+        self.scope_path = dict(scope_path) if scope_path else None
         # Which messages have already been reported. Per instance, not per
         # class: two conversations must not silence each other.
         self._reported: set = set()
@@ -342,6 +352,7 @@ class SynapStreamMiddleware(AgentMiddleware[AgentState, ContextT, ResponseT]):
             conversation_id=self.conversation_id,
             user_id=self.user_id,
             customer_id=self.customer_id,
+            **({"scope_path": self.scope_path} if self.scope_path else {}),
         )
 
     # ── the user turn: once per invocation ───────────────────────────────

@@ -40,7 +40,7 @@ Design rules (these differ from the other surfaces):
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from strands.hooks import (
     AfterToolCallEvent,
@@ -53,13 +53,14 @@ from strands.hooks import (
 
 from maximem_synap import MaximemSynapSDK
 
+from synap_integrations_common import ensure_ids_match_path
 from synap_integrations_common.stream_events import (
     record_turn,
     report_tool_call,
     report_tool_result,
 )
 
-from synap_strands_agents._util import message_text, note_written
+from synap_strands_agents._util import mark_hook_active, message_text, note_written
 from synap_strands_agents.history import install_synap_history
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,10 @@ class SynapStreamHook(HookProvider):
             rejects a call carrying one with HTTP 400. Leave it unset there.
         session_id: Optional session identifier, sent as turn metadata. (The
             stream attaches its own session to each event.)
+        scope_path: For an account with a deeper scope ladder: the level the
+            conversation belongs to, as ``{level_key: value}``. Forwarded with
+            the user and assistant turns only when set. Tool-call and result
+            events carry no path (the server ignores one there).
     """
 
     def __init__(
@@ -106,6 +111,7 @@ class SynapStreamHook(HookProvider):
         *,
         customer_id: str = "",
         session_id: str = "",
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> None:
         if sdk is None:
             raise ValueError("SynapStreamHook requires a non-None sdk")
@@ -113,11 +119,16 @@ class SynapStreamHook(HookProvider):
             raise ValueError("SynapStreamHook requires a non-empty conversation_id")
         if not user_id:
             raise ValueError("SynapStreamHook requires a non-empty user_id")
+        ensure_ids_match_path(
+            scope_path, user_id=user_id, customer_id=customer_id or None,
+            where="SynapStreamHook")
         self._sdk = sdk
         self._conversation_id = conversation_id
         self._user_id = user_id
         self._customer_id = customer_id
         self._session_id = session_id
+        self._scope_path = dict(scope_path) if scope_path else None
+        mark_hook_active()
 
     def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
         registry.add_callback(BeforeInvocationEvent, self._on_invocation)
@@ -150,8 +161,9 @@ class SynapStreamHook(HookProvider):
                 user_id=self._user_id,
                 customer_id=self._customer_id or "",
                 metadata={"session_id": self._session_id} if self._session_id else None,
+                **({"scope_path": dict(self._scope_path)} if self._scope_path else {}),
             ):
-                note_written(self._user_id, role, text)
+                note_written(self._user_id, self._conversation_id, self._scope_path, role, text)
         except Exception as exc:  # noqa: BLE001 — stream feed must never abort the turn
             logger.warning(
                 "SynapStreamHook: message feed failed: %s", exc, exc_info=True

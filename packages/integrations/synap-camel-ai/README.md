@@ -145,3 +145,13 @@ answers.
 - **The explicit `store_memory` tool** raises `SynapIntegrationError` on failure.
 
 Requires Python 3.11+ and `camel-ai>=0.2.90`.
+
+## Deeper scope ladders
+
+If your account's scope ladder has more levels than customer and user, pass the address of the level to read and write at. It is sent only when set; without it every call is exactly what it was. The tools close it over, so the model cannot choose a level.
+
+```python
+path = {"customer": "acme", "team": "payments", "user": "dana"}  # from sdk.get_scope_ladder() / ScopeAddress
+memory = SynapAgentMemory(sdk, user_id="dana", customer_id="acme", scope_path=path)
+tools = create_synap_tools(sdk, "dana", customer_id="acme", scope_path=path)
+```

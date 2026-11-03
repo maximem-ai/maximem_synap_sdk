@@ -27,6 +27,7 @@ from synap_autogen.short_term import (
     _SUPPORTED_STYLES,
 )
 from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +217,7 @@ class TestGetMessagesHappyPath:
         ctx = SynapShortTermChatContext(sdk, "conv_xyz")
         await ctx.get_messages()
         sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-            conversation_id="conv_xyz",
+            conversation_id=coerce_conversation_id("conv_xyz"),
             style="narrative",
         )
 
@@ -226,7 +227,7 @@ class TestGetMessagesHappyPath:
         ctx = SynapShortTermChatContext(sdk, "conv_abc", style="bullet_points")
         await ctx.get_messages()
         sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-            conversation_id="conv_abc",
+            conversation_id=coerce_conversation_id("conv_abc"),
             style="bullet_points",
         )
 
@@ -237,7 +238,7 @@ class TestGetMessagesHappyPath:
         ctx = SynapShortTermChatContext(sdk, "conv_abc", style=style)
         await ctx.get_messages()
         sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-            conversation_id="conv_abc",
+            conversation_id=coerce_conversation_id("conv_abc"),
             style=style,
         )
 

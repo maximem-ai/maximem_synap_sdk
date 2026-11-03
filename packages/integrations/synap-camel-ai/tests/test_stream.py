@@ -17,6 +17,7 @@ These pin that contract:
 - none of it can raise into ``ChatAgent.step``.
 """
 
+from synap_integrations_common.conversation_id import coerce_conversation_id
 import json
 
 import pytest
@@ -31,6 +32,7 @@ from camel.utils.tool_result import ToolResult
 from synap_camel_ai import SynapAgentMemory
 from synap_camel_ai import memory as memory_module
 from synap_camel_ai.memory import _CAMEL_NAMESPACE, _tool_args, _tool_result
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────────
@@ -177,8 +179,8 @@ class TestStreamFirstRestFallback:
             (c.kwargs["role"], c.kwargs["content"], c.kwargs["conversation_id"])
             for c in sdk.conversation.record_message.await_args_list
         ] == [
-            ("user", "where is my order", "conv-1"),
-            ("assistant", "it ships tomorrow", "conv-1"),
+            ("user", "where is my order", coerce_conversation_id("conv-1")),
+            ("assistant", "it ships tomorrow", coerce_conversation_id("conv-1")),
         ]
         sdk.instance.send_message.assert_not_awaited()
         sdk.memories.create.assert_not_awaited()

@@ -71,6 +71,8 @@ private    org-wide      app-wide
 
 Decide scoping at ingestion time by which `*_id` you pass. On B2C: `user_id` → user-scoped, nothing → client-scoped, and that is the whole set. On B2B: `user_id` + `customer_id` → user-scoped, `customer_id` only → org-shared, nothing → client-scoped.
 
+**Deeper ladders.** An account can add levels between customer and user (a `team`). The ids then are not enough and the call also carries a path. Python SDK 0.7.0 / JS SDK 0.7.0 read it (use 0.7.1 or later: `sdk.fetch` with a path fails on the customer scope in 0.7.0): `ladder = await sdk.get_scope_ladder()`, then `addr = ladder.address([customer, team, user])` and `**addr.read_kwargs()` on reads or `**addr.write_kwargs()` on `memories.create`. On a default ladder `address()` returns ids only; a path is refused unless nested scoping is on and the ladder has been accepted. See `reference/core-concepts.md` (Deeper scope ladders).
+
 **Retrieval modes:**
 
 | | `fast` | `accurate` |

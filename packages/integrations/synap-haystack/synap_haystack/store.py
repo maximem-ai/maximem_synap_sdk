@@ -88,14 +88,14 @@ import hashlib
 import logging
 import threading
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from haystack import Document
 from haystack.core.serialization import default_from_dict, default_to_dict
 from haystack.dataclasses import ChatMessage
 
 from maximem_synap import MaximemSynapSDK
-from synap_integrations_common import SynapIntegrationError, run_async
+from synap_integrations_common import SynapIntegrationError, ensure_ids_match_path, run_async, coerce_conversation_id
 from synap_integrations_common.history import HISTORY_CLOSE, HISTORY_OPEN
 from synap_integrations_common.stream_events import (
     report_reasoning,
@@ -145,6 +145,13 @@ class SynapMemoryStore:
         memories = store.search_memories(query="seat preference")
         single = store.search_memories_as_single_message(query="seat preference")
 
+    On an account with a deeper scope ladder pass ``scope_path={"customer":
+    "acme", "team": "payments", "user": "dana"}`` next to (or instead of) the
+    ids: it is sent with every search and every turn, only when set. A per-call
+    ``user_id`` / ``customer_id`` override on a store that has a ``scope_path``
+    needs a per-call ``scope_path`` too (the server reads the path over the ids,
+    so an id alone would silently be ignored); without one it raises.
+
     The store is a plain object, not a Haystack ``@component``. Use
     :class:`~synap_haystack.SynapMemoryRetriever` and
     :class:`~synap_haystack.SynapMemoryWriter` to drive it inside a pipeline.
@@ -160,18 +167,26 @@ class SynapMemoryStore:
         mode: str = "accurate",
         max_results: int = 20,
         include_conversation_context: bool = False,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> None:
         if sdk is None:
             raise ValueError("SynapMemoryStore requires a non-None sdk")
-        if not user_id and not customer_id:
+        if not user_id and not customer_id and not scope_path:
             raise ValueError(
-                "SynapMemoryStore requires at least one of user_id (user scope) "
-                "or customer_id (customer-wide shared scope)"
+                "SynapMemoryStore requires at least one of user_id (user scope), "
+                "customer_id (customer-wide shared scope) or scope_path (a level "
+                "path on a deeper scope ladder)"
             )
 
+        ensure_ids_match_path(
+            scope_path, user_id=user_id or None, customer_id=customer_id or None,
+            where="SynapMemoryStore")
         self.sdk = sdk
         self.user_id = user_id or ""
         self.customer_id = customer_id
+        # Level path on an account with a deeper scope ladder, ``{level_key:
+        # value}``. Sent on every read and turn only when set.
+        self.scope_path: Optional[Dict[str, str]] = dict(scope_path) if scope_path else None
         # Default conversation for writes; can be overridden per add_memories call.
         self.conversation_id = conversation_id
         self.mode = mode
@@ -191,6 +206,7 @@ class SynapMemoryStore:
         conversation_id: Optional[str] = None,
         user_id: Optional[str] = None,
         customer_id: Optional[str] = None,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> List[Dict[str, Any]]:
         """Record chat messages to Synap for server-side memory extraction.
 
@@ -209,6 +225,7 @@ class SynapMemoryStore:
                 conversation_id=conversation_id,
                 user_id=user_id,
                 customer_id=customer_id,
+                scope_path=scope_path,
             )
         )
 
@@ -219,6 +236,7 @@ class SynapMemoryStore:
         conversation_id: Optional[str] = None,
         user_id: Optional[str] = None,
         customer_id: Optional[str] = None,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> List[Dict[str, Any]]:
         conv_id = conversation_id or self.conversation_id
         if not conv_id:
@@ -228,6 +246,11 @@ class SynapMemoryStore:
             )
         uid = user_id if user_id is not None else self.user_id
         cid = customer_id if customer_id is not None else self.customer_id
+        path = self._path_for(user_id, customer_id, scope_path)
+        ensure_ids_match_path(
+            path, user_id=uid or None, customer_id=cid or None,
+            where="SynapMemoryStore.add_memories")
+        path_kw: Dict[str, Any] = {"scope_path": path} if path else {}
 
         results: List[Dict[str, Any]] = []
         written = 0
@@ -302,7 +325,7 @@ class SynapMemoryStore:
             # fallback and lose it silently. REST fails loudly instead, which
             # is what this store did before there was a stream at all.
             if uid and await report_turn(
-                self.sdk, role=role, content=text, **ids
+                self.sdk, role=role, content=text, **ids, **path_kw
             ):
                 written += 1
                 results.append({
@@ -314,11 +337,12 @@ class SynapMemoryStore:
             else:
                 try:
                     resp = await self.sdk.conversation.record_message(
-                        conversation_id=conv_id,
+                        conversation_id=coerce_conversation_id(conv_id),
                         role=role,
                         content=text,
                         user_id=uid or None,
                         customer_id=cid,
+                        **path_kw,
                     )
                     written += 1
                     results.append({
@@ -355,6 +379,28 @@ class SynapMemoryStore:
             )
 
         return results
+
+    def _path_for(
+        self,
+        user_id: Optional[str],
+        customer_id: Optional[str],
+        scope_path: Optional[Mapping[str, str]],
+    ) -> Optional[Dict[str, str]]:
+        """The level path for one call: the call's own, else the store's.
+
+        A per-call id override with only the store's path would be sent as an id
+        the server ignores (it reads the path over the ids), i.e. the wrong
+        scope. That is refused rather than sent.
+        """
+        if scope_path:
+            return dict(scope_path)
+        if self.scope_path and (user_id is not None or customer_id is not None):
+            raise ValueError(
+                "SynapMemoryStore: this store has a scope_path, so a per-call "
+                "user_id/customer_id override must come with a per-call "
+                "scope_path (the server reads the path over the ids)"
+            )
+        return self.scope_path
 
     def _mark(self, msg: Any, conv_id: str, key: str, nth: int) -> None:
         _mark_recorded(msg, conv_id)
@@ -448,6 +494,7 @@ class SynapMemoryStore:
         customer_id: Optional[str] = None,
         max_results: Optional[int] = None,
         mode: Optional[str] = None,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> List[ChatMessage]:
         """Semantic, query-driven memory retrieval.
 
@@ -458,7 +505,7 @@ class SynapMemoryStore:
         """
         return run_async(self.asearch_memories(
             query=query, user_id=user_id, customer_id=customer_id,
-            max_results=max_results, mode=mode,
+            max_results=max_results, mode=mode, scope_path=scope_path,
         ))
 
     def search_memories_as_single_message(
@@ -469,13 +516,14 @@ class SynapMemoryStore:
         customer_id: Optional[str] = None,
         max_results: Optional[int] = None,
         mode: Optional[str] = None,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> Optional[ChatMessage]:
         """Collapse retrieved memories into one system :class:`ChatMessage`,
         ready to prepend to a prompt. Returns ``None`` when nothing matched.
         """
         return run_async(self._asearch_single(
             query=query, user_id=user_id, customer_id=customer_id,
-            max_results=max_results, mode=mode,
+            max_results=max_results, mode=mode, scope_path=scope_path,
         ))
 
     async def asearch_memories(
@@ -486,10 +534,11 @@ class SynapMemoryStore:
         customer_id: Optional[str] = None,
         max_results: Optional[int] = None,
         mode: Optional[str] = None,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> List[ChatMessage]:
         records = await self._asearch_records(
             query=query, user_id=user_id, customer_id=customer_id,
-            max_results=max_results, mode=mode,
+            max_results=max_results, mode=mode, scope_path=scope_path,
         )
         return [ChatMessage.from_assistant(r["content"], meta=r["meta"]) for r in records]
 
@@ -501,6 +550,7 @@ class SynapMemoryStore:
         customer_id: Optional[str] = None,
         max_results: Optional[int] = None,
         mode: Optional[str] = None,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> List[Document]:
         """Same retrieval as :meth:`search_memories` but returns Haystack
         ``Document``s — the RAG-shaped read path used by
@@ -508,7 +558,7 @@ class SynapMemoryStore:
         """
         return run_async(self.asearch_documents(
             query=query, user_id=user_id, customer_id=customer_id,
-            max_results=max_results, mode=mode,
+            max_results=max_results, mode=mode, scope_path=scope_path,
         ))
 
     async def asearch_documents(
@@ -519,10 +569,11 @@ class SynapMemoryStore:
         customer_id: Optional[str] = None,
         max_results: Optional[int] = None,
         mode: Optional[str] = None,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> List[Document]:
         records = await self._asearch_records(
             query=query, user_id=user_id, customer_id=customer_id,
-            max_results=max_results, mode=mode,
+            max_results=max_results, mode=mode, scope_path=scope_path,
         )
         return [Document(content=r["content"], meta=r["meta"]) for r in records]
 
@@ -603,7 +654,7 @@ class SynapMemoryStore:
     async def _acontext(self, chat_history_id: str) -> Any:
         try:
             return await self.sdk.conversation.context.get_context_for_prompt(
-                conversation_id=chat_history_id,
+                conversation_id=coerce_conversation_id(chat_history_id),
             )
         except Exception as exc:  # noqa: BLE001 — read-side degrades gracefully
             logger.error(
@@ -643,6 +694,7 @@ class SynapMemoryStore:
         ``MaximemSynapSDK`` registry by that id. Persist API keys via env /
         secrets, not the pipeline YAML.
         """
+        extra: Dict[str, Any] = {"scope_path": dict(self.scope_path)} if self.scope_path else {}
         return default_to_dict(
             self,
             instance_id=getattr(self.sdk, "instance_id", ""),
@@ -652,6 +704,7 @@ class SynapMemoryStore:
             mode=self.mode,
             max_results=self.max_results,
             include_conversation_context=self.include_conversation_context,
+            **extra,
         )
 
     @classmethod
@@ -672,9 +725,14 @@ class SynapMemoryStore:
         customer_id: Optional[str] = None,
         max_results: Optional[int] = None,
         mode: Optional[str] = None,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> List[Dict[str, Any]]:
         uid = user_id if user_id is not None else self.user_id
         cid = customer_id if customer_id is not None else self.customer_id
+        path = self._path_for(user_id, customer_id, scope_path)
+        ensure_ids_match_path(
+            path, user_id=uid or None, customer_id=cid or None,
+            where="SynapMemoryStore.search")
         try:
             response = await self.sdk.fetch(
                 user_id=uid or None,
@@ -683,6 +741,7 @@ class SynapMemoryStore:
                 max_results=max_results or self.max_results,
                 mode=mode or self.mode,
                 include_conversation_context=self.include_conversation_context,
+                **({"scope_path": path} if path else {}),
             )
         except Exception as exc:  # noqa: BLE001 — read-side degrades gracefully
             logger.error(

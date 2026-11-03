@@ -53,6 +53,7 @@ from nat.data_models.function import FunctionBaseConfig
 
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
+    coerce_conversation_id,
     SynapIntegrationError,
     fetch_compacted_history,
     wrap_sdk_errors_async,
@@ -139,7 +140,7 @@ class SynapShortTermFunction:
                 style=self.style,
             ):
                 response = await self.sdk.conversation.context.get_context_for_prompt(
-                    conversation_id=conv_id,
+                    conversation_id=coerce_conversation_id(conv_id),
                     style=self.style,
                 )
         except SynapIntegrationError:

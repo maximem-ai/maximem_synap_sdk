@@ -4,9 +4,10 @@ Exposes:
 
 - :class:`SynapStore` — a ``BaseStore`` implementation backed by Synap's
   semantic memory (``sdk.memories.create`` + ``sdk.fetch``). Drop it into
-  ``StateGraph.compile(store=SynapStore(...))`` for cross-thread long-term
-  memory. Semantic search via ``store.asearch`` is the natural fit for our
-  retrieval model.
+  ``StateGraph.compile(store=SynapStore(sdk))`` for cross-thread long-term
+  memory: one shared store, the user taken from the first entries of the
+  namespace on every call. Semantic search via ``store.asearch`` returns
+  Synap's own ranked order, with each item labelled in ``value["_synap"]``.
 
 - :class:`SynapCheckpointSaver` — **deprecated.** It cannot restore what it
   saves: Synap extracts facts from the checkpoint and ``fetch`` returns those,
@@ -28,6 +29,11 @@ Exposes:
   state-mutating node for custom ``StateGraph`` flows. Writes the ST string
   into ``state[state_key]`` for downstream LLM nodes to assemble.
 
+- :func:`create_synap_turn_node` and friends — report user/assistant turns,
+  tool calls, tool results and reasoning from nodes of the graph itself, for a
+  graph whose LLM is not a LangChain model (the callback handler hears only
+  LangChain). Identity and conversation come from ``config["configurable"]``.
+
 - :class:`SynapLangGraphCallbackHandler` — reports a run on Synap's live
   gRPC stream so the anticipation agent sees the whole turn: the user turn,
   the reasoning, every tool call and result, and the assistant turn. Pass it
@@ -41,6 +47,12 @@ from synap_langgraph.store import SynapStore
 from synap_langgraph.checkpointer import SynapCheckpointSaver
 from synap_langgraph.callbacks import SynapLangGraphCallbackHandler
 from synap_langgraph.short_term import create_synap_st_node, synap_st_prompt
+from synap_langgraph.reporting import (
+    create_synap_reasoning_node,
+    create_synap_tool_call_node,
+    create_synap_tool_result_node,
+    create_synap_turn_node,
+)
 from synap_langchain.graph import create_synap_node
 
 __all__ = [
@@ -50,4 +62,8 @@ __all__ = [
     "create_synap_node",
     "create_synap_st_node",
     "synap_st_prompt",
+    "create_synap_turn_node",
+    "create_synap_tool_call_node",
+    "create_synap_tool_result_node",
+    "create_synap_reasoning_node",
 ]

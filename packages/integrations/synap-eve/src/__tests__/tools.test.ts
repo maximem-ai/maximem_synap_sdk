@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
 import { createSynapSearchTool, createSynapStoreTool } from "../tools.js";
 import { SynapIntegrationError } from "../types.js";
@@ -117,5 +117,65 @@ describe("createSynapStoreTool", () => {
       tool.execute({ content: "note" }, makeCtx({ principalId: null }) as never),
     ).rejects.toBeInstanceOf(SynapIntegrationError);
     expect(sdk.memories.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("scopePath (a deeper scope ladder)", () => {
+  const PATH = { customer: "acme", team: "eng", user: "alice" };
+
+  it("search sends it to sdk.fetch as scope_path", async () => {
+    const sdk = makeSdk();
+    const tool = createSynapSearchTool({ sdk, scopePath: PATH });
+    await tool.execute({ query: "x" }, makeCtx() as never);
+    expect(sdk.fetch).toHaveBeenCalledWith(expect.objectContaining({ scope_path: PATH }));
+  });
+
+  it("store sends it to memories.create as scope (not scope_path)", async () => {
+    const sdk = makeSdk();
+    const tool = createSynapStoreTool({ sdk, scopePath: PATH });
+    await tool.execute({ content: "note" }, makeCtx() as never);
+    const sent = (sdk.memories.create as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(sent.scope).toEqual(PATH);
+    expect(Object.keys(sent)).not.toContain("scope_path");
+  });
+
+  it("without one, both calls carry exactly the keys they always did", async () => {
+    const sdk = makeSdk();
+    await createSynapSearchTool({ sdk }).execute({ query: "x" }, makeCtx() as never);
+    await createSynapStoreTool({ sdk }).execute({ content: "note" }, makeCtx() as never);
+    expect(sdk.fetch).toHaveBeenCalledWith({
+      conversation_id: "sess-eve-1", user_id: "alice", customer_id: null,
+      search_query: ["x"], max_results: 10, mode: "accurate",
+      include_conversation_context: false,
+    });
+    expect(sdk.memories.create).toHaveBeenCalledWith({
+      document: "note", user_id: "alice", customer_id: null, metadata: { source: "eve" },
+    });
+    // An empty path is the same as none.
+    const sdk2 = makeSdk();
+    await createSynapSearchTool({ sdk: sdk2, scopePath: {} }).execute({ query: "x" }, makeCtx() as never);
+    expect(Object.keys((sdk2.fetch as ReturnType<typeof vi.fn>).mock.calls[0]![0])).not.toContain("scope_path");
+  });
+
+  it("is closed over: not in either tool's input schema, and a model-supplied one is ignored", async () => {
+    const sdk = makeSdk();
+    const search = createSynapSearchTool({ sdk, scopePath: PATH });
+    const store = createSynapStoreTool({ sdk, scopePath: PATH });
+    for (const tool of [search, store]) {
+      const shape = Object.keys((tool as unknown as { inputSchema: { shape: object } }).inputSchema.shape);
+      expect(shape.filter((k) => /scope/i.test(k))).toEqual([]);
+    }
+    const evil = { team: "finance", user: "bob" };
+    await search.execute({ query: "x", scope_path: evil, scopePath: evil, scope: evil } as never, makeCtx() as never);
+    await store.execute({ content: "n", scope_path: evil, scopePath: evil, scope: evil } as never, makeCtx() as never);
+    expect((sdk.fetch as ReturnType<typeof vi.fn>).mock.calls[0]![0].scope_path).toEqual(PATH);
+    expect((sdk.memories.create as ReturnType<typeof vi.fn>).mock.calls[0]![0].scope).toEqual(PATH);
+  });
+
+  it("is also ignored when the tool has none configured", async () => {
+    const sdk = makeSdk();
+    const evil = { team: "finance" };
+    await createSynapSearchTool({ sdk }).execute({ query: "x", scope_path: evil } as never, makeCtx() as never);
+    expect(Object.keys((sdk.fetch as ReturnType<typeof vi.fn>).mock.calls[0]![0])).not.toContain("scope_path");
   });
 });

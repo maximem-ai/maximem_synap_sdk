@@ -10,7 +10,7 @@ A TypeScript sibling package with the same API is published as `@maximem/synap-c
 pip install synap-claude-agent
 ```
 
-Requires `claude-agent-sdk>=0.1`, `maximem-synap>=0.2.0`.
+Requires `claude-agent-sdk>=0.1`, `maximem-synap>=0.7.1`.
 
 ## Two plug points
 
@@ -73,3 +73,13 @@ Use both together for the full experience: automatic context injection plus agen
 - **Hooks** never raise — SDK failures log at `ERROR` and fall through to no-op (no context injected, no prompt recorded). Context-provider style.
 - **`synap_search` tool** returns a "no context available" message on SDK failure — the tool call succeeds so the agent loop keeps going.
 - **`synap_remember` tool** returns `isError=true` on ingestion failure — silent drops would hide ingestion outages, so we surface them to the agent explicitly.
+
+## Deeper scope ladders
+
+If your account's scope ladder has more levels than customer and user, pass the address of the level to read and write at. It is sent only when set; without it every call is exactly what it was. The MCP tools close it over, so the model cannot choose a level.
+
+```python
+path = {"customer": "acme", "team": "payments", "user": "dana"}  # from sdk.get_scope_ladder() / ScopeAddress
+hooks = create_synap_hooks(sdk, "dana", "acme", scope_path=path)
+server = create_synap_mcp_server(sdk, "dana", "acme", scope_path=path)
+```

@@ -8,6 +8,7 @@ import pytest
 
 from synap_microsoft_agent.short_term import SynapShortTermContextProvider
 from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 def _make_response(formatted: str | None, available: bool):
@@ -84,7 +85,7 @@ class TestBeforeRun:
         provider = SynapShortTermContextProvider(sdk, "conv_abc", style="bullet_points")
         await provider.before_run(agent=None, session=None, context=_fake_context(), state={})
         sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-            conversation_id="conv_abc",
+            conversation_id=coerce_conversation_id("conv_abc"),
             style="bullet_points",
         )
 

@@ -24,18 +24,25 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from strands.memory import MemoryEntry
 
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
+    coerce_conversation_id,
     SynapIntegrationError,
+    ensure_ids_match_path,
     record_turn,
     wrap_sdk_errors_async,
 )
 
-from synap_strands_agents._util import consume_written, message_text, note_written
+from synap_strands_agents._util import (
+    consume_written,
+    message_text,
+    note_written,
+    warn_if_unshared_conversation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +67,16 @@ class SynapMemoryStore:
             rejects a call carrying one with HTTP 400. Leave it unset there. Empty means customer-less.
         conversation_id: Optional Synap conversation id the ``add_messages``
             turns are recorded under (a fresh one per store when unset; pass the
-            stream hook's so both write to one conversation).
+            stream hook's so both write to one conversation. Without it, next
+            to a hook, every turn is written twice, once per conversation; a
+            warning is logged once per process).
         mode: Synap fetch mode — ``"accurate"`` (default) or ``"fast"``.
         max_search_results: Default cap on ``search`` results.
+        scope_path: For an account with a deeper scope ladder: the level this
+            store reads and writes at, as ``{level_key: value}`` (for example
+            ``ScopeAddress.scope_path``; key order does not matter). Forwarded
+            to ``fetch``, ``memories.create`` (as ``scope``) and the
+            ``add_messages`` turns, only when set.
 
     Example::
 
@@ -85,23 +99,34 @@ class SynapMemoryStore:
         conversation_id: Optional[str] = None,
         mode: str = "accurate",
         max_search_results: int = 5,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> None:
         if sdk is None:
             raise ValueError("SynapMemoryStore requires a non-None sdk")
         if not user_id:
             raise ValueError("SynapMemoryStore requires a non-empty user_id")
+        ensure_ids_match_path(
+            scope_path, user_id=user_id, customer_id=customer_id or None,
+            where="SynapMemoryStore")
         self._sdk = sdk
         self._user_id = user_id
         self._customer_id = customer_id
         self._conversation_id = conversation_id
         self._mode = mode
+        self._scope_path: Optional[Dict[str, str]] = dict(scope_path) if scope_path else None
         self._turn_conversation_id = conversation_id or f"strands-{uuid.uuid4().hex}"
+        warn_if_unshared_conversation(bool(conversation_id))
         # ── MemoryStore protocol config fields (exposed as attributes) ──
         self.name = "synap"
         self.description = "Maximem Synap long-term memory"
         self.max_search_results = max_search_results
         self.writable = True
         self.extraction = True
+
+    def _path(self, name: str) -> Dict[str, Any]:
+        """``{name: path}`` when a scope path is set, else nothing, so a call
+        without one has exactly the keyword arguments it always had."""
+        return {name: dict(self._scope_path)} if self._scope_path else {}
 
     # ── read ─────────────────────────────────────────────────────────────────
 
@@ -110,13 +135,14 @@ class SynapMemoryStore:
         limit = (options or {}).get("max_search_results") or self.max_search_results
         try:
             response = await self._sdk.fetch(
-                conversation_id=self._conversation_id,
+                conversation_id=coerce_conversation_id(self._conversation_id),
                 user_id=self._user_id,
                 customer_id=self._customer_id or None,
                 search_query=[query],
                 mode=self._mode,
                 max_results=limit,
                 include_conversation_context=False,
+                **self._path("scope_path"),
             )
         except Exception as exc:  # noqa: BLE001 — read-side graceful degrade
             logger.error(
@@ -160,14 +186,17 @@ class SynapMemoryStore:
                 user_id=self._user_id,
                 customer_id=self._customer_id or None,
                 metadata=dict(metadata) if metadata else None,
+                **self._path("scope"),
             )
 
     async def add_messages(self, messages: Any, context: Any = None) -> None:
         """Record a conversation batch as turns for server-side extraction
         (WRITE). Raises on failure so the manager retries the batch."""
+        warn_if_unshared_conversation(bool(self._conversation_id))  # the hook may be built later
         done: List[tuple] = []
         for role, text in self._turns(messages):
-            if consume_written(self._user_id, role, text):
+            if consume_written(
+                self._user_id, self._turn_conversation_id, self._scope_path, role, text):
                 continue  # SynapStreamHook already wrote it
             if not await record_turn(
                 self._sdk,
@@ -176,10 +205,12 @@ class SynapMemoryStore:
                 conversation_id=self._turn_conversation_id,
                 user_id=self._user_id,
                 customer_id=self._customer_id,
+                **self._path("scope_path"),
             ):
                 # The retry resends the whole batch: let it skip what went through.
                 for written in done:
-                    note_written(self._user_id, *written)
+                    note_written(
+                        self._user_id, self._turn_conversation_id, self._scope_path, *written)
                 raise SynapIntegrationError(
                     "strands.store.add_messages",
                     "could not record the conversation turn",

@@ -10,7 +10,7 @@ deepagents stores memory as `AGENTS.md` files and pastes them whole into the sys
 pip install maximem-synap-deepagents
 ```
 
-Requires `deepagents>=0.7.4`, `maximem-synap>=0.2.0`.
+Requires `deepagents>=0.7.4`, `maximem-synap>=0.7.1`.
 
 ## Quickstart
 
@@ -181,6 +181,21 @@ SynapBackend(
     cache_ttl_seconds=300,
 )
 ```
+
+## Deeper scope ladders
+
+If your account has more levels than customer and user, pass `scope_path` (level key to value, outermost first) next to, or instead of, the ids. It is sent on every read and write only when set; the backend, middleware and tools close it over, so the model never chooses a level.
+
+```python
+path = {"customer": "acme", "team": "payments", "user": "dana"}
+backend = SynapBackend(sdk, user_id="dana", customer_id="acme", scope_path=path)
+SynapMemoryMiddleware(sdk=sdk, user_id="dana", customer_id="acme", scope_path=path)
+SynapSearchTool(sdk=sdk, user_id="dana", customer_id="acme", scope_path=path)
+```
+
+A path that names the `user` (or `customer`) level fixes that identity: a `user_id` / `customer_id` that disagrees with it raises `SynapIntegrationError` at construction, before any SDK call, because the server would otherwise let the path win.
+
+Needs a `maximem-synap` release whose `fetch` accepts `scope_path` and a `maximem-synap-integrations-common` with `ensure_ids_match_path`.
 
 ## Tests
 

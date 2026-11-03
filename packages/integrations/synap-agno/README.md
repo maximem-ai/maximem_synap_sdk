@@ -8,7 +8,7 @@ Synap integration for [Agno](https://docs.agno.com) — backs Agno's user memori
 pip install synap-agno
 ```
 
-Requires `agno>=2.0`, `maximem-synap>=0.2.0`.
+Requires `agno>=2.0`, `maximem-synap>=0.7.1`.
 
 ## Quickstart
 
@@ -96,3 +96,22 @@ Need durable sessions or traces? Use `SqliteDb` / `PostgresDb` from Agno directl
 - **Writes** (`upsert_user_memory`, `upsert_memories`) surface `SynapIntegrationError` so ingestion outages are observable.
 - **Deletes** (`delete_user_memory`, `delete_user_memories`) call `memories.delete` for the Synap ids `get_user_memories` reports. Any other id (Agno assigns its own when it saves a memory) and `clear_memories` warn once and no-op. A failed delete is logged, not raised.
 - **Stats** (`get_user_memory_stats`) warns once and returns `([], 0)` — Synap doesn't expose aggregate counts.
+
+## Deeper scope ladders
+
+If your account's scope ladder has more levels than customer and user, pass the address of the level to read and write at. It is sent only when set; without it every call is exactly what it was.
+
+**A path that includes the `user` level fixes the user.** Agno names the user on every call, but the server lets the path's `user` win over a flat `user_id`, so a call for anyone else would read and file as the path's user. The package therefore refuses it: a `user_id` (or `customer_id`) that disagrees with the path raises `SynapIntegrationError` before anything is sent (db calls and constructors), and a hook run for a different user is skipped with an ERROR log. For a multi-user app, either build one db and one set of hooks per user, or stop the path above the user level.
+
+```python
+# One agent per user: the path names that user.
+path = {"customer": "acme", "team": "payments", "user": "dana"}  # from sdk.get_scope_ladder() / ScopeAddress
+db = SynapDb(sdk, customer_id="acme", scope_path=path)           # or AsyncSynapDb(...)
+agent = Agent(db=db, **create_synap_hooks(sdk, customer_id="acme", scope_path=path))
+agent.run("hi", user_id="dana")                                  # any other user_id is refused
+
+# One agent for many users: stop above the user level.
+team_path = {"customer": "acme", "team": "payments"}
+```
+
+Needs `maximem-synap` with `scope_path` support and a `maximem-synap-integrations-common` that carries it on turns and has `ensure_ids_match_path`.

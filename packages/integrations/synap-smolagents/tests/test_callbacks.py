@@ -1,5 +1,6 @@
 """Tests for create_synap_recorder — Smolagents step-callback turn recorder."""
 
+from synap_integrations_common.conversation_id import coerce_conversation_id
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -8,6 +9,7 @@ import pytest
 from synap_integrations_common import set_auto_listen
 from synap_smolagents import create_synap_recorder
 from synap_smolagents.callbacks import _as_text
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 def step(model_output, step_number=1, error=None):
@@ -56,7 +58,7 @@ def test_turns_are_recorded_as_messages_without_a_stream(mock_sdk):
         ("assistant", "it ships tomorrow"),
     ]
     for c in calls:
-        assert c.kwargs["conversation_id"] == "conv1"
+        assert c.kwargs["conversation_id"] == coerce_conversation_id("conv1")
         assert c.kwargs["user_id"] == "alice"
         assert c.kwargs["customer_id"] == "acme"
     sdk.memories.create.assert_not_called()

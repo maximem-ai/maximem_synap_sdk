@@ -56,7 +56,7 @@ from synap_integrations_common import (
     run_async,
 )
 
-from synap_pydantic_ai.deps import SynapDeps
+from synap_pydantic_ai.deps import SynapDeps, check_ids
 from synap_pydantic_ai.history import install_synap_history
 
 logger = logging.getLogger(__name__)
@@ -327,6 +327,8 @@ async def _report_turn(deps: SynapDeps, role: str, content: str, model: Optional
         customer_id=deps.customer_id,
         # In metadata, not model=, so an older installed SDK accepts it.
         metadata={"agent_model": model} if model else None,
+        # Only when set: an older integrations-common has no such keyword.
+        **({"scope_path": dict(deps.scope_path)} if deps.scope_path else {}),
     )
 
 
@@ -400,6 +402,7 @@ async def synap_run(
     if deps is None:
         raise ValueError("synap_run requires SynapDeps (it carries the sdk)")
 
+    check_ids(deps, "synap_run")  # before anything is reported or run
     install_synap_history(agent)
     model = _agent_model(agent, kwargs)
     await _report_turn(deps, "user", _prompt_text(user_prompt), model)
