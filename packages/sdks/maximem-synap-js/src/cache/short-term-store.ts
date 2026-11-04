@@ -21,6 +21,7 @@
  * the caller asks the server and hands the answer to `reseed`.
  */
 
+import { normalizeConversationId } from '../util/conversation-id.js';
 import type { TurnStore } from './turn-store.js';
 
 const DEFAULT_MAX_CONVERSATIONS = 100;
@@ -229,6 +230,7 @@ export class ShortTermStore {
   /** The entry, or null. Age-evicts on read, as Python does. */
   get(conversationId: string): ShortTermEntry | null {
     if (!conversationId) return null;
+    conversationId = normalizeConversationId(conversationId);
     const entry = this.#entries.get(conversationId);
     if (entry === undefined) return null;
     if (this.#now() - entry.lastActivityAt > this.#maxAgeMs) {
@@ -266,6 +268,7 @@ export class ShortTermStore {
     confirmation: TurnConfirmation = {},
   ): void {
     if (!conversationId) return;
+    conversationId = normalizeConversationId(conversationId);
     const stamp = timestamp ?? new Date(this.#now()).toISOString();
     if (this.#archive !== null) {
       try {
@@ -302,6 +305,7 @@ export class ShortTermStore {
    */
   noteServerCount(conversationId: string, count: number): void {
     if (!conversationId) return;
+    conversationId = normalizeConversationId(conversationId);
     const entry = this.#entries.get(conversationId);
     if (entry !== undefined) this.#noteCount(entry, Number(count), 0);
   }
@@ -352,13 +356,14 @@ export class ShortTermStore {
   applyCompaction(bundle: Record<string, unknown>): void {
     if (typeof bundle !== 'object' || bundle === null) return;
     const cc = (bundle['conversation_context'] ?? {}) as Record<string, unknown>;
-    const conversationId = String(
+    const rawConversationId = String(
       cc['conversation_id'] ??
         bundle['anticipation_conversation_id'] ??
         bundle['conversation_id'] ??
         '',
     );
-    if (!conversationId) return;
+    if (!rawConversationId) return;
+    const conversationId = normalizeConversationId(rawConversationId);
 
     const endTs = parseIso(cc['end_timestamp'] ?? cc['compacted_at']);
     const compactedAt = parseIso(cc['compacted_at']);
@@ -445,6 +450,7 @@ export class ShortTermStore {
    */
   reseed(conversationId: string, state: ServerPromptState): void {
     if (!conversationId) return;
+    conversationId = normalizeConversationId(conversationId);
     const entry = this.#entries.get(conversationId);
     if (entry === undefined || entry.shared) return;
     entry.serverMessageCount = Math.max(
@@ -462,7 +468,7 @@ export class ShortTermStore {
   }
 
   invalidate(conversationId: string): void {
-    this.#entries.delete(conversationId);
+    this.#entries.delete(normalizeConversationId(conversationId));
   }
 
   clear(): void {

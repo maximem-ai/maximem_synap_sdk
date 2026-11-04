@@ -66,6 +66,26 @@ await sdk.memories.create(document="Our API rate limit is 1000 rpm...")
 
 You can broaden scope later (re-ingest at the broader level). You **cannot narrow** scope after the fact without re-ingesting — start narrow if uncertain.
 
+## Deeper scope ladders
+
+Some accounts add levels between customer and user (a `team`, a `region`). On those, `customer_id` and `user_id` cannot say which team a memory belongs to, so the call also carries a path: a map from level key to id. Detect it, never assume it. Python SDK 0.7.1 / JS SDK 0.7.1 and later (in 0.7.0 `sdk.fetch` with a path fails on the customer scope):
+
+```python
+ladder = await sdk.get_scope_ladder()          # read once; cached for 300 s; None if unknown
+addr = ladder.address(["acme", "payments", "dana"])   # one value per level, outermost first
+
+ctx = await sdk.fetch(search_query=["..."], **addr.read_kwargs())   # user_id, customer_id, scope_path
+await sdk.memories.create(document="...", **addr.write_kwargs())    # user_id, customer_id, scope
+```
+
+- `whoami` also returns a `scope_ladder` block on Cloud: the levels (outermost first, your own client level left out), `is_default`, `ladder_ratified` and `nested_scoping_enabled`. If it is missing, the SDK infers the default ladder and sets `source="inferred"`.
+- `sdk.fetch(**addr.read_kwargs())` sends each scope the path it accepts: the customer scope reads shared material only, so it gets the path cut above the person's level; the user and conversation scopes get it whole, and the client scope gets none (the client read is account-wide shared memory, and a path would narrow it, duplicate the other reads and create registry nodes; 0.7.0 sent it). `customer.context.fetch` takes no `user_id`, so do not give it `**addr.read_kwargs()`.
+- A path is refused unless nested scoping is on for the instance AND the account's ladder has been accepted. So on a default ladder `address()` returns ids only and never a path, and on a deeper ladder that is not accepted it raises `ScopeLadderError` before any request. Do not send a path by hand on a default ladder.
+- Reads name it `scope_path`; `memories.create` / `create_from_file` / `forget` name it `scope`; `record_message`, `ingest_transcript` and `send_message` name it `scope_path`.
+- On B2C give one value per level except the customer level. That case is not yet verified against a live account.
+- If `source` is `"inferred"` and the human says the account has more levels, the SDK cannot know them: ask for the level keys. Do not guess them.
+- Docs: `https://docs.maximem.ai/concepts/scope-ladder`
+
 ## Memory types
 
 Synap doesn't store raw text. Ingestion extracts five typed memories:

@@ -25,6 +25,7 @@ import {
   type EveSessionLike,
   type SynapSdkLike,
 } from "./types.js";
+import { assertSdkSupportsScopePath, ensureIdsMatchPath } from "./scope-guard.js";
 
 export interface SynapToolOptions {
   /** Configured Synap SDK. */
@@ -46,6 +47,26 @@ export interface SynapToolOptions {
   conversationId?: string;
   /** Synap fetch mode ("accurate" default, or "fast"). */
   mode?: string;
+  /**
+   * The level of your account's scope ladder to read and write at, for an
+   * account whose ladder has a level between customer and user, for example
+   * `{ customer: "acme", team: "eng", user: "u1" }`. Fixed when the tool is
+   * built: it is not a parameter the model sees, and a `scope_path` in the
+   * model's arguments is ignored. Unset on a default ladder, where the calls
+   * are exactly what they were. Reads send it as `scope_path`, the store
+   * tool as `scope`.
+   */
+  scopePath?: Record<string, string>;
+}
+
+/** `{ [key]: path }` when a path was given and has entries, else `{}`, so an unchanged call stays unchanged. */
+function withPath<K extends string>(
+  key: K,
+  path: Record<string, string> | undefined,
+): { [P in K]?: Record<string, string> } {
+  return path && Object.keys(path).length > 0
+    ? ({ [key]: { ...path } } as { [P in K]?: Record<string, string> })
+    : {};
 }
 
 const searchInput = z.object({
@@ -74,6 +95,12 @@ const storeInput = z.object({
 export function createSynapSearchTool(options: SynapToolOptions) {
   const { sdk } = options;
   if (!sdk) throw new TypeError("createSynapSearchTool requires a non-null sdk");
+  assertSdkSupportsScopePath(sdk, options.scopePath, "createSynapSearchTool");
+  ensureIdsMatchPath(options.scopePath, {
+    userId: options.userId,
+    customerId: options.customerId,
+    where: "createSynapSearchTool",
+  });
 
   return defineTool({
     description:
@@ -93,6 +120,14 @@ export function createSynapSearchTool(options: SynapToolOptions) {
       if (!query || !userId) {
         return { formattedContext: "", available: false };
       }
+      // The principal varies per call but the path was fixed at build time, and
+      // the server lets the path's `user` / `customer` win over the ids below.
+      // Refuse (throw, not degrade) rather than read another identity's memory.
+      ensureIdsMatchPath(options.scopePath, {
+        userId,
+        customerId: options.customerId,
+        where: "synap_search",
+      });
       try {
         const response = await sdk.fetch({
           conversation_id: resolveConversationId(options.conversationId, ctx as EveSessionLike) ?? null,
@@ -102,6 +137,7 @@ export function createSynapSearchTool(options: SynapToolOptions) {
           max_results: maxResults,
           mode: options.mode ?? "accurate",
           include_conversation_context: false,
+          ...withPath("scope_path", options.scopePath),
         });
         const text = (response.formatted_context ?? "").trim();
         return { formattedContext: text, available: !!text };
@@ -121,6 +157,12 @@ export function createSynapSearchTool(options: SynapToolOptions) {
 export function createSynapStoreTool(options: SynapToolOptions) {
   const { sdk } = options;
   if (!sdk) throw new TypeError("createSynapStoreTool requires a non-null sdk");
+  assertSdkSupportsScopePath(sdk, options.scopePath, "createSynapStoreTool");
+  ensureIdsMatchPath(options.scopePath, {
+    userId: options.userId,
+    customerId: options.customerId,
+    where: "createSynapStoreTool",
+  });
 
   return defineTool({
     description:
@@ -144,6 +186,12 @@ export function createSynapStoreTool(options: SynapToolOptions) {
           "no user scope (authenticate the channel or pass userId)",
         );
       }
+      // See synap_search: fail closed when the principal is not the path's user.
+      ensureIdsMatchPath(options.scopePath, {
+        userId,
+        customerId: options.customerId,
+        where: "synap_store",
+      });
       const metadata: Record<string, unknown> = { source: "eve", ...(input?.metadata ?? {}) };
       try {
         const result = await sdk.memories.create({
@@ -151,6 +199,7 @@ export function createSynapStoreTool(options: SynapToolOptions) {
           user_id: userId,
           customer_id: options.customerId || null,
           metadata,
+          ...withPath("scope", options.scopePath),
         });
         return { recorded: true, ingestionId: result.ingestion_id ?? "" };
       } catch (err) {

@@ -83,10 +83,10 @@ loop is patched.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from maximem_synap import MaximemSynapSDK
-from synap_integrations_common import run_async
+from synap_integrations_common import SynapIntegrationError, ensure_ids_match_path, run_async
 from synap_integrations_common.stream_events import (
     record_turn,
     report_reasoning,
@@ -163,16 +163,51 @@ def _input_text(run_input: Any) -> str:
     return content
 
 
+def _turn_ids(ids: Dict[str, Any], scope_path: Optional[Mapping[str, str]]) -> Dict[str, Any]:
+    """``ids`` for a user or assistant turn: plus the ladder path, only when set.
+
+    Only ``record_turn`` takes ``scope_path``. A tool call, a tool result and a
+    reasoning step are stream events of the conversation, which already holds
+    its path, so they keep the plain ``ids``.
+    """
+    return {**ids, "scope_path": dict(scope_path)} if scope_path else ids
+
+
+def _ids_allowed(
+    ids: Dict[str, Any], scope_path: Optional[Mapping[str, str]], site: str
+) -> bool:
+    """Whether this run's user may be reported under the fixed ``scope_path``.
+
+    A hook runs inside the agent loop and promises never to raise, so a run for
+    a user the path does not name is SKIPPED (nothing is sent, not even the
+    history read) and logged at ERROR, rather than raised: raising would break
+    the user's run over telemetry, while sending would file the turn under the
+    path's user (the server lets the path win over the flat id). The same
+    mismatch in the constructor arguments raises at construction.
+    """
+    try:
+        ensure_ids_match_path(
+            scope_path, user_id=ids.get("user_id") or None,
+            customer_id=ids.get("customer_id") or None, where=site)
+    except SynapIntegrationError as exc:
+        logger.error("synap_agno %s: run NOT reported to Synap: %s", site, exc)
+        return False
+    return True
+
+
 async def _report_input(
-    sdk: Any, run_input: Any, ids: Dict[str, str], session: Any = None, run_context: Any = None
+    sdk: Any, run_input: Any, ids: Dict[str, str], session: Any = None, run_context: Any = None,
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> None:
+    if not _ids_allowed(ids, scope_path, "pre_hook"):
+        return
     content = _input_text(run_input)
     # Before the turn is recorded, so Synap's history is read as it stood when
     # the run began; the splice drops this turn from it either way.
     if ids["conversation_id"]:
         await prepare_history(sdk, session, run_context, ids["conversation_id"], content)
     if content:
-        await record_turn(sdk, role="user", content=content, **ids)
+        await record_turn(sdk, role="user", content=content, **_turn_ids(ids, scope_path))
 
 
 async def _report_output(
@@ -181,8 +216,11 @@ async def _report_output(
     ids: Dict[str, str],
     *,
     report_tool_results: bool,
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> None:
     if run_output is None:
+        return
+    if not _ids_allowed(ids, scope_path, "post_hook"):
         return
 
     # Reasoning first: it is what led to the tools and the answer.
@@ -221,7 +259,7 @@ async def _report_output(
     # reads it as the cue to predict the next one.
     content = _text(getattr(run_output, "content", None))
     if content:
-        await record_turn(sdk, role="assistant", content=content, **ids)
+        await record_turn(sdk, role="assistant", content=content, **_turn_ids(ids, scope_path))
 
 
 def _validate(sdk: Any, site: str) -> None:
@@ -236,6 +274,7 @@ def create_synap_async_hooks(
     conversation_id: str = "",
     user_id: str = "",
     report_tool_results: bool = True,
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, List[Callable[..., Any]]]:
     """``pre_hooks`` / ``post_hooks`` as coroutine functions, for ``agent.arun()``.
 
@@ -256,12 +295,21 @@ def create_synap_async_hooks(
         report_tool_results: Whether tool results are reported. ⚠ A tool result
             is usually your own customer's data. It is an anticipation hint and
             never becomes a long-term memory, but it does leave your process.
+        scope_path: Deeper scope ladders only: the level the conversation
+            belongs to, as ``{level_key: value}``. Sent with the user and
+            assistant turns only when set; leave it unset and nothing changes.
+            A path that includes the ``user`` level fixes the user: see
+            :func:`create_synap_hooks`.
 
     Returns:
         A dict to splat into ``Agent(...)``.
     """
     _validate(sdk, "create_synap_async_hooks")
+    ensure_ids_match_path(
+        scope_path, user_id=user_id or None, customer_id=customer_id or None,
+        where="create_synap_async_hooks")
     default_user_id = user_id
+    turn_scope = dict(scope_path) if scope_path else None
 
     async def synap_pre_hook(
         run_input: Any = None,
@@ -270,7 +318,7 @@ def create_synap_async_hooks(
         user_id: Optional[str] = None,  # noqa: A002: Agno matches hook args by name
     ) -> None:
         ids = _ids(run_context, user_id, conversation_id, default_user_id, customer_id)
-        await _report_input(sdk, run_input, ids, session, run_context)
+        await _report_input(sdk, run_input, ids, session, run_context, turn_scope)
 
     async def synap_post_hook(
         run_output: Any = None,
@@ -281,7 +329,8 @@ def create_synap_async_hooks(
         remove_history(session)
         ids = _ids(run_context, user_id, conversation_id, default_user_id, customer_id)
         await _report_output(
-            sdk, run_output, ids, report_tool_results=report_tool_results
+            sdk, run_output, ids, report_tool_results=report_tool_results,
+            scope_path=turn_scope,
         )
 
     return {"pre_hooks": [synap_pre_hook], "post_hooks": [synap_post_hook]}
@@ -294,6 +343,7 @@ def create_synap_hooks(
     conversation_id: str = "",
     user_id: str = "",
     report_tool_results: bool = True,
+    scope_path: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, List[Callable[..., Any]]]:
     """``pre_hooks`` / ``post_hooks`` that work on both ``run()`` and ``arun()``.
 
@@ -301,7 +351,15 @@ def create_synap_hooks(
     bridge to the async SDK through ``run_async``. See the module docstring for
     the ``nest_asyncio`` caveat on ``arun()``.
 
-    Args and return value are the same as :func:`create_synap_async_hooks`.
+    Args and return value are the same as :func:`create_synap_async_hooks`,
+    including ``scope_path`` (deeper scope ladders only: the level the
+    conversation belongs to, sent with the user and assistant turns when set).
+
+    A ``scope_path`` that includes the ``user`` (or ``customer``) level fixes
+    that user. A run for a different user is not reported (logged at ERROR,
+    nothing sent); ``user_id`` / ``customer_id`` that disagree with the path at
+    construction raise ``SynapIntegrationError``. Make one set of hooks per
+    user, or stop the path above the user level.
 
     Example::
 
@@ -313,7 +371,11 @@ def create_synap_hooks(
         agent.run("Where is my order?", user_id="alice")
     """
     _validate(sdk, "create_synap_hooks")
+    ensure_ids_match_path(
+        scope_path, user_id=user_id or None, customer_id=customer_id or None,
+        where="create_synap_hooks")
     default_user_id = user_id
+    turn_scope = dict(scope_path) if scope_path else None
 
     def synap_pre_hook(
         run_input: Any = None,
@@ -322,7 +384,9 @@ def create_synap_hooks(
         user_id: Optional[str] = None,  # noqa: A002: Agno matches hook args by name
     ) -> None:
         ids = _ids(run_context, user_id, conversation_id, default_user_id, customer_id)
-        _bridge(_report_input(sdk, run_input, ids, session, run_context), "pre_hook")
+        _bridge(
+            _report_input(sdk, run_input, ids, session, run_context, turn_scope), "pre_hook"
+        )
 
     def synap_post_hook(
         run_output: Any = None,
@@ -334,7 +398,8 @@ def create_synap_hooks(
         ids = _ids(run_context, user_id, conversation_id, default_user_id, customer_id)
         _bridge(
             _report_output(
-                sdk, run_output, ids, report_tool_results=report_tool_results
+                sdk, run_output, ids, report_tool_results=report_tool_results,
+                scope_path=turn_scope,
             ),
             "post_hook",
         )

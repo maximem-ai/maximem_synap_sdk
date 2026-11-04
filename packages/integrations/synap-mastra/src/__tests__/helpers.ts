@@ -104,6 +104,8 @@ export function makeSdk(opts: MakeSdkOptions = {}): SynapSdkLike {
 
   return {
     fetch: vi.fn().mockResolvedValue(fetchResponse),
+    // The marker of an SDK that carries `scope_path` (>= 0.7.1); see scope-guard.ts.
+    get_scope_ladder: vi.fn(),
     conversation: {
       record_message: vi.fn().mockResolvedValue({
         message_id: 'm-001',

@@ -595,6 +595,21 @@ def _wire_rank_score(item: Dict[str, Any]) -> Optional[float]:
         return None
 
 
+def _wire_metadata(item: Dict[str, Any]) -> Dict[str, Any]:
+    """An item's metadata, carrying its `scope` whichever shape it arrived in.
+
+    The HTTP response puts `scope` inside `metadata`; a prefetched (gRPC) item
+    carries it top-level and has no `metadata`. Readers look in `metadata`, so a
+    cache hit read every client-scope item as unlabelled. Returns a copy; the
+    input is not changed, and a `scope` already in `metadata` wins.
+    """
+    md = item.get("metadata")
+    md = dict(md) if isinstance(md, dict) else {}
+    if not md.get("scope") and item.get("scope"):
+        md["scope"] = item["scope"]
+    return md
+
+
 def _wire_category(item: Dict[str, Any], fallback: str = "") -> str:
     """An item's type. A chunk is an excerpt whatever list it came in: a server
     or a prefetched bundle that predates ranking files it under facts."""
@@ -635,7 +650,7 @@ def _ranked_item_from(r: Dict[str, Any]) -> RankedItem:
         rank_score=_wire_rank_score(r),
         confidence=_coerce_float(r.get("confidence"), default=0.0),
         source=r.get("source", ""),
-        metadata=r.get("metadata") or {},
+        metadata=_wire_metadata(r),
         event_date=_parse_iso_datetime(r.get("event_date")),
         said_at=_parse_iso_datetime(r.get("said_at")),
         event_end=_parse_iso_datetime(r.get("event_end")),
@@ -660,7 +675,7 @@ def _fact_from(f: Dict[str, Any]) -> Fact:
         confidence=_coerce_float(f.get("confidence"), default=0.0),
         source=f.get("source", ""),
         extracted_at=f.get("extracted_at") or datetime.now(timezone.utc),
-        metadata=f.get("metadata", {}),
+        metadata=_wire_metadata(f),
         event_date=_parse_iso_datetime(f.get("event_date")),
         said_at=_parse_iso_datetime(f.get("said_at")),
         event_end=_parse_iso_datetime(f.get("event_end")),
@@ -681,7 +696,7 @@ def _preference_from(p: Dict[str, Any]) -> Preference:
         content=p.get("content", ""),
         strength=_coerce_float(p.get("strength", p.get("confidence")), default=0.0),
         extracted_at=p.get("extracted_at") or datetime.now(timezone.utc),
-        metadata=p.get("metadata", {}),
+        metadata=_wire_metadata(p),
         event_date=_parse_iso_datetime(p.get("event_date")),
         said_at=_parse_iso_datetime(p.get("said_at")),
         event_end=_parse_iso_datetime(p.get("event_end")),
@@ -702,7 +717,7 @@ def _episode_from(e: Dict[str, Any]) -> Episode:
         occurred_at=e.get("occurred_at") or e.get("extracted_at") or datetime.now(timezone.utc),
         significance=_coerce_float(e.get("significance", e.get("confidence")), default=0.0),
         participants=e.get("participants", []),
-        metadata=e.get("metadata", {}),
+        metadata=_wire_metadata(e),
         event_date=_parse_iso_datetime(e.get("event_date")),
         said_at=_parse_iso_datetime(e.get("said_at")),
         event_end=_parse_iso_datetime(e.get("event_end")),
@@ -723,7 +738,7 @@ def _emotion_from(em: Dict[str, Any]) -> Emotion:
         intensity=_coerce_float(em.get("intensity", em.get("confidence")), default=0.0),
         detected_at=em.get("detected_at") or em.get("extracted_at") or datetime.now(timezone.utc),
         context=em.get("context", em.get("content", "")),
-        metadata=em.get("metadata", {}),
+        metadata=_wire_metadata(em),
         event_date=_parse_iso_datetime(em.get("event_date")),
         said_at=_parse_iso_datetime(em.get("said_at")),
         event_end=_parse_iso_datetime(em.get("event_end")),
@@ -751,7 +766,7 @@ def _temporal_event_from(t: Dict[str, Any]) -> TemporalEvent:
         confidence=_coerce_float(t.get("confidence"), default=0.0),
         source=t.get("source", ""),
         extracted_at=_parse_iso_datetime(t.get("extracted_at")),
-        metadata=t.get("metadata", {}),
+        metadata=_wire_metadata(t),
         source_evidence=t.get("source_evidence"),
         matched_queries=list(t.get("matched_queries") or []),
         **_extras(t, TemporalEvent),

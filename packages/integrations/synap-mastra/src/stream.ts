@@ -55,6 +55,13 @@ export interface SynapStreamOptions {
    * nothing; a turn without reasoning is an ordinary turn.
    */
   reportThoughts?: boolean;
+  /**
+   * The level of the account's scope ladder the conversation belongs to. Sent
+   * on the user and assistant turns only (the stream event's `scope`, or
+   * `conversation.record_message(scope_path)` when the stream cannot carry the
+   * turn). `SynapMemory` passes its own `scopePath` here.
+   */
+  scopePath?: Record<string, string>;
 }
 
 /** What `saveMessages` already knows about the message it is about to write. */
@@ -144,6 +151,7 @@ export class SynapMastraStreamReporter {
       userId: this.userId,
       customerId: this.customerId,
     };
+    const scopePath = this.options.scopePath;
     const messageId = readText(message, "id");
 
     // The parts come first, and the turn last, for two reasons. The order the
@@ -176,6 +184,7 @@ export class SynapMastraStreamReporter {
       ...scope,
       role: info.role,
       content: info.text,
+      ...(scopePath && Object.keys(scopePath).length > 0 ? { scopePath } : {}),
     });
     // Only remembered once it actually went out, so a failed write is not
     // suppressed on a retry.

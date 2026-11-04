@@ -15,6 +15,7 @@ from langchain_core.runnables import Runnable
 
 from synap_langchain.short_term import synap_st_message, synap_st_runnable
 from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +134,7 @@ class TestRunnable:
         result = await r.ainvoke({"messages": []})
         assert result == "Likes dark mode."
         sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-            conversation_id="conv_abc",
+            conversation_id=coerce_conversation_id("conv_abc"),
             style="narrative",
         )
 
@@ -169,7 +170,7 @@ class TestRunnable:
         r = synap_st_runnable(sdk, "conv_abc", style="structured")
         await r.ainvoke({})
         sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-            conversation_id="conv_abc",
+            conversation_id=coerce_conversation_id("conv_abc"),
             style="structured",
         )
 

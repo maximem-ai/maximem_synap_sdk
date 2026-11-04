@@ -31,7 +31,7 @@ import {
   isSynapHistory,
   spliceHistory,
 } from "./stream-events.js";
-import type { SynapSdkLike } from "./types.js";
+import { withScopePath, type SynapSdkLike } from "./types.js";
 
 /** Id of the system message `recall()` adds for the compaction block. */
 export const COMPACTION_ID_PREFIX = "synap-compaction-";
@@ -91,6 +91,8 @@ export interface SynapInputProcessorOptions {
   userId: string;
   customerId: string;
   mode: string;
+  /** The level of a deeper scope ladder to read at; sent as `scope_path` only when set. */
+  scopePath?: Record<string, string>;
   /** Whether Synap's long-term context is added as a system message. */
   injectSystemContext: boolean;
 }
@@ -132,6 +134,7 @@ export class SynapInputProcessor {
         max_results: 20,
         mode: this.options.mode,
         include_conversation_context: false,
+        ...withScopePath("scope_path", this.options.scopePath),
       });
       const text = (response.formatted_context ?? "").trim();
       if (text) messageList.addSystem(text, "synap-memory");

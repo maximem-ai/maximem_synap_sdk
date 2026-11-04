@@ -11,11 +11,13 @@ Error-handling contracts (from processors.py docstring):
 
 from __future__ import annotations
 
+from synap_integrations_common.conversation_id import coerce_conversation_id
 import logging
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from synap_integrations_common import coerce_conversation_id
 
 from pipecat.frames.frames import (
     FunctionCallInProgressFrame,
@@ -462,7 +464,7 @@ class TestSynapRecorderHappyPaths:
         await rec._flush()
 
         for call in sdk.conversation.record_message.call_args_list:
-            assert call.kwargs["conversation_id"] == "c-test"
+            assert call.kwargs["conversation_id"] == coerce_conversation_id("c-test")
             assert call.kwargs["user_id"] == "alice"
             assert call.kwargs["customer_id"] == "acme"
 

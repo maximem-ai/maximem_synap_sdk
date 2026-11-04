@@ -8,6 +8,7 @@ import pytest
 
 from synap_claude_agent.short_term import create_synap_st_hook
 from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 def _make_response(formatted: str | None, available: bool):
@@ -73,7 +74,7 @@ class TestCacheHit:
         cb = _hook_callable(create_synap_st_hook(sdk, "conv_abc", style="structured"))
         await cb({"prompt": "hi"}, None, MagicMock())
         sdk.conversation.context.get_context_for_prompt.assert_awaited_once_with(
-            conversation_id="conv_abc",
+            conversation_id=coerce_conversation_id("conv_abc"),
             style="structured",
         )
 

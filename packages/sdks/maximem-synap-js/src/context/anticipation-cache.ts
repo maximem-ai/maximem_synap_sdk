@@ -29,6 +29,7 @@
 import { BM25, tokenize } from '../cache/bm25.js';
 import { CONTRACT, SEMANTIC_MATCH, THRESHOLDS } from '../behavior/contract.js';
 import type { Encoder } from '../cache/history-search.js';
+import { normalizeConversationId } from '../util/conversation-id.js';
 import { getEnv, getEnvFlag, getEnvFloat } from '../util/env.js';
 
 const EFFECTIVE_FLOOR = CONTRACT.thresholds.effective_floor.value;
@@ -122,7 +123,8 @@ export function rungServes(
 export function unownedElsewhere(
   entryEntity: string, entryConversation: string | null, conversationId: string | null,
 ): boolean {
-  return entryEntity === ANY_SCOPE && entryConversation !== null && entryConversation !== conversationId;
+  return entryEntity === ANY_SCOPE && entryConversation !== null
+    && normalizeConversationId(entryConversation) !== normalizeConversationId(conversationId);
 }
 
 export interface BundleItem {

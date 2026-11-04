@@ -16,10 +16,12 @@ Documented contract (hooks.py docstring):
 
 from __future__ import annotations
 
+from synap_integrations_common.conversation_id import coerce_conversation_id
 import logging
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 from synap_claude_agent.hooks import (
     _DEFAULT_CONTEXT_PREAMBLE,
@@ -164,7 +166,7 @@ class TestHappyPath:
         )
         await cb({"prompt": "what do I like?", "session_id": "conv-99"}, None, MagicMock())
         sdk.fetch.assert_awaited_once_with(
-            conversation_id="conv-99",
+            conversation_id=coerce_conversation_id("conv-99"),
             user_id="alice",
             customer_id="acme",
             search_query=["what do I like?"],
@@ -183,7 +185,7 @@ class TestHappyPath:
         )
         await cb({"prompt": "hi", "session_id": "session-xyz"}, None, MagicMock())
         call_kwargs = sdk.fetch.call_args.kwargs
-        assert call_kwargs["conversation_id"] == "static-conv-1"
+        assert call_kwargs["conversation_id"] == coerce_conversation_id("static-conv-1")
 
     @pytest.mark.asyncio
     async def test_session_id_used_when_no_static_conversation_id(self):
@@ -191,7 +193,7 @@ class TestHappyPath:
         cb = _hook_callable(create_synap_hooks(sdk, user_id="alice"))
         await cb({"prompt": "hi", "session_id": "sess-from-input"}, None, MagicMock())
         call_kwargs = sdk.fetch.call_args.kwargs
-        assert call_kwargs["conversation_id"] == "sess-from-input"
+        assert call_kwargs["conversation_id"] == coerce_conversation_id("sess-from-input")
 
     @pytest.mark.asyncio
     async def test_conv_id_none_when_no_session_id_and_no_static(self):
@@ -212,7 +214,7 @@ class TestHappyPath:
         )
         await cb({"prompt": "remember this"}, None, MagicMock())
         sdk.conversation.record_message.assert_awaited_once_with(
-            conversation_id="conv-1",
+            conversation_id=coerce_conversation_id("conv-1"),
             role="user",
             content="remember this",
             user_id="alice",

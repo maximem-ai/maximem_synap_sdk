@@ -29,6 +29,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from synap_claude_agent.mcp_server import _build_synap_tools, create_synap_mcp_server
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +177,7 @@ class TestSynapSearchHappyPath:
         )
         await search.handler({"query": "coffee", "max_results": 3})
         sdk.fetch.assert_awaited_once_with(
-            conversation_id="conv-x",
+            conversation_id=coerce_conversation_id("conv-x"),
             user_id="bob",
             customer_id="acme",
             search_query=["coffee"],

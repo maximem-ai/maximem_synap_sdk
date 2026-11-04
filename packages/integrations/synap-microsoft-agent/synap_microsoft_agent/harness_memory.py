@@ -30,10 +30,12 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any, List, Optional, Sequence
+from typing import Any, List, Mapping, Optional, Sequence
 
+from synap_integrations_common import ensure_ids_match_path
+from synap_microsoft_agent._scope_path import checked_scope_path
 from maximem_synap import MaximemSynapSDK
-from synap_integrations_common import fetch_compacted_history, wrap_sdk_errors_async
+from synap_integrations_common import fetch_compacted_history, wrap_sdk_errors_async, coerce_conversation_id
 
 from synap_microsoft_agent._harness_compat import require_harness
 from synap_microsoft_agent.stream import (
@@ -114,6 +116,7 @@ class SynapMemoryContextProvider(MemoryContextProvider):
         user_id: Optional[str] = None,
         customer_id: Optional[str] = None,
         owner_state_key: str = DEFAULT_OWNER_STATE_KEY,
+        scope_path: Optional[Mapping[str, str]] = None,
         **kwargs: Any,
     ) -> None:
         if sdk is None:
@@ -123,6 +126,12 @@ class SynapMemoryContextProvider(MemoryContextProvider):
         self.user_id = user_id
         self.customer_id = customer_id
         self.owner_state_key = owner_state_key
+        # A deeper scope ladder's level; sent with the transcript's turn writes
+        # only when set. The store has its own (see create_synap_harness_memory).
+        self.scope_path: Optional[dict[str, str]] = checked_scope_path(scope_path, "SynapMemoryContextProvider")
+        ensure_ids_match_path(
+            self.scope_path, user_id=user_id or None, customer_id=customer_id or None,
+            where="SynapMemoryContextProvider")
 
     async def before_run(
         self, *, agent: Any, session: Any, context: Any, state: Any
@@ -221,7 +230,7 @@ class SynapMemoryContextProvider(MemoryContextProvider):
         )
         try:
             response = await self.sdk.conversation.context.get_context_for_prompt(
-                conversation_id=conversation_id,
+                conversation_id=coerce_conversation_id(conversation_id),
             )
         except Exception as exc:  # noqa: BLE001 — read-side degrades
             # A conversation with no turns yet returns "not found", and that is
@@ -333,6 +342,7 @@ class SynapMemoryContextProvider(MemoryContextProvider):
                     conversation_id=conversation_id,
                     user_id=self.user_id or "",
                     customer_id=self.customer_id or "",
+                    **({"scope_path": dict(self.scope_path)} if self.scope_path else {}),
                 ):
                     continue
                 await self.sdk.conversation.record_message(
@@ -341,6 +351,7 @@ class SynapMemoryContextProvider(MemoryContextProvider):
                     content=text,
                     user_id=self.user_id,
                     customer_id=self.customer_id or "",
+                    **({"scope_path": dict(self.scope_path)} if self.scope_path else {}),
                 )
 
 
@@ -352,6 +363,7 @@ def create_synap_harness_memory(
     record_store: Optional[TopicRecordStore] = None,
     include_recall: bool = True,
     store: Optional[Any] = None,
+    scope_path: Optional[Mapping[str, str]] = None,
     **kwargs: Any,
 ) -> SynapMemoryContextProvider:
     """Build the harness memory provider, wired correctly.
@@ -381,12 +393,17 @@ def create_synap_harness_memory(
         store: A pre-built ``MemoryStore``, if you need to configure one
             beyond these arguments. Mutually exclusive with ``user_id`` /
             ``customer_id`` / ``record_store`` / ``include_recall``.
+        scope_path: The level on a deeper scope ladder. Given to the store this
+            builds and to the provider (transcript turns); sent only when set.
+            With a pre-built ``store`` it applies to the provider only: set it
+            on your store too.
         **kwargs: Passed to ``MemoryContextProvider`` — ``recent_turns``,
             ``selection_limit``, ``consolidation_interval``, and the rest.
 
     Raises:
         ValueError: If ``store`` is combined with the store-building arguments.
     """
+    scope_path = checked_scope_path(scope_path, "create_synap_harness_memory")
     if store is not None:
         conflicting = [
             name
@@ -411,6 +428,7 @@ def create_synap_harness_memory(
             customer_id=customer_id,
             record_store=record_store,
             include_recall=include_recall,
+            scope_path=scope_path,
         )
 
     return SynapMemoryContextProvider(
@@ -418,6 +436,7 @@ def create_synap_harness_memory(
         store=memory_store,
         user_id=user_id,
         customer_id=customer_id,
+        scope_path=scope_path,
         **kwargs,
     )
 

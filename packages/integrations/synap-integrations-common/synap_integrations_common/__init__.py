@@ -1,6 +1,10 @@
 """Shared utilities for Synap framework integrations."""
 
 from synap_integrations_common.async_bridge import run_async, run_blocking
+from synap_integrations_common.conversation_id import (
+    coerce_conversation_id,
+    rest_conversation_id,
+)
 from synap_integrations_common.errors import (
     SynapIntegrationError,
     wrap_sdk_errors,
@@ -13,11 +17,17 @@ from synap_integrations_common.history import (
     is_synap_history,
     splice_history,
 )
-from synap_integrations_common.scope import default_scope
+from synap_integrations_common.scope import (
+    default_scope,
+    ensure_ids_match_path,
+    resolve_address,
+    scope_string,
+)
 from synap_integrations_common.stream_events import (
     end_session,
     ensure_stream,
     record_turn,
+    record_turn_via,
     report_reasoning,
     report_tool_call,
     report_tool_result,
@@ -32,12 +42,18 @@ __all__ = [
     "SynapIntegrationError",
     "wrap_sdk_errors",
     "wrap_sdk_errors_async",
+    "coerce_conversation_id",
+    "rest_conversation_id",
     "default_scope",
+    "resolve_address",
+    "ensure_ids_match_path",
+    "scope_string",
     "stream_is_active",
     "ensure_stream",
     "set_auto_listen",
     "report_turn",
     "record_turn",
+    "record_turn_via",
     "report_tool_call",
     "report_tool_result",
     "report_reasoning",

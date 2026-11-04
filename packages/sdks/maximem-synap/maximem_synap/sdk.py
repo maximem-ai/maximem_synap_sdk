@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -34,10 +35,12 @@ from .models.conversations import TranscriptIngestResponse, TranscriptTurn
 from .models.enums import CompactionLevel, ContextScope
 from .models.errors import (
     SynapError,
+    SynapPermanentError,
     AuthenticationError,
     InvalidInputError,
     ContextNotFoundError,
 )
+from .auth.local_mode import is_local_mode
 from .auth.manager import CredentialManager
 from .cache.manager import CacheManager, CacheScope
 # Imported at module level, not lazily like AnticipationCache below it: a
@@ -46,11 +49,23 @@ from .cache.manager import CacheManager, CacheScope
 from .cache.anticipation_cache import rung_key as _rung_key
 from .transport.http_client import HTTPTransport
 from .transport.grpc_client import GRPCTransport
+from .scope_ladder import (
+    LADDER_INVALIDATION_MIN_INTERVAL_SECONDS,
+    LADDER_RETRY_BACKOFF_SECONDS,
+    LADDER_TTL_SECONDS,
+    ScopeLadder,
+    ladder_from_whoami,
+    path_above_identity,
+)
 from .telemetry.collector import TelemetryCollector, emit_fetch_event, emit_memory_event
 from .telemetry.models import TelemetryEventType
 from .telemetry.transport import TelemetryTransport
 from .utils.correlation import generate_correlation_id
-from .utils.validators import validate_conversation_id, validate_instance_id
+from .utils.validators import (
+    normalize_conversation_id,
+    validate_conversation_id,
+    validate_instance_id,
+)
 from ._version import __version__
 from .memories.interface import MemoriesInterface
 from .memories.parts import (
@@ -122,6 +137,7 @@ def _mirror_text(content: Any, *, what: str) -> Any:
 
 
 def _one_write_landed(in_flight: Dict[str, int], conversation_id: str) -> None:
+    conversation_id = normalize_conversation_id(conversation_id)
     remaining = in_flight.get(conversation_id, 0) - 1
     if remaining > 0:
         in_flight[conversation_id] = remaining
@@ -468,6 +484,70 @@ def _budget_recent_turns(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return turns
 
 
+def _overlay_prompt_recent_messages(
+    sdk: "MaximemSynapSDK",
+    response: "ContextForPromptResponse",
+    conversation_id: Optional[str],
+) -> "ContextForPromptResponse":
+    """``response`` with the turns this process sent that the server's answer
+    does not list yet (read-your-writes for ``get_context_for_prompt``).
+
+    A turn sent on the stream is written by the server a moment later, and the
+    answer (or the five-minute cached copy of it) may have been built before.
+    The local short-term store holds the turn; the ones that come after
+    everything the server listed are appended to ``recent_messages`` and the
+    counts follow. Same matching as ``fetch``'s overlay when the local list is
+    not the whole conversation (``turns_after``: by position and text, never by
+    clock), and the same kill-switch (``_is_st_verbatim_overlay``).
+
+    Returns a copy; the cached answer is never touched. ``formatted_context``
+    and ``context_block`` stay the server's: the block is the compaction alone,
+    and ``formatted_context`` is the server's rendering. Never raises.
+    """
+    if not conversation_id:
+        return response
+    try:
+        if not sdk._is_st_verbatim_overlay():
+            return response
+        entry = sdk._st_store.get(conversation_id)
+        if entry is None or not entry.recent_turns:
+            return response
+        server_compaction = getattr(response, "compaction_id", None)
+        if server_compaction and server_compaction != entry.compaction_id:
+            # The local tail follows a different summary: turns it holds may
+            # already be inside the server's compaction. Leave the answer alone.
+            return response
+
+        from .cache.short_term_store import turns_after
+        from .models.context import RecentMessage
+
+        server_turns = [
+            {"role": m.role, "content": m.content, "timestamp": m.timestamp}
+            for m in (response.recent_messages or [])
+        ]
+        newer = turns_after(list(entry.recent_turns), server_turns)
+        newer = [t for t in newer if t.get("role") in ("user", "assistant")]
+        if not newer:
+            return response
+        added = [
+            RecentMessage(
+                role=t["role"],
+                content=t.get("content", ""),
+                timestamp=t.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+                message_id=t.get("message_id") or f"local-{i}",
+            )
+            for i, t in enumerate(newer)
+        ]
+        return response.model_copy(update={
+            "recent_messages": list(response.recent_messages or []) + added,
+            "recent_message_count": (response.recent_message_count or 0) + len(added),
+            "total_message_count": (response.total_message_count or 0) + len(added),
+        })
+    except Exception as e:  # noqa: BLE001 - never break the read
+        logger.warning("get_context_for_prompt overlay failed (answer unchanged): %s", e)
+        return response
+
+
 def _overlay_local_recent_turns(
     sdk: "MaximemSynapSDK",
     response: Any,
@@ -603,6 +683,7 @@ def _dispatch_compaction_subscribers(
     """
     if not conversation_id:
         return
+    conversation_id = normalize_conversation_id(conversation_id)
     with sdk._compaction_subscribers_lock:
         callbacks = list(sdk._compaction_subscribers.get(conversation_id, []))
     if not callbacks:
@@ -779,6 +860,7 @@ async def _invoke_scope_fetch(
     customer_id: Optional[str],
     conversation_id: Optional[str],
     call_args: Dict[str, Any],
+    scope_path: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Dispatch into the right scope's fetch with closed-over ids merged in.
 
@@ -791,6 +873,8 @@ async def _invoke_scope_fetch(
     mode = str(call_args.get("mode") or "fast")
     precision_level = str(call_args.get("precision_level") or "high")
     call_conv_id = call_args.get("conversation_id") or conversation_id
+    # Closed over, never read from call_args: the model cannot change it.
+    path_kw: Dict[str, Any] = {"scope_path": scope_path} if scope_path else {}
 
     if scope == "unified":
         response = await sdk.fetch(
@@ -802,6 +886,7 @@ async def _invoke_scope_fetch(
             types=types,
             mode=mode,
             precision_level=precision_level,
+            **path_kw,
         )
         return {
             "formatted_context": response.formatted_context,
@@ -820,6 +905,7 @@ async def _invoke_scope_fetch(
             mode=mode,
             precision_level=precision_level,
             user_id=user_id,
+            **path_kw,
         )
     elif scope == "user":
         response = await sdk.user.context.fetch(
@@ -831,6 +917,7 @@ async def _invoke_scope_fetch(
             mode=mode,
             precision_level=precision_level,
             customer_id=customer_id,
+            **path_kw,
         )
     elif scope == "customer":
         response = await sdk.customer.context.fetch(
@@ -841,6 +928,7 @@ async def _invoke_scope_fetch(
             types=types,
             mode=mode,
             precision_level=precision_level,
+            **path_kw,
         )
     else:  # client
         response = await sdk.client.context.fetch(
@@ -850,6 +938,7 @@ async def _invoke_scope_fetch(
             types=types,
             mode=mode,
             precision_level=precision_level,
+            **path_kw,
         )
 
     return {
@@ -975,6 +1064,25 @@ class MaximemSynapSDK:
     # until then, and None against a server that does not report it.
     _user_context_isolation: Optional[str] = None
 
+    # The scope ladder, loaded lazily by get_scope_ladder(). Class-level
+    # defaults so an SDK that never asked for it carries nothing.
+    _scope_ladder: Optional[ScopeLadder] = None
+    # Loaded is separate from the value: "the server does not say" (None) is an
+    # answer too, and is cached for the same 300 s.
+    _scope_ladder_loaded: bool = False
+    _scope_ladder_expires_at: float = 0.0   # on _scope_ladder_clock
+    _scope_ladder_retry_at: float = 0.0     # no re-read before this
+    # Bumped by every invalidation. A read that started under an older number
+    # is not stored when it finishes.
+    _scope_ladder_generation: int = 0
+    _scope_ladder_invalidated: bool = False
+    _scope_ladder_invalidation_read_at: float = float("-inf")
+    # (task, generation, loop, keep_on_failure) of the read in flight, shared by
+    # concurrent callers with the same failure rule.
+    _scope_ladder_inflight: Optional[tuple] = None
+    # Injectable so tests need no sleeps.
+    _scope_ladder_clock: Callable[[], float] = staticmethod(time.monotonic)
+
     def __init__(
         self,
         instance_id: str = "",
@@ -1071,6 +1179,7 @@ class MaximemSynapSDK:
         self._grpc_transport: Optional[GRPCTransport] = None
         self._telemetry_collector: Optional[TelemetryCollector] = None
         self._telemetry_transport: Optional[TelemetryTransport] = None
+        self._local_mode = False
         self._client_id: Optional[str] = None
 
         from .cache.anticipation_cache import AnticipationCache
@@ -1125,6 +1234,9 @@ class MaximemSynapSDK:
         # (credits.py imports MaximemSynapSDK via TYPE_CHECKING only).
         from .credits import CreditsInterface
         self.credits = CreditsInterface(self)
+
+        from .maca import MacaInterface
+        self.maca = MacaInterface(self)
 
         # Configure logging
         configure_logging(self._config.log_level)
@@ -1191,7 +1303,7 @@ class MaximemSynapSDK:
 
     def _increment_turn(self, conversation_id: Optional[str]) -> int:
         """Increment and return the turn count for a conversation."""
-        key = conversation_id or "_global"
+        key = normalize_conversation_id(conversation_id) or "_global"
         self._turn_counters[key] = self._turn_counters.get(key, 0) + 1
         return self._turn_counters[key]
 
@@ -1209,6 +1321,7 @@ class MaximemSynapSDK:
         from .models.context import HistoryExcerpt
 
         store = self._turn_store
+        conversation_id = normalize_conversation_id(conversation_id)
         recent = list(response.recent_messages or [])
         # Turns the server listed are turns the archive should hold.
         store.add_many(conversation_id, [
@@ -1279,7 +1392,7 @@ class MaximemSynapSDK:
         if not conversation_id or result is None:
             return
         try:
-            self._turn_store.add(conversation_id, "tool", tool_result_text(result, tool_name),
+            self._turn_store.add(normalize_conversation_id(conversation_id), "tool", tool_result_text(result, tool_name),
                                  timestamp=timestamp or datetime.now(timezone.utc).isoformat())
         except Exception as e:  # the archive is a convenience: never fail the agent's call
             logger.warning("Failed to archive a tool result: %s", e)
@@ -1290,6 +1403,7 @@ class MaximemSynapSDK:
         what is here now; the next one sees the rest."""
         import time as _time
 
+        conversation_id = normalize_conversation_id(conversation_id)
         if total <= self._turn_store.count(conversation_id):
             return
         if _time.monotonic() < self._backfill_after.get(conversation_id, 0.0):
@@ -1301,6 +1415,7 @@ class MaximemSynapSDK:
             pass  # no running loop: nothing to schedule on
 
     async def _backfill_turns(self, conversation_id: str, total: int) -> None:
+        conversation_id = normalize_conversation_id(conversation_id)
         try:
             correlation_id = generate_correlation_id(self.instance_id)
             auth_context = await self._get_auth_context(correlation_id)
@@ -1425,6 +1540,7 @@ class MaximemSynapSDK:
         """
         if not conversation_id or self._cache_manager is None:
             return
+        conversation_id = normalize_conversation_id(conversation_id)
         try:
             for variant in _PROMPT_CACHE_VARIANTS:
                 self._cache_manager.delete(
@@ -1445,7 +1561,7 @@ class MaximemSynapSDK:
 
     def _should_inject_user_summary(self, conversation_id: Optional[str]) -> bool:
         """Check if user summary should be injected this turn."""
-        key = conversation_id or "_global"
+        key = normalize_conversation_id(conversation_id) or "_global"
         count = self._turn_counters.get(key, 0)
         return count > 0 and count % self._user_summary_interval == 0
 
@@ -1465,6 +1581,134 @@ class MaximemSynapSDK:
             getattr(self, "_user_context_isolation", None), customer_id,
             where=where, instance_id=getattr(self, "instance_id", None),
         )
+
+    def _on_invalid_input(self, exc: BaseException, carried_scope_path: bool) -> None:
+        """Called by the HTTP transport on every 400. Never raises.
+
+        A 400 that answers a call which carried a scope path may mean the
+        ladder we hold is stale, so the cache is invalidated. A 400 on a call
+        with no path says nothing about the ladder. The server's refusal
+        wording is deliberately not inspected. The gRPC stream does not surface
+        HTTP 400, so a ladder error on the stream is not observed here.
+        """
+        try:
+            if carried_scope_path:
+                self._invalidate_scope_ladder()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _invalidate_scope_ladder(self) -> None:
+        """Mark the cached ladder stale so the next call re-reads it (at most
+        once per LADDER_INVALIDATION_MIN_INTERVAL_SECONDS). The last known
+        ladder stays as the answer if that re-read fails, and a read already in
+        flight will not be stored."""
+        self._scope_ladder_generation += 1
+        self._scope_ladder_invalidated = True
+        self._scope_ladder_retry_at = 0.0
+
+    async def get_scope_ladder(self, *, refresh: bool = False) -> Optional[ScopeLadder]:
+        """The account's scope ladder, or ``None`` when it cannot be known.
+
+        Read lazily from ``GET /api/v1/auth/whoami`` (even when the client and
+        instance ids are already known), cached on this object for 300 s
+        (``None`` included), and re-read on ``refresh=True``. Concurrent callers
+        share one read. If a re-read after expiry fails, the last known ladder
+        is returned with a warning and the next try waits 60 s. A failure on the
+        very first read, or with ``refresh=True``, is raised.
+
+        When the server sends no ``scope_ladder`` block the default ladder is
+        inferred from ``user_context_isolation`` (``source="inferred"``).
+
+        Example:
+            ladder = await sdk.get_scope_ladder()
+            addr = ladder.address(["acme", "payments", "dana"])
+            ctx = await sdk.fetch(search_query=["..."], **addr.read_kwargs())
+        """
+        self._ensure_initialized()
+        now = self._scope_ladder_clock()
+        cached = self._scope_ladder
+        loaded = self._scope_ladder_loaded
+        if not refresh and loaded:
+            if now < self._scope_ladder_retry_at:
+                return cached
+            if self._scope_ladder_invalidated:
+                # At most one invalidation-triggered re-read per interval.
+                if now < (
+                    self._scope_ladder_invalidation_read_at
+                    + LADDER_INVALIDATION_MIN_INTERVAL_SECONDS
+                ):
+                    return cached
+            elif now < self._scope_ladder_expires_at:
+                return cached
+
+        loop = asyncio.get_running_loop()
+        keep_on_failure = loaded and not refresh
+        inflight = self._scope_ladder_inflight
+        if (
+            inflight is not None
+            and inflight[1] == self._scope_ladder_generation
+            and inflight[2] is loop
+            and inflight[3] == keep_on_failure
+        ):
+            # Concurrent callers share the one read, and its outcome. Only
+            # callers with the same failure rule join it: a refresh=True caller
+            # must see a failed read raised, so it never joins a read that
+            # would answer a failure with the stale ladder (and the other way
+            # round), and starts its own instead.
+            return await asyncio.shield(inflight[0])
+
+        generation = self._scope_ladder_generation
+        if self._scope_ladder_invalidated and not refresh:
+            self._scope_ladder_invalidation_read_at = now
+        task = asyncio.ensure_future(
+            self._read_scope_ladder(now, generation, cached, keep_on_failure)
+        )
+        self._scope_ladder_inflight = (task, generation, loop, keep_on_failure)
+
+        def _done(t: "asyncio.Future") -> None:
+            if self._scope_ladder_inflight is not None and self._scope_ladder_inflight[0] is t:
+                self._scope_ladder_inflight = None
+            if not t.cancelled():
+                t.exception()  # mark retrieved; every waiter re-raises it itself
+
+        task.add_done_callback(_done)
+        return await asyncio.shield(task)
+
+    async def _read_scope_ladder(
+        self,
+        now: float,
+        generation: int,
+        cached: Optional[ScopeLadder],
+        keep_on_failure: bool,
+    ) -> Optional[ScopeLadder]:
+        try:
+            auth_context = await self._get_auth_context()
+            whoami = await self._http_transport.get(
+                "/api/v1/auth/whoami", auth_context=auth_context,
+            )
+        except Exception as e:  # noqa: BLE001
+            if keep_on_failure:
+                logger.warning(
+                    "Could not re-read the scope ladder (%s); keeping the last "
+                    "known one and retrying in %ds.",
+                    e, int(LADDER_RETRY_BACKOFF_SECONDS),
+                )
+                self._scope_ladder_retry_at = now + LADDER_RETRY_BACKOFF_SECONDS
+                return cached
+            raise
+        ladder = ladder_from_whoami(
+            whoami if isinstance(whoami, dict) else {},
+            fallback_isolation=self._user_context_isolation,
+        )
+        if generation == self._scope_ladder_generation:
+            self._scope_ladder = ladder
+            self._scope_ladder_loaded = True
+            self._scope_ladder_expires_at = now + LADDER_TTL_SECONDS
+            self._scope_ladder_retry_at = 0.0
+            self._scope_ladder_invalidated = False
+        # else: the ladder was invalidated while this read was in flight. Its
+        # callers get the value, but it is not stored, so the next call re-reads.
+        return ladder
 
     async def initialize(self) -> None:
         """Initialize the SDK.
@@ -1486,8 +1730,13 @@ class MaximemSynapSDK:
             instance_id=self.instance_id,
         )
 
+        # No key and a base URL: the open-source server, which has no auth.
+        self._local_mode = is_local_mode(self._api_key, self._config.api_base_url)
+
         try:
-            credentials = self._credential_manager.load(api_key=self._api_key)
+            credentials = self._credential_manager.load(
+                api_key=self._api_key, base_url=self._config.api_base_url
+            )
             self._client_id = credentials.client_id
             if credentials.instance_id:
                 self.instance_id = credentials.instance_id
@@ -1507,18 +1756,21 @@ class MaximemSynapSDK:
             retry_policy=self._config.retry_policy,
             telemetry_callback=self._on_telemetry_event,
         )
+        # A 400 that is the server refusing a scope path means the ladder we
+        # hold may be stale: drop it so the next get_scope_ladder() re-reads.
+        self._http_transport.invalid_input_observer = self._on_invalid_input
 
         # Resolve client_id (and any missing instance_id) from the api_key.
         # Best-effort: a whoami failure leaves whatever the env / explicit
         # path produced and falls through to the existing behavior. Skipped
         # if everything is already known to avoid an extra round-trip.
-        if not self._client_id or not self.instance_id:
+        if self._local_mode or not self._client_id or not self.instance_id:
             try:
                 from .auth.models import AuthContext
                 bootstrap_ctx = AuthContext(
                     client_id=self._client_id or "",
                     instance_id=self.instance_id or "",
-                    api_key=self._api_key or os.environ.get("SYNAP_API_KEY", ""),
+                    api_key=credentials.api_key,
                 )
                 whoami = await self._http_transport.get(
                     "/api/v1/auth/whoami", auth_context=bootstrap_ctx,
@@ -1540,8 +1792,22 @@ class MaximemSynapSDK:
                         self._credential_manager._credentials.instance_id = resolved_instance_id
                     self._http_transport.instance_id = resolved_instance_id
             except Exception as e:
+                if self._local_mode:
+                    # There is no key to fall back on, and every other call
+                    # would fail later with a less useful message.
+                    raise AuthenticationError(
+                        f"Could not reach the Synap server at "
+                        f"{self._http_transport.base_url}, or it did not identify "
+                        f"itself: GET /api/v1/auth/whoami failed ({e})."
+                    ) from e
                 logger.warning(
                     "SDK whoami bootstrap failed (non-fatal, will fall back to env): %s", e,
+                )
+            if self._local_mode and not (self._client_id and self.instance_id):
+                raise AuthenticationError(
+                    f"The Synap server at {self._http_transport.base_url} did not "
+                    f"identify itself: GET /api/v1/auth/whoami returned no "
+                    f"client_id or instance_id."
                 )
 
         # The identity is now known. If this SDK was keyed on its credential —
@@ -1611,21 +1877,31 @@ class MaximemSynapSDK:
             self._turn_store = on_disk
             self._st_store.attach_archive(on_disk)
 
-        # Initialize telemetry transport
-        self._telemetry_transport = TelemetryTransport(
-            base_url=self._http_transport.base_url,
-            get_auth_context=self._get_auth_context_for_telemetry,
-        )
+        if self._local_mode:
+            # Nothing is sent to /v1/telemetry. A disabled collector keeps the
+            # many emit call sites working as no-ops.
+            self._telemetry_collector = TelemetryCollector(
+                instance_id=self.instance_id,
+                client_id=self._client_id,
+                sdk_version=__version__,
+                enabled=False,
+            )
+        else:
+            # Initialize telemetry transport
+            self._telemetry_transport = TelemetryTransport(
+                base_url=self._http_transport.base_url,
+                get_auth_context=self._get_auth_context_for_telemetry,
+            )
 
-        # Initialize telemetry collector
-        self._telemetry_collector = TelemetryCollector(
-            instance_id=self.instance_id,
-            client_id=self._client_id,
-            sdk_version=__version__,
-            transport_callback=self._telemetry_transport.send,
-            enabled=True,
-        )
-        await self._telemetry_collector.start()
+            # Initialize telemetry collector
+            self._telemetry_collector = TelemetryCollector(
+                instance_id=self.instance_id,
+                client_id=self._client_id,
+                sdk_version=__version__,
+                transport_callback=self._telemetry_transport.send,
+                enabled=True,
+            )
+            await self._telemetry_collector.start()
 
         # Emit init event
         from .telemetry.models import TelemetryEventType
@@ -1789,6 +2065,7 @@ class MaximemSynapSDK:
         include_profile: bool = True,
         last_n_conversations: int = 1,
         response_shape: str = "by_type",
+        scope_path: Optional[Dict[str, str]] = None,
     ) -> UnifiedContextResponse:
         """Fetch and merge context across all relevant scopes in a single call.
 
@@ -1836,6 +2113,30 @@ class MaximemSynapSDK:
                 ``items``, best first across scopes and types, by each item's
                 ``rank_score``; ``formatted_context`` is then one numbered list
                 in that order. The typed lists are filled either way.
+            scope_path: The rung to read at, one entry per level from the
+                first, for an account with a deeper ladder (see
+                ``get_scope_ladder`` and ``ScopeLadder.address``). Only when
+                set. Send ids as well. Not needed on a default ladder. The
+                user and conversation fetches get the path as given. The
+                client fetch gets no path. The client read is meant to return the
+                account-wide shared memory, and the user and customer reads
+                already cover the person's and the team's own levels. The
+                server does apply a path on that route (it narrows the read to
+                that chain's own nodes), so sending one would narrow the shared
+                read, duplicate results the other reads return, and create
+                registry nodes on a read; it is also validated strictly (HTTP
+                400 if it is invalid or nested scoping is off). SDK 0.7.0 sent
+                it. The
+                customer fetch reads shared material only and the server
+                refuses (HTTP 400) a path that names the identity rung, so it
+                gets the path with the identity level and every level below it
+                removed. The identity level is found by its role on the
+                account's ladder, which ``fetch`` reads first when a path is set
+                and the customer scope runs (one shared read, cached 300 s; no
+                request when it is cached, and none for a call without a path).
+                If that read fails, a warning is logged and only the reserved
+                key ``user`` is removed. A path with no identity level goes to
+                the user, conversation and customer fetches as given.
 
         Returns:
             UnifiedContextResponse with merged items, scope attribution, and
@@ -1866,6 +2167,31 @@ class MaximemSynapSDK:
             )
         _validate_search_query_input(search_query)
         start_time = datetime.now(timezone.utc)
+
+        # Forwarded only when set, so a call without one is unchanged.
+        path_kw: Dict[str, Any] = {"scope_path": scope_path} if scope_path else {}
+        # The customer route reads shared material and refuses a path that
+        # names the identity rung (HTTP 400), so it gets the path stopped above
+        # that rung. The identity level is found by role on the account's
+        # ladder, so the ladder is read first (get_scope_ladder: one shared
+        # read, cached 300 s, so usually no request). Only when a path is set
+        # AND the customer fetch will run: any other call makes no ladder
+        # request. If the read fails, the reserved key `user` is the identity
+        # and the failure is logged.
+        customer_path = None
+        if scope_path and customer_id and (not scopes or "customer" in scopes):
+            ladder = None
+            try:
+                ladder = await self.get_scope_ladder()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "Could not read the scope ladder (%s); cutting the customer "
+                    "scope's path at the reserved key 'user'.", e,
+                )
+            customer_path = path_above_identity(scope_path, ladder)
+        customer_path_kw: Dict[str, Any] = (
+            {"scope_path": customer_path} if customer_path else {}
+        )
 
         # Build parallel fetch tasks based on provided identifiers and scope filter
         tasks = []
@@ -1903,6 +2229,7 @@ class MaximemSynapSDK:
                 response_shape=response_shape,
                 user_id=user_id,
                 customer_id=customer_id,
+                **path_kw,
             ))
             scope_labels.append("conversation")
 
@@ -1926,6 +2253,7 @@ class MaximemSynapSDK:
                 context_mode=context_mode,
                 include_profile=include_profile,
                 last_n_conversations=last_n_conversations,
+                **path_kw,
             ))
             scope_labels.append("user")
 
@@ -1941,6 +2269,7 @@ class MaximemSynapSDK:
                 query_date=query_date,
                 max_results_per_query=max_results_per_query,
                 response_shape=response_shape,
+                **customer_path_kw,
             ))
             scope_labels.append("customer")
 
@@ -2109,7 +2438,7 @@ class MaximemSynapSDK:
             else:
                 if conversation_id:
                     self._st_store.invalidate(str(conversation_id))
-                    self._turn_store.drop(str(conversation_id))
+                    self._turn_store.drop(normalize_conversation_id(str(conversation_id)))
                     cleared += ["short_term_context", "turns"]
         except Exception as e:  # noqa: BLE001
             logger.warning("data.delete: could not clear a local copy: %s", e)
@@ -2139,6 +2468,7 @@ class MaximemSynapSDK:
         name: Optional[str] = None,
         description: Optional[str] = None,
         style: str = "openai",
+        scope_path: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Return an LLM-ready tool definition for fetching Synap context.
 
@@ -2172,6 +2502,13 @@ class MaximemSynapSDK:
             style: "openai" or "anthropic". Controls the dict shape:
                    - "openai": ``{"type":"function","function":{...}}``
                    - "anthropic": ``{"name","description","input_schema"}``
+            scope_path: Closed-over rung for an account with a deeper ladder.
+                        Never part of the schema the LLM sees, so the model
+                        cannot change it. Forwarded only when set. With
+                        ``scope="unified"`` the customer fetch gets it cut above
+                        the identity rung, as in ``fetch``. With
+                        ``scope="customer"`` it goes as given, and the server
+                        refuses (HTTP 400) a path that names the identity rung.
 
         Returns:
             Tool definition dict. Always carries an ``async handler`` key
@@ -2221,6 +2558,7 @@ class MaximemSynapSDK:
                 customer_id=customer_id,
                 conversation_id=conversation_id,
                 call_args=call_args,
+                scope_path=scope_path,
             )
 
         if style == "openai":
@@ -2343,7 +2681,8 @@ class ConversationInterface:
         controller = self._ensure_controller()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         in_flight = self._sdk._st_writes_in_flight
-        in_flight[conversation_id] = in_flight.get(conversation_id, 0) + 1
+        flight_key = normalize_conversation_id(conversation_id)
+        in_flight[flight_key] = in_flight.get(flight_key, 0) + 1
         try:
             result = await controller.record_message(
                 conversation_id=conversation_id,
@@ -2392,7 +2731,7 @@ class ConversationInterface:
                         result.get("conversation_message_count")
                         if isinstance(result, dict) else None
                     ),
-                    in_flight=in_flight.get(conversation_id, 0),
+                    in_flight=in_flight.get(flight_key, 0),
                 )
             except Exception as e:
                 logger.warning("Failed to append turn to ST store: %s", e)
@@ -2457,7 +2796,7 @@ class ConversationInterface:
                         message_id=res.get("message_id"),
                         server_message_count=res.get("conversation_message_count"),
                         in_flight=self._sdk._st_writes_in_flight.get(
-                            msg.get("conversation_id", ""), 0
+                            normalize_conversation_id(msg.get("conversation_id", "")), 0
                         ),
                     )
                 except Exception as e:
@@ -2686,6 +3025,7 @@ class ConversationContextInterface:
             raise InvalidInputError("callback is required")
 
         sdk = self._sdk
+        conversation_id = normalize_conversation_id(conversation_id)
         with sdk._compaction_subscribers_lock:
             subs = sdk._compaction_subscribers.setdefault(conversation_id, [])
             subs.append(callback)
@@ -2723,7 +3063,8 @@ class ConversationContextInterface:
                 count = sum(len(v) for v in sdk._compaction_subscribers.values())
                 sdk._compaction_subscribers.clear()
                 return count
-            popped = sdk._compaction_subscribers.pop(conversation_id, None)
+            popped = sdk._compaction_subscribers.pop(
+                normalize_conversation_id(conversation_id), None)
             return len(popped) if popped else 0
 
     async def fetch(
@@ -3504,7 +3845,7 @@ class ConversationContextInterface:
                     conversation_id=conversation_id,
                     assembly_source_override="http_cache",
                 ))
-                return response
+                return _overlay_prompt_recent_messages(self._sdk, response, conversation_id)
         except Exception:
             pass  # Cache miss or error — fall through to cloud fetch
 
@@ -3569,7 +3910,7 @@ class ConversationContextInterface:
             conversation_id=conversation_id,
             assembly_source_override="cloud",
         ))
-        return response
+        return _overlay_prompt_recent_messages(self._sdk, response, conversation_id)
 
 
 class UserInterface:
@@ -4738,6 +5079,11 @@ class InstanceInterface:
                 automatically, so fetch() can find them without a round-trip.
         """
         self._sdk._ensure_initialized()
+        if self._sdk._local_mode:
+            raise SynapPermanentError(
+                "Not available in the open-source server: listen() needs the gRPC "
+                "stream and anticipation, which it does not have."
+            )
         self._on_context_callback = on_context
         self._open_sessions.clear()
 
@@ -4846,7 +5192,7 @@ class InstanceInterface:
         # that has them opens the session.
         if not conversation_id or not user_id:
             return
-        if conversation_id in self._open_sessions:
+        if self._open_session_key(conversation_id) is not None:
             return
         session_id = str(uuid.uuid4())
         transport = getattr(self._controller, "_transport", None)
@@ -4866,6 +5212,20 @@ class InstanceInterface:
         if sent:
             self._open_sessions[conversation_id] = session_id
 
+    def _open_session_key(self, conversation_id: Optional[str]) -> Optional[str]:
+        """The key a session for this conversation was opened under, whichever
+        spelling (raw id or the UUID derived from it) names it now. Keys stay
+        as they were opened: the wire carries the id the caller used."""
+        if not conversation_id:
+            return None
+        if conversation_id in self._open_sessions:
+            return conversation_id
+        wanted = normalize_conversation_id(conversation_id)
+        for key in self._open_sessions:
+            if normalize_conversation_id(key) == wanted:
+                return key
+        return None
+
     async def end_session(self, conversation_id: str) -> None:
         """Close the session for one conversation.
 
@@ -4875,7 +5235,8 @@ class InstanceInterface:
         turn and release the conversation's state rather than waiting for it
         to expire.
         """
-        session_id = self._open_sessions.pop(conversation_id, None)
+        opened_as = self._open_session_key(conversation_id)
+        session_id = self._open_sessions.pop(opened_as, None) if opened_as is not None else None
         if session_id is None:
             return
         transport = getattr(self._controller, "_transport", None)
@@ -5003,7 +5364,7 @@ class InstanceInterface:
             "user_id": user_id or "",
             "customer_id": customer_id or "",
             "session_id": session_id or self._open_sessions.get(
-                conversation_id or "", ""
+                self._open_session_key(conversation_id) or "", ""
             ),
             "metadata": metadata or {},
         }

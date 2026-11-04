@@ -55,9 +55,11 @@ writes the same turns a second time.
 from __future__ import annotations
 
 import logging
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar, Mapping, Optional
 
 from agent_framework import ContextProvider
+from synap_integrations_common import ensure_ids_match_path, rest_conversation_id
+from synap_microsoft_agent._scope_path import checked_scope_path
 from maximem_synap import MaximemSynapSDK
 
 from synap_microsoft_agent.compaction import SynapCompactionMiddleware
@@ -94,6 +96,7 @@ class SynapContextProvider(ContextProvider):
         max_results: int = 20,
         context_prompt: Optional[str] = None,
         include_scope_labels: bool = False,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> None:
         if sdk is None:
             raise ValueError("SynapContextProvider requires a non-None sdk")
@@ -109,6 +112,12 @@ class SynapContextProvider(ContextProvider):
         self.max_results = max_results
         self.context_prompt = context_prompt or self.DEFAULT_CONTEXT_PROMPT
         self.include_scope_labels = include_scope_labels
+        # A deeper scope ladder's level; sent to fetch and to the turn writes
+        # only when set.
+        self.scope_path: Optional[dict[str, str]] = checked_scope_path(scope_path, "SynapContextProvider")
+        ensure_ids_match_path(
+            self.scope_path, user_id=user_id or None, customer_id=customer_id or None,
+            where="SynapContextProvider")
 
     async def before_run(
         self,
@@ -156,7 +165,7 @@ class SynapContextProvider(ContextProvider):
 
         try:
             response = await self.sdk.fetch(
-                conversation_id=conv_id,
+                conversation_id=rest_conversation_id(conv_id),
                 user_id=self.user_id,
                 customer_id=self.customer_id or None,
                 search_query=[input_text],
@@ -164,6 +173,7 @@ class SynapContextProvider(ContextProvider):
                 mode=self.mode,
                 include_conversation_context=False,
                 include_scope_labels=self.include_scope_labels,
+                **({"scope_path": dict(self.scope_path)} if self.scope_path else {}),
             )
         except Exception as exc:  # noqa: BLE001 — read-side degrades gracefully
             logger.error(
@@ -252,15 +262,17 @@ class SynapContextProvider(ContextProvider):
             conversation_id=conv_id,
             user_id=self.user_id,
             customer_id=self.customer_id,
+            **({"scope_path": dict(self.scope_path)} if self.scope_path else {}),
         ):
             return
         try:
             await self.sdk.conversation.record_message(
-                conversation_id=conv_id,
+                conversation_id=rest_conversation_id(conv_id),
                 role=role,
                 content=text,
                 user_id=self.user_id,
                 customer_id=self.customer_id,
+                **({"scope_path": dict(self.scope_path)} if self.scope_path else {}),
             )
         except Exception as exc:  # noqa: BLE001 — must not crash the agent
             logger.error(
@@ -294,6 +306,7 @@ class SynapContextProvider(ContextProvider):
                 conversation_id=conv_id,
                 user_id=self.user_id,
                 customer_id=self.customer_id,
+                **({"scope_path": dict(self.scope_path)} if self.scope_path else {}),
             ):
                 mark_reported(context, self.source_id, message)
 

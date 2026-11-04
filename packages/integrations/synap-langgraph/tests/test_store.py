@@ -3,24 +3,26 @@
 Documented error-handling contracts (from store.py docstring):
 - Writes (put) surface SynapIntegrationError on SDK failure — silent drops
   would hide ingestion outages.
-- Reads (get / search) degrade gracefully — return None/[] with an ERROR log.
-- delete / list_namespaces are no-ops (Synap has no delete API); each warns once.
-- semantic_fallback=True (default): when markers are stripped, search falls back
-  to scope-filtered results Synap ranked rather than returning empty.
+- Reads (get / search) degrade gracefully by default (on_error="fallback") —
+  return None/[] with an ERROR log; on_error="raise" raises instead.
+- delete finds the memory by its tag and calls sdk.memories.delete (see
+  test_store_fixed.py and test_store_security.py); list_namespaces is a documented no-op that warns once.
+- search never filters on the store marker: untagged items are always returned
+  (semantic_fallback=False is the strict opt-out).
 - record_message is best-effort: SDK failure is logged and swallowed.
 
 Coverage shape:
 - SynapStore construction (user_id scopes, customer_id-only, errors)
 - abatch / batch dispatching (PutOp, GetOp, SearchOp, ListNamespacesOp, unknown)
 - PutOp (put): happy path + SDK failure → SynapIntegrationError
-- PutOp with value=None (delete): no-op + warning fires once
-- GetOp (get): match on namespace+key, miss, markers stripped → None
+- PutOp with value=None (delete): see test_store_fixed.py and test_store_security.py
+- GetOp (get): match on namespace+key, miss, untagged items → None
 - SearchOp (search): marker match, namespace prefix filter, metadata filter,
   score propagation, marker-stripped fallback, semantic_fallback=False
 - ListNamespacesOp: always empty + warning fires once
 - arecord_message / record_message: happy path, no user_id skip, SDK failure swallowed
 - batch (sync wrapper): put + get
-- all_items callable path in _iter_items
+- _iter_items: ranked list, bucket fallback
 - _filter_matches: equality, list membership, empty filter
 """
 
@@ -55,6 +57,7 @@ from synap_langgraph.store import (
     _MARKER,
     _NS,
 )
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 # ---------------------------------------------------------------------------
@@ -181,27 +184,28 @@ class TestConstruction:
         with pytest.raises(ValueError, match="non-None sdk"):
             SynapStore(None, user_id="u1")  # type: ignore[arg-type]
 
-    def test_raises_without_user_or_customer_id(self):
-        sdk = _make_sdk()
-        with pytest.raises(ValueError, match="at least one of user_id"):
-            SynapStore(sdk)
+    def test_no_ids_builds_a_shared_store(self):
+        """Was a ValueError: the identity now comes from the namespace."""
+        store = SynapStore(_make_sdk())
+        assert store._shared is True
+        assert store.user_id == "" and store.customer_id == ""
 
     def test_user_id_only_is_valid(self):
         sdk = _make_sdk()
         store = SynapStore(sdk, user_id="u1")
         assert store.user_id == "u1"
-        assert store._scopes == ["user"]
+        assert store._shared is False
 
     def test_customer_id_only_is_valid_and_customer_scoped(self):
         sdk = _make_sdk()
         store = SynapStore(sdk, customer_id="c1")
         assert store.user_id == ""
-        assert store._scopes == ["customer"]
+        assert store._shared is False
 
     def test_both_ids_is_user_scoped(self):
         sdk = _make_sdk()
         store = SynapStore(sdk, user_id="u1", customer_id="c1")
-        assert store._scopes == ["user"]
+        assert store._shared is False
 
     def test_defaults(self):
         sdk = _make_sdk()
@@ -210,12 +214,10 @@ class TestConstruction:
         assert store.semantic_fallback is True
         assert store.include_conversation_context is False
 
-    def test_initial_warn_flags_are_false(self):
+    def test_initial_warn_flag_is_false(self):
         sdk = _make_sdk()
         store = SynapStore(sdk, user_id="u1")
-        assert not store._delete_warned
         assert not store._listns_warned
-        assert not store._marker_warned
 
 
 # ---------------------------------------------------------------------------
@@ -300,45 +302,6 @@ class TestPutOp:
 
 
 # ---------------------------------------------------------------------------
-# PutOp with value=None (delete) — no-op + warning
-# ---------------------------------------------------------------------------
-
-
-class TestDeleteOp:
-    @pytest.mark.asyncio
-    async def test_delete_is_noop_does_not_call_sdk(self, caplog):
-        sdk = _make_sdk()
-        store = _make_store(sdk=sdk)
-        with caplog.at_level(logging.WARNING, logger="synap_langgraph.store"):
-            results = await store.abatch([PutOp(namespace=("ns",), key="k", value=None)])
-        # Returns None (no crash)
-        assert results == [None]
-        # Did NOT attempt to create a memory
-        sdk.memories.create.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_delete_warns_once_on_first_call(self, caplog):
-        sdk = _make_sdk()
-        store = _make_store(sdk=sdk)
-        with caplog.at_level(logging.WARNING, logger="synap_langgraph.store"):
-            await store.abatch([PutOp(namespace=("ns",), key="k", value=None)])
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert len(warnings) == 1
-        assert "delete" in warnings[0].message.lower()
-
-    @pytest.mark.asyncio
-    async def test_delete_warning_fires_exactly_once_on_repeated_calls(self, caplog):
-        sdk = _make_sdk()
-        store = _make_store(sdk=sdk)
-        with caplog.at_level(logging.WARNING, logger="synap_langgraph.store"):
-            await store.abatch([PutOp(namespace=("ns",), key="k", value=None)])
-            await store.abatch([PutOp(namespace=("ns",), key="other", value=None)])
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert len(warnings) == 1  # exactly once
-        assert store._delete_warned is True
-
-
-# ---------------------------------------------------------------------------
 # GetOp (get) — happy path + failure path
 # ---------------------------------------------------------------------------
 
@@ -353,7 +316,8 @@ class TestGetOp:
         assert results[0] is not None
         assert isinstance(results[0], Item)
         assert results[0].key == "prefs"
-        assert results[0].value == {"dark_mode": True}
+        assert {k: v for k, v in results[0].value.items() if k != "_synap"} == {"dark_mode": True}
+        assert results[0].value["_synap"]["id"] == "item_prefs"
 
     @pytest.mark.asyncio
     async def test_get_returns_none_when_key_not_in_results(self):
@@ -382,7 +346,7 @@ class TestGetOp:
         results = await store.abatch([GetOp(namespace=("ns",), key="pref-k")])
         assert results[0] is not None
         # summary text goes through _parse_value as raw (non-JSON) → {"_raw": ...}
-        assert results[0].value == {"_raw": "User prefers dark mode"}
+        assert results[0].value["_raw"] == "User prefers dark mode"
 
     @pytest.mark.asyncio
     async def test_get_namespace_tuple_reconstructed_on_item(self):
@@ -394,18 +358,17 @@ class TestGetOp:
         assert results[0].namespace == ("a", "b", "c")
 
     @pytest.mark.asyncio
-    async def test_get_returns_none_and_warns_when_markers_stripped(self, caplog):
-        """When items exist but carry no SynapStore markers, get returns None
-        (no exact key resolution possible) and emits a WARNING once."""
+    async def test_get_returns_none_and_does_not_warn_when_items_are_untagged(self, caplog):
+        """Items without the store's tag are ordinary conversation memories:
+        get has no exact key to resolve, returns None, and does NOT log the old
+        'markers stripped' warning (it fired on every normal response)."""
         item = _make_item("ns", "k", strip_markers=True)
         sdk = _make_sdk(fetch_items=[item])
         store = _make_store(sdk=sdk)
         with caplog.at_level(logging.WARNING, logger="synap_langgraph.store"):
             results = await store.abatch([GetOp(namespace=("ns",), key="k")])
         assert results[0] is None
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert len(warnings) >= 1
-        assert store._marker_warned is True
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
     @pytest.mark.asyncio
     async def test_get_sdk_failure_degrades_to_none(self, caplog):
@@ -436,17 +399,21 @@ class TestSearchOp:
         assert len(results[0]) == 1
         si = results[0][0]
         assert isinstance(si, SearchItem)
-        assert si.score == 0.85
+        # An unranked (bucket) response has no rank score: the score is not
+        # the item's confidence any more.
+        assert si.score is None
 
     @pytest.mark.asyncio
-    async def test_search_propagates_confidence_as_score(self):
+    async def test_search_score_is_the_rank_score_not_the_confidence(self):
         item = _make_item("ns", "k", confidence=0.72)
+        item.rank_score = 0.31
         sdk = _make_sdk(fetch_items=[item])
         store = _make_store(sdk=sdk)
         results = await store.abatch(
             [SearchOp(namespace_prefix=("ns",), query="q")]
         )
-        assert results[0][0].score == 0.72
+        assert results[0][0].score == 0.31
+        assert results[0][0].value["_synap"]["confidence"] == 0.72
 
     @pytest.mark.asyncio
     async def test_search_none_confidence_gives_none_score(self):
@@ -546,20 +513,21 @@ class TestSearchOp:
         assert len(errors) >= 1
 
     @pytest.mark.asyncio
-    async def test_search_semantic_fallback_returns_items_when_markers_stripped(self):
-        """When no items carry markers, semantic_fallback=True returns Synap-ranked items."""
+    async def test_search_returns_untagged_items_without_a_warning(self, caplog):
+        """Untagged items (conversation memories) are returned, silently."""
         item = _make_item("ns", "k", strip_markers=True)
         sdk = _make_sdk(fetch_items=[item])
         store = _make_store(sdk=sdk, semantic_fallback=True)
-        results = await store.abatch(
-            [SearchOp(namespace_prefix=("ns",), query="q")]
-        )
+        with caplog.at_level(logging.WARNING, logger="synap_langgraph.store"):
+            results = await store.abatch(
+                [SearchOp(namespace_prefix=("ns",), query="q")]
+            )
         assert len(results[0]) >= 1
-        assert store._marker_warned is True
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
     @pytest.mark.asyncio
-    async def test_search_semantic_fallback_false_returns_empty_when_markers_stripped(self):
-        """semantic_fallback=False returns [] instead of fallback when markers are absent."""
+    async def test_search_semantic_fallback_false_returns_only_tagged_items(self):
+        """semantic_fallback=False is the strict opt-out: untagged items are dropped."""
         item = _make_item("ns", "k", strip_markers=True)
         sdk = _make_sdk(fetch_items=[item])
         store = _make_store(sdk=sdk, semantic_fallback=False)
@@ -578,12 +546,14 @@ class TestSearchOp:
         assert kw["customer_id"] == "acme"
 
     @pytest.mark.asyncio
-    async def test_search_passes_scopes_to_fetch(self):
+    async def test_search_does_not_hard_code_scopes(self):
+        """The SDK's own default scope selection applies (issue 8)."""
         sdk = _make_sdk()
         store = SynapStore(sdk, user_id="u1")
         await store.abatch([SearchOp(namespace_prefix=("ns",), query="q")])
         kw = sdk.fetch.call_args.kwargs
-        assert kw["scopes"] == ["user"]
+        assert "scopes" not in kw
+        assert kw["response_shape"] == "ranked"
 
     @pytest.mark.asyncio
     async def test_search_uses_query_as_search_token(self):
@@ -649,7 +619,7 @@ class TestRecordMessage:
         await store.arecord_message("conv-1", "user", "hello")
         sdk.conversation.record_message.assert_awaited_once()
         kw = sdk.conversation.record_message.call_args.kwargs
-        assert kw["conversation_id"] == "conv-1"
+        assert kw["conversation_id"] == coerce_conversation_id("conv-1")
         assert kw["role"] == "user"
         assert kw["content"] == "hello"
         assert kw["user_id"] == "u1"
@@ -824,31 +794,28 @@ class TestSyncBatch:
 
 
 class TestIterItems:
-    def test_uses_all_items_when_callable(self):
-        """When response.all_items is callable, _iter_items delegates to it."""
-        items = [object(), object()]
+    def test_reads_the_ranked_list_in_order(self):
+        """response.items is the ranked list, best first; buckets are ignored."""
+        a, b = object(), object()
 
         class R:
-            def all_items(self_):
-                return items
+            items = [a, b]
+            facts = ["ignored"]
 
-        result = _iter_items(R())
-        assert result == list(items)
+        assert _iter_items(R()) == [(a, ""), (b, "")]
 
-    def test_falls_back_to_bucket_union_when_all_items_not_callable(self):
-        """Without callable all_items, we union facts + preferences + episodes."""
+    def test_falls_back_to_bucket_union_without_a_ranked_list(self):
         class R:
+            items = []
             facts = ["f1"]
             preferences = ["p1"]
             episodes = ["e1"]
             emotions = []
             temporal_events = []
 
-        result = _iter_items(R())
-        assert set(result) == {"f1", "p1", "e1"}
+        assert _iter_items(R()) == [("f1", "facts"), ("p1", "preferences"), ("e1", "episodes")]
 
     def test_bucket_union_tolerates_none_buckets(self):
-        """Missing buckets should not crash _iter_items."""
         class R:
             facts = None
             preferences = ["p1"]
@@ -856,22 +823,16 @@ class TestIterItems:
             emotions = None
             temporal_events = None
 
-        result = _iter_items(R())
-        assert result == ["p1"]
+        assert _iter_items(R()) == [("p1", "preferences")]
 
-    def test_all_items_callable_failure_falls_back_to_buckets(self):
-        """If all_items() raises, _iter_items falls back to the bucket union."""
+    def test_an_all_items_method_is_not_used(self):
+        """`all_items` does not exist anywhere in the SDK; it is not consulted."""
         class R:
             def all_items(self_):
-                raise RuntimeError("all_items broken")
-            facts = ["fact-fallback"]
-            preferences = []
-            episodes = []
-            emotions = []
-            temporal_events = []
+                raise AssertionError("must not be called")
+            facts = ["fact"]
 
-        result = _iter_items(R())
-        assert result == ["fact-fallback"]
+        assert _iter_items(R()) == [("fact", "facts")]
 
 
 # ---------------------------------------------------------------------------
@@ -944,13 +905,11 @@ class TestParseValue:
     def test_empty_string_returns_empty_dict(self):
         assert _parse_value("") == {}
 
-    def test_json_list_wrapped_as_value(self):
-        result = _parse_value("[1, 2, 3]")
-        assert result == {"_value": [1, 2, 3]}
+    def test_json_list_is_kept_as_the_exact_text(self):
+        assert _parse_value("[1, 2, 3]") == {"_raw": "[1, 2, 3]"}
 
-    def test_json_scalar_wrapped_as_value(self):
-        result = _parse_value("42")
-        assert result == {"_value": 42}
+    def test_json_scalar_is_kept_as_the_exact_text(self):
+        assert _parse_value("42") == {"_raw": "42"}
 
 
 # ---------------------------------------------------------------------------

@@ -22,13 +22,13 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 from uuid import UUID, uuid4
 
 from agno.db.in_memory.in_memory_db import InMemoryDb
 from agno.db.schemas.memory import UserMemory
 from maximem_synap import MaximemSynapSDK
-from synap_integrations_common import wrap_sdk_errors_async, run_blocking
+from synap_integrations_common import ensure_ids_match_path, wrap_sdk_errors_async, run_blocking
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,19 @@ class SynapDb(InMemoryDb):
             best-effort sample of what Synap knows about the user, not a full
             list. Pass a topical ``search_content`` to ``get_user_memories`` for
             specifics.
+        scope_path: Only for an account whose scope ladder is deeper than
+            customer and user. The address of the level this database reads and
+            writes at, as ``{level_key: value}`` (see
+            ``maximem_synap.ScopeAddress.scope_path``). Sent with every read
+            (``sdk.fetch(scope_path=...)``) and every write
+            (``sdk.memories.create(scope=...)``) only when set; leave it unset
+            and the calls are exactly what they always were. The path is fixed
+            here, but Agno names the user on every call, and the server lets a
+            path's ``user`` level win over a flat id. So a path that includes the
+            ``user`` level (or ``customer``) fixes that user: any call for a
+            different user_id raises ``SynapIntegrationError`` before anything is
+            sent. Build one database per user, or stop the path above the user
+            level (for a multi-user app).
     """
 
     def __init__(
@@ -66,6 +79,7 @@ class SynapDb(InMemoryDb):
         mode: str = "accurate",
         max_results: int = 50,
         default_query: str = DEFAULT_QUERY,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> None:
         if sdk is None:
             raise ValueError("SynapDb requires a non-None sdk")
@@ -80,8 +94,15 @@ class SynapDb(InMemoryDb):
         self.mode = mode
         self.max_results = max_results
         self.default_query = default_query.strip()
+        self.scope_path: Optional[Dict[str, str]] = dict(scope_path) if scope_path else None
         self._delete_warned = False
         self._stats_warned = False
+        ensure_ids_match_path(
+            self.scope_path, customer_id=customer_id or None, where="SynapDb(customer_id=)")
+
+    def _check_user(self, user_id: Optional[str], where: str) -> None:
+        """Refuse a per-call ``user_id`` that disagrees with the fixed path (see class docs)."""
+        ensure_ids_match_path(self.scope_path, user_id=user_id or None, where=where)
 
     # ── writes ─────────────────────────────────────────────────────────────
 
@@ -112,6 +133,8 @@ class SynapDb(InMemoryDb):
         preserve_updated_at: bool = False,
     ) -> List[Union[UserMemory, Dict[str, Any]]]:
         out: List[Union[UserMemory, Dict[str, Any]]] = []
+        for m in memories:  # all of them first: no partial write
+            self._check_user(m.user_id, "SynapDb.upsert_memories")
         now = int(time.time())
         for m in memories:
             if m.memory_id is None:
@@ -128,6 +151,7 @@ class SynapDb(InMemoryDb):
         return out
 
     async def _aupsert(self, memory: UserMemory) -> None:
+        self._check_user(memory.user_id, "SynapDb.upsert_user_memory")
         metadata: Dict[str, Any] = {
             _MARKER: True,
             "memory_id": memory.memory_id,
@@ -146,11 +170,13 @@ class SynapDb(InMemoryDb):
             memory_id=memory.memory_id,
             user_id=memory.user_id,
         ):
+            extra: Dict[str, Any] = {"scope": self.scope_path} if self.scope_path else {}
             await self.sdk.memories.create(
                 document=memory.memory,
                 user_id=memory.user_id,
                 customer_id=self.customer_id or None,
                 metadata=metadata,
+                **extra,
             )
 
     # ── reads ──────────────────────────────────────────────────────────────
@@ -168,6 +194,7 @@ class SynapDb(InMemoryDb):
 
     async def _aget_memory(self, memory_id: str, user_id: Optional[str]) -> Optional[UserMemory]:
         """Look a memory up by the Synap id that ``get_user_memories`` reports."""
+        self._check_user(user_id, "SynapDb.get_user_memory")
         try:
             parsed = UUID(str(memory_id))
         except ValueError:
@@ -291,6 +318,9 @@ class SynapDb(InMemoryDb):
         search_query: Optional[List[str]],
         limit: int,
     ) -> Any:
+        # Outside the try: a refused identity must raise, not degrade to "no memories".
+        self._check_user(user_id, "SynapDb fetch")
+        extra: Dict[str, Any] = {"scope_path": self.scope_path} if self.scope_path else {}
         try:
             return await self.sdk.fetch(
                 user_id=user_id,
@@ -299,6 +329,7 @@ class SynapDb(InMemoryDb):
                 max_results=limit,
                 mode=self.mode,
                 include_conversation_context=False,
+                **extra,
             )
         except Exception as exc:  # noqa: BLE001 — read-side graceful degrade
             logger.error(
@@ -310,6 +341,7 @@ class SynapDb(InMemoryDb):
     # ── deletes ────────────────────────────────────────────────────────────
 
     def delete_user_memory(self, memory_id: str, user_id: Optional[str] = None) -> None:
+        self._check_user(user_id, "SynapDb.delete_user_memory")
         run_blocking(self._adelete([memory_id]))
 
     def delete_user_memories(
@@ -317,6 +349,7 @@ class SynapDb(InMemoryDb):
         memory_ids: List[str],
         user_id: Optional[str] = None,
     ) -> None:
+        self._check_user(user_id, "SynapDb.delete_user_memories")
         run_blocking(self._adelete(memory_ids))
 
     def clear_memories(self) -> None:

@@ -43,6 +43,7 @@ from typing import Literal, Optional
 from livekit.agents import ChatContext, ChatMessage
 from maximem_synap import MaximemSynapSDK
 from synap_integrations_common import (
+    coerce_conversation_id,
     SynapIntegrationError,
     is_synap_history,
     wrap_sdk_errors_async,
@@ -102,7 +103,7 @@ async def _fetch_st(
             style=style,
         ):
             response = await sdk.conversation.context.get_context_for_prompt(
-                conversation_id=conversation_id,
+                conversation_id=coerce_conversation_id(conversation_id),
                 style=style,
             )
     except SynapIntegrationError:

@@ -805,6 +805,79 @@ describe('recordTurn: stream first, REST second, never both', () => {
   });
 });
 
+describe('scopePath: a turn names its level on a deeper scope ladder', () => {
+  const PATH = { customer: 'acme', team: 'eng', user: 'u1' };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reportTurn sends it as scope_path on the stream event', async () => {
+    const { sdk, calls } = fakeSdk();
+    await reportTurn(sdk, { role: 'user', content: 'hi', userId: 'u1', scopePath: PATH });
+    expect(opts(calls)).toMatchObject({ event_type: 'user_message', scope_path: PATH });
+  });
+
+  it('reportTurn without one sends exactly the options it always did', async () => {
+    const { sdk, calls } = fakeSdk();
+    await reportTurn(sdk, { role: 'user', content: 'hi', userId: 'u1', conversationId: 'c1' });
+    expect(opts(calls)).toEqual({
+      content: 'hi', role: 'user', event_type: 'user_message', metadata: {},
+      conversation_id: 'c1', user_id: 'u1',
+    });
+    expect(Object.keys(opts(calls))).not.toContain('scope_path');
+  });
+
+  it('an empty path is the same as none', async () => {
+    const { sdk, calls } = fakeSdk();
+    await reportTurn(sdk, { role: 'user', content: 'hi', userId: 'u1', scopePath: {} });
+    expect(Object.keys(opts(calls))).not.toContain('scope_path');
+  });
+
+  it('recordTurn on the stream sends it on the event and writes no REST', async () => {
+    const { sdk, calls, rest } = lazySdk();
+    await recordTurn(sdk, { role: 'assistant', content: 'yes', conversationId: 'c1', userId: 'u1', scopePath: PATH });
+    expect(opts(calls)).toMatchObject({ event_type: 'assistant_message', scope_path: PATH });
+    expect(rest).toEqual([]);
+  });
+
+  it('recordTurn over REST sends it on conversation.record_message', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { sdk, rest } = lazySdk({ neverOpens: true });
+    await recordTurn(sdk, { role: 'user', content: 'hi', conversationId: 'c1', userId: 'u1', scopePath: PATH });
+    expect(rest).toEqual([
+      { conversation_id: 'c1', role: 'user', content: 'hi', user_id: 'u1', scope_path: PATH },
+    ]);
+  });
+
+  it('recordTurn over REST without one sends exactly the payload it always did', async () => {
+    const { sdk, rest } = lazySdk({ neverOpens: true });
+    await recordTurn(sdk, { role: 'user', content: 'hi', conversationId: 'c1', userId: 'u1' });
+    expect(rest).toEqual([{ conversation_id: 'c1', role: 'user', content: 'hi', user_id: 'u1' }]);
+  });
+
+  it('sends a copy, so a later change to the caller\'s object cannot reach a queued event', async () => {
+    const { sdk, calls } = fakeSdk();
+    const mine = { ...PATH };
+    await reportTurn(sdk, { role: 'user', content: 'hi', userId: 'u1', scopePath: mine });
+    expect(opts(calls)['scope_path']).toEqual(PATH);
+    expect(opts(calls)['scope_path']).not.toBe(mine);
+  });
+
+  it('the other events carry no path (the SDK takes none, the server reads it from turns only)', async () => {
+    const { sdk, calls } = fakeSdk();
+    const withPath = { userId: 'u1', conversationId: 'c1', scopePath: PATH };
+    await reportToolCall(sdk, { toolName: 't', ...withPath });
+    await reportToolResult(sdk, { result: 'r', ...withPath });
+    await reportReasoning(sdk, { content: 'thinking', ...withPath });
+    expect(calls.map((c) => c.method)).toEqual(['record_tool_call', 'record_tool_result', 'record_thinking']);
+    for (let i = 0; i < calls.length; i += 1) {
+      expect(Object.keys(opts(calls, i))).not.toContain('scope_path');
+      expect(Object.keys(opts(calls, i))).not.toContain('scope');
+    }
+  });
+});
+
 // ------------------------------------------------------ Synap's history
 
 function historySdk(response: unknown) {

@@ -51,6 +51,14 @@ class SynapMemoryClientConfig(MemoryBaseConfig, name="synap_memory"):
         default="ai-chat-conversation",
         description="document_type stamped on every Synap memories.create write.",
     )
+    scope_path: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Deeper scope ladders: the level to read and write, as level key to "
+            "value (e.g. customer: acme, team: payments, user: alice). Empty "
+            "means the plain user/customer ids."
+        ),
+    )
     api_key: OptionalSecretStr = Field(
         default=None,
         description=(
@@ -75,6 +83,7 @@ async def synap_memory_client(config: SynapMemoryClientConfig, builder: Builder)
             customer_id=config.customer_id,
             mode=config.mode,
             document_type=config.document_type,
+            scope_path=config.scope_path or None,
         )
 
 

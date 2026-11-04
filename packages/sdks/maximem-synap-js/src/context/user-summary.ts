@@ -10,6 +10,7 @@
  * the conversation runs.
  */
 
+import { normalizeConversationId } from '../util/conversation-id.js';
 import type { Json, RawContext, RawContextItem } from './types.js';
 
 /** Python's `_user_summary_interval`. */
@@ -25,7 +26,7 @@ export class TurnCounter {
 
   /** Increment and return the new count. Python buckets a missing id under `_global`. */
   increment(conversationId: string | undefined): number {
-    const key = conversationId !== undefined && conversationId !== '' ? conversationId : '_global';
+    const key = conversationId !== undefined && conversationId !== '' ? normalizeConversationId(conversationId) : '_global';
     const next = (this.#counts.get(key) ?? 0) + 1;
     this.#counts.set(key, next);
     return next;
@@ -39,7 +40,7 @@ export class TurnCounter {
    * triggered a fresh retrieval anyway.
    */
   shouldInject(conversationId: string | undefined): boolean {
-    const key = conversationId !== undefined && conversationId !== '' ? conversationId : '_global';
+    const key = conversationId !== undefined && conversationId !== '' ? normalizeConversationId(conversationId) : '_global';
     const count = this.#counts.get(key) ?? 0;
     return count > 0 && count % USER_SUMMARY_INTERVAL === 0;
   }

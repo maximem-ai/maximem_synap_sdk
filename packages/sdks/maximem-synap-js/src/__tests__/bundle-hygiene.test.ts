@@ -58,12 +58,13 @@ describe('published bundle hygiene', () => {
   });
 
   it.runIf(built)('keeps the main entry well under the pre-regression ceiling', () => {
-    // 463KB was the accident. 200KB leaves headroom for real features while
+    // 463KB was the accident. 250KB leaves headroom for real features while
     // still failing loudly if a heavy transitive dep gets bundled again.
     // (Raised from 120KB: 0.5.8 shipped at 124KB and history search, ranked
-    // results and semantic matching took the entry to 170KB.)
+    // results and semantic matching took the entry to 170KB; raised to
+    // 250KB when the scope ladder and conversation-id handling took it to 228KB.)
     const bytes = readFileSync(path.join(dist, 'index.js'), 'utf8').length;
-    expect(bytes / 1024).toBeLessThan(200);
+    expect(bytes / 1024).toBeLessThan(250);
   });
 
   it.runIf(built)('still exposes gRPC through the subpath', () => {

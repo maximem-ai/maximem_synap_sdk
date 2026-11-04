@@ -17,6 +17,32 @@ from ..models.errors import InvalidConversationIdError, InvalidInstanceIdError
 _INSTANCE_ID_RE = re.compile(r"^inst_[0-9a-fA-F]{16}$")
 
 
+def normalize_conversation_id(conversation_id):
+    """The one id every local cache is keyed by for a conversation.
+
+    The stream and the server accept any string as a conversation id and turn
+    one that is not a UUID into ``uuid5(NAMESPACE_URL, id)`` (the server's
+    ``cloud/shared/conversation_id_norm.coerce_conversation_id``). The REST
+    reads need that UUID, so a caller that sends a turn on the stream under
+    ``pgv2_abc`` and reads under the UUID it derived is talking about ONE
+    conversation. A cache that keys the two differently drops the entry under
+    one name and serves the other for its whole lifetime.
+
+    A string that parses as a UUID, in any spelling, is returned exactly as it
+    came (so a real UUID keys what it always keyed). Empty and ``None`` pass
+    through. Idempotent. Must stay byte-identical to the server's function
+    (``tests/test_conversation_id_normalisation.py`` compares them).
+    """
+    if not conversation_id:
+        return conversation_id
+    text = conversation_id if isinstance(conversation_id, str) else str(conversation_id)
+    try:
+        _uuid.UUID(text)
+        return text
+    except (ValueError, AttributeError, TypeError):
+        return str(_uuid.uuid5(_uuid.NAMESPACE_URL, text))
+
+
 def validate_conversation_id(conversation_id: Optional[str]) -> None:
     """Raise ``InvalidConversationIdError`` if a non-empty ``conversation_id``
     is not a valid UUID string.

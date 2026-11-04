@@ -28,6 +28,7 @@ from google.adk.tools import FunctionTool
 
 from synap_google_adk.tools import create_synap_tools
 from synap_integrations_common import SynapIntegrationError
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +171,7 @@ class TestSearchMemoryHappyPath:
         sdk = _make_sdk()
         search, _ = _get_tools(sdk, user_id="u1", conversation_id="conv-99")
         await search.func("query")
-        assert sdk.fetch.call_args.kwargs["conversation_id"] == "conv-99"
+        assert sdk.fetch.call_args.kwargs["conversation_id"] == coerce_conversation_id("conv-99")
 
     @pytest.mark.asyncio
     async def test_conversation_id_is_none_when_not_provided(self):

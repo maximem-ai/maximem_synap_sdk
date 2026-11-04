@@ -27,6 +27,7 @@ The rest of the contract, from ``stream_events``:
 
 from __future__ import annotations
 
+from synap_integrations_common.conversation_id import coerce_conversation_id
 import asyncio
 import logging
 import time
@@ -46,6 +47,7 @@ from crewai.events import (
 )
 
 from synap_integrations_common import set_auto_listen
+from synap_integrations_common import coerce_conversation_id  # REST calls get the derived UUID
 
 from synap_crewai.stream import (
     SynapCrewAIListener,
@@ -272,7 +274,7 @@ class TestStreamFirstAndNeverBoth:
                 ("user", "hi"), ("assistant", "done"),
             ]
             for c in calls:
-                assert c.kwargs["conversation_id"] == "conv-1"
+                assert c.kwargs["conversation_id"] == coerce_conversation_id("conv-1")
                 assert c.kwargs["user_id"] == "user-1"
                 assert c.kwargs["customer_id"] == "cust-1"
         finally:
@@ -535,7 +537,7 @@ class TestTheWholeTurn:
         assert await report_user_turn(sdk, "hi", conversation_id="c", user_id="u") is True
         sdk.conversation.record_message.assert_awaited_once()
         kw = sdk.conversation.record_message.await_args.kwargs
-        assert (kw["role"], kw["content"], kw["conversation_id"]) == ("user", "hi", "c")
+        assert (kw["role"], kw["content"], kw["conversation_id"]) == ("user", "hi", coerce_conversation_id("c"))
         sdk.instance.send_message.assert_not_awaited()
 
 

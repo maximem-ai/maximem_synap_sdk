@@ -1,6 +1,6 @@
 {
   "name": "@maximem/synap-vercel-adk",
-  "version": "0.2.9",
+  "version": "0.3.0",
   "description": "Vercel AI SDK provider for Synap — context-aware LLM middleware",
   "type": "module",
   "main": "./dist/index.js",

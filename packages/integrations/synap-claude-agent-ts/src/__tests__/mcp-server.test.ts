@@ -49,6 +49,8 @@ const { buildSynapTools, createSynapMcpServer } = await import('../mcp-server.js
 
 function makeSdk(overrides: Partial<SynapSdkLike> = {}): SynapSdkLike {
   return {
+    // The marker of an SDK that carries `scope_path` (>= 0.7.1); see scope-guard.ts.
+    get_scope_ladder: vi.fn(),
     fetch: vi.fn(async () => ({
       formatted_context: 'User likes TypeScript.',
       facts: [],
@@ -551,5 +553,81 @@ describe('createSynapMcpServer — happy path', () => {
     await searchTool.handler({ query: 'hello' });
     const fetchArgs = (sdk.fetch as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(fetchArgs.customer_id).toBeNull();
+  });
+});
+
+// ─── scopePath: closed over, never a model-visible parameter ─────────────────
+
+describe('buildSynapTools — scopePath', () => {
+  const PATH = { customer: 'acme', team: 'eng', user: 'u-test' };
+  const EVIL = { team: 'finance', user: 'bob' };
+  const callOf = (fn: unknown): Record<string, unknown> =>
+    (fn as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Record<string, unknown>;
+
+  it('synap_search reads with scope_path', async () => {
+    const sdk = makeSdk();
+    const h = getHandler(buildSynapTools({ ...makeToolCtx(sdk, { customerId: 'acme' }), scopePath: PATH }), 'synap_search');
+    await h({ query: 'q' });
+    expect(callOf(sdk.fetch)['scope_path']).toEqual(PATH);
+  });
+
+  it('synap_remember writes with scope (not scope_path)', async () => {
+    const sdk = makeSdk();
+    const h = getHandler(buildSynapTools({ ...makeToolCtx(sdk, { customerId: 'acme' }), scopePath: PATH }), 'synap_remember');
+    await h({ content: 'note' });
+    const sent = callOf(sdk.memories.create);
+    expect(sent['scope']).toEqual(PATH);
+    expect(Object.keys(sent)).not.toContain('scope_path');
+  });
+
+  it('without a path (or an empty one) both calls carry exactly the keys they always did', async () => {
+    for (const scopePath of [undefined, {}]) {
+      const sdk = makeSdk();
+      const tools = buildSynapTools({ ...makeToolCtx(sdk), scopePath });
+      await getHandler(tools, 'synap_search')({ query: 'q' });
+      await getHandler(tools, 'synap_remember')({ content: 'note' });
+      expect(callOf(sdk.fetch)).toEqual({
+        conversation_id: 'conv-test', user_id: 'u-test', customer_id: 'cust-test',
+        search_query: ['q'], max_results: 10, mode: 'accurate', include_conversation_context: false,
+      });
+      expect(callOf(sdk.memories.create)).toEqual({
+        document: 'note', user_id: 'u-test', customer_id: 'cust-test',
+        metadata: { source: 'claude_agent_sdk' },
+      });
+    }
+  });
+
+  it('is in neither tool input schema, and a model-supplied one is ignored', async () => {
+    const sdk = makeSdk();
+    const tools = buildSynapTools({ ...makeToolCtx(sdk, { customerId: 'acme' }), scopePath: PATH });
+    for (const t of tools) {
+      const keys = Object.keys(t.inputSchema as object);
+      expect(keys.length).toBeGreaterThan(0);
+      expect(keys.filter((k) => /scope/i.test(k))).toEqual([]);
+    }
+    await getHandler(tools, 'synap_search')({ query: 'q', scope_path: EVIL, scopePath: EVIL, scope: EVIL });
+    await getHandler(tools, 'synap_remember')({ content: 'n', scope_path: EVIL, scopePath: EVIL, scope: EVIL });
+    expect(callOf(sdk.fetch)['scope_path']).toEqual(PATH);
+    expect(callOf(sdk.memories.create)['scope']).toEqual(PATH);
+  });
+
+  it('a tool with no path ignores a model-supplied one', async () => {
+    const sdk = makeSdk();
+    const tools = buildSynapTools(makeToolCtx(sdk));
+    await getHandler(tools, 'synap_search')({ query: 'q', scope_path: EVIL });
+    await getHandler(tools, 'synap_remember')({ content: 'n', scope: EVIL });
+    expect(Object.keys(callOf(sdk.fetch))).not.toContain('scope_path');
+    expect(Object.keys(callOf(sdk.memories.create))).not.toContain('scope');
+  });
+
+  it('createSynapMcpServer hands the path to the tools it builds', async () => {
+    const sdk = makeSdk();
+    mockCreateSdkMcpServer.mockClear();
+    createSynapMcpServer({ sdk, userId: 'u-test', scopePath: PATH });
+    const opts = mockCreateSdkMcpServer.mock.calls[0]![0] as { tools: ReturnType<typeof buildSynapTools> };
+    await getHandler(opts.tools, 'synap_search')({ query: 'q' });
+    await getHandler(opts.tools, 'synap_remember')({ content: 'n' });
+    expect(callOf(sdk.fetch)['scope_path']).toEqual(PATH);
+    expect(callOf(sdk.memories.create)['scope']).toEqual(PATH);
   });
 });

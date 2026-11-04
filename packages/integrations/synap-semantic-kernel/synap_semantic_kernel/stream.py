@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, AsyncIterable, Awaitable, Callable, Optional
+from typing import Any, AsyncIterable, Awaitable, Callable, Mapping, Optional
 
 from semantic_kernel.agents import ChatHistoryAgentThread
 from semantic_kernel.contents import (
@@ -55,7 +55,7 @@ from semantic_kernel.contents.kernel_content import KernelContent
 from semantic_kernel.filters import FilterTypes
 
 from maximem_synap import MaximemSynapSDK
-from synap_integrations_common import is_synap_history
+from synap_integrations_common import ensure_ids_match_path, is_synap_history
 from synap_integrations_common.stream_events import (
     end_session,
     record_turn,
@@ -201,6 +201,11 @@ class SynapAgentThread(ChatHistoryAgentThread):
             a B2C instance (user_context_isolation=equals_customer): the server
             rejects a call carrying one with HTTP 400. Leave it unset there.
             Empty string means customer-less.
+        scope_path: For an account with a deeper scope ladder: the level the
+            conversation belongs to, as ``{level_key: value}`` (key order does
+            not matter). Forwarded with the user and assistant turns only when
+            set. Tool-call, result and reasoning events carry no path (the
+            server ignores one there), so the filters take none.
         chat_history: the thread's history. Left unset it is a
             :class:`SynapChatHistoryReducer`, which Synap's compaction replaces
             turns in. Pass your own (a Semantic Kernel reducer, say) and it
@@ -218,6 +223,7 @@ class SynapAgentThread(ChatHistoryAgentThread):
         customer_id: str = "",
         chat_history: Optional[ChatHistory] = None,
         thread_id: Optional[str] = None,
+        scope_path: Optional[Mapping[str, str]] = None,
     ) -> None:
         if sdk is None:
             raise ValueError("SynapAgentThread requires a non-None sdk")
@@ -225,6 +231,9 @@ class SynapAgentThread(ChatHistoryAgentThread):
             raise ValueError("SynapAgentThread requires a non-empty conversation_id")
         if not user_id:
             raise ValueError("SynapAgentThread requires a non-empty user_id")
+        ensure_ids_match_path(
+            scope_path, user_id=user_id, customer_id=customer_id or None,
+            where="SynapAgentThread")
         if chat_history is None:
             chat_history = SynapChatHistoryReducer(sdk=sdk, conversation_id=conversation_id)
         super().__init__(chat_history=chat_history, thread_id=thread_id)
@@ -232,6 +241,7 @@ class SynapAgentThread(ChatHistoryAgentThread):
         self._synap_conversation_id = conversation_id
         self._synap_user_id = user_id
         self._synap_customer_id = customer_id
+        self._synap_scope_path = dict(scope_path) if scope_path else None
 
     @property
     def synap_conversation_id(self) -> str:
@@ -314,6 +324,8 @@ class SynapAgentThread(ChatHistoryAgentThread):
             self._sdk, role=role, content=content,
             conversation_id=self._synap_conversation_id,
             user_id=self._synap_user_id, customer_id=self._synap_customer_id,
+            # Only when set: an older integrations-common has no such keyword.
+            **({"scope_path": dict(self._synap_scope_path)} if self._synap_scope_path else {}),
         )
 
 

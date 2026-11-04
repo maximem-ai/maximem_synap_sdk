@@ -82,6 +82,28 @@ export interface StreamScope {
   customerId?: string;
 }
 
+/**
+ * What a user or assistant turn can carry: the ids, plus the conversation's
+ * level on an account with a deeper scope ladder.
+ *
+ * `scopePath` is sent as `scope_path`, only when it has entries, and only on a
+ * TURN (`reportTurn`, `recordTurn`). The SDK's `record_tool_call`,
+ * `record_tool_result`, `record_thinking` and `end_session` take no path, and
+ * the server files a conversation from its first user or assistant message, so
+ * a path on any other event would be ignored. Mirrors
+ * `synap_integrations_common.report_turn(scope_path=)`.
+ */
+export interface TurnScope extends StreamScope {
+  scopePath?: Readonly<Record<string, string>>;
+}
+
+/** `{ scope_path }` when a path was given and is not empty, else nothing, so an unchanged call stays byte-identical. */
+function pathOption(path: Readonly<Record<string, string>> | undefined | null): { scope_path?: Record<string, string> } {
+  return path !== undefined && path !== null && Object.keys(path).length > 0
+    ? { scope_path: { ...path } }
+    : {};
+}
+
 const RETRY_AFTER_MS = 60_000;
 // The first open of a process can lose to a cold connection. One quick retry
 // gets the stream up a few seconds in instead of a minute; after that, the
@@ -357,7 +379,7 @@ export async function ensureStream(sdk: unknown): Promise<boolean> {
  */
 export async function reportTurn(
   sdk: unknown,
-  args: StreamScope & {
+  args: TurnScope & {
     role: string;
     content: string;
     metadata?: Record<string, string>;
@@ -370,6 +392,7 @@ export async function reportTurn(
     event_type: isUser ? 'user_message' : 'assistant_message',
     metadata: args.metadata ?? {},
     ...scope(args),
+    ...pathOption(args.scopePath),
   });
 }
 
@@ -384,7 +407,7 @@ export async function reportTurn(
  */
 export async function recordTurn(
   sdk: unknown,
-  args: StreamScope & {
+  args: TurnScope & {
     role: string;
     content: string;
     metadata?: Record<string, string>;
@@ -407,6 +430,8 @@ export async function recordTurn(
     // Refused on a B2C instance, so an empty one is left out, not sent as "".
     if (args.customerId) payload['customer_id'] = args.customerId;
     if (args.metadata && Object.keys(args.metadata).length > 0) payload['metadata'] = args.metadata;
+    // `scope_path` on `conversation.record_message`, only when set.
+    Object.assign(payload, pathOption(args.scopePath));
     await record.call(conversation, payload);
     return true;
   } catch (error) {

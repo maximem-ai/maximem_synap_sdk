@@ -3,6 +3,8 @@ import type { GrpcStreamClient } from '../grpc/stream-client.js';
 import { isSynapHistory } from '../history.js';
 import { newCorrelationId } from '../util/correlation.js';
 import { SDK_VERSION } from '../version.js';
+import { scopeField } from '../util/scope.js';
+import { ensureIdsMatchPath, fingerprint } from '../scope-guard.js';
 
 const DEFAULT_BASE_URL = 'https://synap-cloud-prod.maximem.ai';
 
@@ -38,6 +40,24 @@ export async function recordTurn(params: RecordTurnParams): Promise<boolean> {
   // The compaction block this package spliced into the prompt is not a turn.
   if (isSynapHistory(content)) return false;
 
+  // The server lets the path's `user` / `customer` win over the ids this turn
+  // also carries; a turn whose ids and path name different identities would be
+  // filed under the wrong one. Never throws, so write nothing and say so, with
+  // fingerprints only.
+  try {
+    ensureIdsMatchPath(modelOptions.scopePath, {
+      userId: modelOptions.userId,
+      customerId: modelOptions.customerId,
+      where: 'recordTurn',
+    });
+  } catch (err) {
+    console.error(
+      `[synap] ${role} turn not written (fingerprints user=${fingerprint(modelOptions.userId ?? '')} `
+      + `customer=${fingerprint(modelOptions.customerId ?? '')}): ${(err as Error).message}`,
+    );
+    return false;
+  }
+
   const grpc = await params.getStream();
   if (grpc) {
     const sent = await grpc.sendConversationEvent({
@@ -50,6 +70,7 @@ export async function recordTurn(params: RecordTurnParams): Promise<boolean> {
       context_types: [],
       tool_name: '',
       tool_args_json: '',
+      ...scopeField(modelOptions.scopePath),
       event_type: role === 'user' ? 'user_message' : 'assistant_message',
       role,
       content,
@@ -76,6 +97,8 @@ export async function recordTurn(params: RecordTurnParams): Promise<boolean> {
   // Omitted rather than sent empty: a B2C instance refuses a call that carries
   // a customer_id at all.
   if (modelOptions.customerId) body['customer_id'] = modelOptions.customerId;
+  // `scope` on the wire, only when set.
+  Object.assign(body, scopeField(modelOptions.scopePath));
 
   try {
     const response = await (params.fetchImpl ?? fetch)(`${baseUrl}/v1/conversations/messages`, {

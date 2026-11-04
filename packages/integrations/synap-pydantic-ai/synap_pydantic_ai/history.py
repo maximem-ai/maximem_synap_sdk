@@ -23,7 +23,10 @@ and the answer cannot change between them.
 
 from __future__ import annotations
 
+import inspect
 import logging
+import threading
+import weakref
 from dataclasses import replace
 from typing import Any, Callable, List, Optional
 
@@ -117,12 +120,17 @@ def synap_history_processor() -> Callable[..., Any]:
 
     Example::
 
+        # Pydantic AI 1.x
         agent = Agent("openai:gpt-4o", deps_type=SynapDeps,
                       history_processors=[synap_history_processor()])
 
-    On Pydantic AI versions that replaced ``history_processors`` with
-    capabilities, wrap it: ``capabilities=[ProcessHistory(synap_history_processor())]``.
-    The register functions and :func:`synap_run` do this for you.
+        # Pydantic AI 2.x, where ``history_processors`` no longer exists
+        from pydantic_ai.capabilities import ProcessHistory
+        agent = Agent("openai:gpt-4o", deps_type=SynapDeps,
+                      capabilities=[ProcessHistory(synap_history_processor())])
+
+    The register functions and :func:`synap_run` call :func:`install_synap_history`
+    for you, which does the right one of these for the installed version.
     """
 
     async def _synap_history(
@@ -156,27 +164,184 @@ def _is_ours(item: Any) -> bool:
     return getattr(getattr(item, "processor", None), _MARK, False)
 
 
-def install_synap_history(agent: Any) -> bool:
-    """Put :func:`synap_history_processor` on the agent. Idempotent; returns
-    whether it is installed afterwards.
+def _in_constructor_capabilities(agent: Any) -> bool:
+    """Whether the agent was BUILT with our processor: ``Agent(capabilities=[...])``."""
+    root = getattr(agent, "root_capability", None)
+    caps = getattr(root, "capabilities", None)
+    return isinstance(caps, (list, tuple)) and any(_is_ours(c) for c in caps)
 
-    Pydantic AI 1.x keeps a ``history_processors`` list on the agent. 2.x
-    replaced it with capabilities and exposes the agent's as
-    ``agent.root_capability.capabilities``, a list a ``ProcessHistory``
-    capability can be appended to after construction.
+
+def _accepts_capabilities(method: Any) -> bool:
+    """Whether ``method`` names a ``capabilities`` parameter (not just ``**kwargs``:
+    passing an argument the agent does not know is a TypeError in the caller's run)."""
+    try:
+        return "capabilities" in inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _takes_kwargs(method: Any) -> bool:
+    try:
+        return any(p.kind is inspect.Parameter.VAR_KEYWORD
+                   for p in inspect.signature(method).parameters.values())
+    except (TypeError, ValueError):
+        return False
+
+
+def _has_capabilities_seam(agent: Any) -> bool:
+    """Whether ``agent.iter(capabilities=...)`` will reach the library.
+
+    The agent's own ``iter`` names the parameter, or it is a wrapper someone put
+    on the instance that takes ``(*args, **kwargs)`` and the class's ``iter``
+    (what such a wrapper forwards to) names it.
+    """
+    method = getattr(agent, "iter", None)
+    if _accepts_capabilities(method):
+        return True
+    return _takes_kwargs(method) and _class_iter_reaches_capabilities(type(agent))
+
+
+def _class_iter_reaches_capabilities(cls: type) -> bool:
+    """Whether a call to ``cls.iter(..., capabilities=)`` reaches an ``iter`` that names it.
+
+    Walks the MRO: each ``iter`` before the library's must take ``**kwargs`` (a user
+    subclass overriding ``iter(self, *a, **k)`` and calling ``super()``), so the
+    argument gets through to the one that declares ``capabilities``.
+    """
+    for klass in cls.__mro__:
+        method = klass.__dict__.get("iter")
+        if method is None:
+            continue
+        if _accepts_capabilities(method):
+            return True
+        if not _takes_kwargs(method):
+            return False
+    return False
+
+
+def _library_names_capabilities(cls: type) -> bool:
+    return any(_accepts_capabilities(k.__dict__.get("iter")) for k in cls.__mro__
+               if k.__dict__.get("iter") is not None)
+
+
+def _with_synap_capability(kwargs: dict, capability: Any) -> dict:
+    given = kwargs.get("capabilities")
+    if given is None or not any(_is_ours(c) for c in given):
+        kwargs["capabilities"] = [*(given or ()), capability]
+    return kwargs
+
+
+# Base classes are held weakly, and so are the subclasses made from them: a class
+# built at run time (a test, a plugin) is not kept alive by this cache.
+_subclasses: "weakref.WeakKeyDictionary[type, weakref.ref]" = weakref.WeakKeyDictionary()
+_subclasses_lock = threading.Lock()
+
+
+def _subclass_with_history(base: type) -> type:
+    """``base`` with an ``iter`` that adds the processor to every run.
+
+    The run is the agent in ``self``, so a ``copy.copy(agent)`` made after the
+    install runs through its OWN model and tools, not the original's.
+    """
+    with _subclasses_lock:
+        ref = _subclasses.get(base)
+        sub = ref() if ref is not None else None
+        if sub is None:
+            def iter(self, *args: Any, **kwargs: Any) -> Any:  # noqa: A001 - overrides Agent.iter
+                from pydantic_ai.capabilities import ProcessHistory
+                _with_synap_capability(kwargs, ProcessHistory(synap_history_processor()))
+                return super(sub, self).iter(*args, **kwargs)
+
+            setattr(iter, _MARK, True)
+            # A name of its own, so pickling an installed agent fails with "attribute
+            # lookup failed" on ``...WithSynapHistory`` instead of claiming it is not the
+            # same object as ``Agent``. (Agents do not pickle anyway: they hold ContextVars.)
+            name = f"{base.__name__}WithSynapHistory"
+            sub = type(name, (base,), {"iter": iter, "__module__": base.__module__,
+                                       "__qualname__": f"{base.__qualname__}WithSynapHistory"})
+            _subclasses[base] = weakref.ref(sub)
+        return sub
+
+
+def _install_per_run(agent: Any) -> bool:
+    """Hand the processor to every run of this agent as a per-run capability.
+
+    Pydantic AI 2.x fixes the agent's capability list when the ``Agent`` is
+    built (``CombinedCapability._dispatch`` is computed in ``__post_init__``), so
+    a ``ProcessHistory`` appended to ``agent.root_capability.capabilities``
+    afterwards is never called. Every run entry point (``run``, ``run_sync``,
+    ``run_stream``, ``run_stream_events``) goes through ``Agent.iter``, which takes
+    ``capabilities=`` for the one run, so ``iter`` is overridden to add the
+    processor there.
+
+    The override is a subclass of the agent's class, assigned to ``agent.__class__``
+    (the instance keeps its state, ``isinstance`` still holds, and a
+    ``copy.copy(agent)`` made later is an instance of the same subclass and so
+    runs on its own model). When that is not possible (the instance already has
+    its own ``iter``, or the class does not allow it), ``iter`` is wrapped on the
+    instance instead: that works, but a copy of such an agent still runs through
+    the original's ``iter``.
+    """
+    from pydantic_ai.capabilities import ProcessHistory
+
+    if "iter" not in getattr(agent, "__dict__", {"iter": None}):
+        try:
+            agent.__class__ = _subclass_with_history(type(agent))
+            return True
+        except TypeError:
+            pass  # a class that cannot be swapped: wrap the instance below
+
+    original = agent.iter
+    capability = ProcessHistory(synap_history_processor())
+
+    def iter_with_synap_history(*args: Any, **kwargs: Any) -> Any:
+        return original(*args, **_with_synap_capability(kwargs, capability))
+
+    setattr(iter_with_synap_history, _MARK, True)
+    agent.iter = iter_with_synap_history
+    return True
+
+
+def install_synap_history(agent: Any) -> bool:
+    """Put :func:`synap_history_processor` on the agent. Idempotent. Returns
+    ``True`` only if the processor WILL run on this agent's model requests;
+    otherwise ``False`` and one warning is logged.
+
+    How it gets there depends on the Pydantic AI version (verified against the
+    installed library source and by running the tests on 1.0.0, 1.107.9, 2.0.0
+    and 2.64.0; see the package tests):
+
+    - Pydantic AI 1.0 keeps a ``history_processors`` list on the agent, appended
+      to here.
+    - From 1.107 (and all of 2.x) the agent's capabilities are fixed when it is
+      built; ``history_processors`` is a read-back copy (1.107) or gone (2.x), and
+      appending to ``agent.root_capability.capabilities`` afterwards does
+      nothing. Here the processor is passed to each run instead, through
+      ``Agent.iter(capabilities=[...])`` (which every ``run*`` method uses), by
+      wrapping ``iter`` on this agent instance. If you build the agent yourself
+      you can skip this: ``Agent(..., capabilities=[ProcessHistory(
+      synap_history_processor())])`` is detected and left as it is, and so is a
+      per-run ``agent.run(..., capabilities=[...])``.
     """
     try:
+        if _in_constructor_capabilities(agent):
+            return True
+        if getattr(getattr(agent, "iter", None), _MARK, False):
+            return True  # already wrapped
+        # Capability-based agents first: from 1.107 the ``history_processors``
+        # list is only a read-back copy of what the agent was built with (agent/
+        # __init__.py: "stays for 1.x users who read it back"), so appending to it
+        # does nothing there. Older 1.x has no ``iter(capabilities=)`` and its
+        # list is the real seam.
+        if _has_capabilities_seam(agent):
+            return _install_per_run(agent)
+        # The list is the real seam only on a library whose ``iter`` has no
+        # ``capabilities``. Where it has (1.107+), the list is a read-back copy: an
+        # append there succeeds and does nothing, so a ``True`` would be false.
         processors: Optional[list] = getattr(agent, "history_processors", None)
-        if isinstance(processors, list):
+        if isinstance(processors, list) and not _library_names_capabilities(type(agent)):
             if not any(_is_ours(p) for p in processors):
                 processors.append(synap_history_processor())
-            return True
-        capabilities = getattr(getattr(agent, "root_capability", None), "capabilities", None)
-        if isinstance(capabilities, list):
-            if not any(_is_ours(c) for c in capabilities):
-                from pydantic_ai.capabilities import ProcessHistory
-
-                capabilities.append(ProcessHistory(synap_history_processor()))
             return True
     except Exception:  # noqa: BLE001 — never break the caller's agent set-up
         logger.warning("synap pydantic-ai: could not install the history processor",
@@ -186,8 +351,9 @@ def install_synap_history(agent: Any) -> bool:
     if not _warned_no_seam:
         _warned_no_seam = True
         logger.warning(
-            "synap pydantic-ai: this agent has no history_processors or capabilities, "
-            "so Synap's compaction is not applied. Pass synap_history_processor() yourself.")
+            "synap pydantic-ai: this agent takes neither history_processors nor per-run "
+            "capabilities, so Synap's compaction is NOT applied. Pass "
+            "synap_history_processor() to your Pydantic AI version's own hook.")
     return False
 
 

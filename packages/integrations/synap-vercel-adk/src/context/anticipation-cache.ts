@@ -1,5 +1,6 @@
 import type { CachedBundle, FetchedContext, RawContextItem } from '../types.js';
 import { rawItemToContextItem } from '../transform/messages.js';
+import { rungKey, rungServes } from '../util/scope.js';
 
 const DEFAULT_TTL_MS = 1_800_000; // 30 minutes — matches Python SDK (ttl_seconds=1800)
 const MAX_ENTRIES = 100;
@@ -45,12 +46,15 @@ export class AnticipationCache {
     customerId?: string;
     conversationId?: string;
     searchQuery?: string[];
+    /** The level the request names (`rungKey` of its `scopePath`); a bundle stamped with another level never serves. */
+    scopePath?: Record<string, string>;
   }): FetchedContext | null {
     const now = Date.now();
     this.evictExpired(now);
 
+    const requestRung = rungKey(opts.scopePath);
     const candidates = [...this.entries.values()].filter(({ bundle }) =>
-      this.scopeMatches(bundle, opts)
+      this.scopeMatches(bundle, opts) && rungServes(bundle.scopeRung, requestRung)
     );
 
     if (candidates.length === 0) return null;
@@ -86,12 +90,21 @@ export class AnticipationCache {
     return this.bundleToContext(best.bundle);
   }
 
-  lookupUserSummary(userId: string): CachedBundle | null {
+  /**
+   * The user's summary bundle, if one is cached. Like `lookup`, a bundle the
+   * server stamped with a level serves only a request naming that same level
+   * (`scopePath`); an ids-only call is not served a stamped bundle.
+   */
+  lookupUserSummary(userId: string, scopePath?: Record<string, string>): CachedBundle | null {
     const now = Date.now();
     this.evictExpired(now);
 
+    const requestRung = rungKey(scopePath);
     for (const { bundle } of this.entries.values()) {
-      if (bundle.bundleType === 'user_summary' && bundle.userId === userId) {
+      if (
+        bundle.bundleType === 'user_summary' && bundle.userId === userId &&
+        rungServes(bundle.scopeRung, requestRung)
+      ) {
         return bundle;
       }
     }
@@ -109,7 +122,9 @@ export class AnticipationCache {
   size(): number { return this.entries.size; }
 
   private bundleKey(bundle: CachedBundle): string {
-    return `${bundle.bundleType}:${bundle.userId}:${bundle.customerId}:${bundle.conversationId}`;
+    // The rung is part of the key so bundles for two levels never overwrite each other.
+    return `${bundle.bundleType}:${bundle.userId}:${bundle.customerId}:${bundle.conversationId}`
+      + (bundle.scopeRung ? `:${bundle.scopeRung}` : '');
   }
 
   private scopeMatches(bundle: CachedBundle, opts: {
