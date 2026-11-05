@@ -1,6 +1,6 @@
 {
   "name": "@maximem/synap-js-sdk",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "description": "Native TypeScript SDK for Synap context and memory management",
   "repository": {
     "type": "git",
