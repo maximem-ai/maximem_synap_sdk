@@ -72,7 +72,7 @@ await company.asearch(("acme", "policies"), query="refund window")
 
 **Search follows the SDK.** `store.asearch` returns Synap's own ranked list, best first, with `score` set to the rank score. Every item's `value["_synap"]` carries what Synap knows about it: `scope` (`user` / `customer` / `client`), `assertion_source` (who said it), `said_at`, `event_date`, `valid_until`, `type`, `rank`, `rank_score`, `confidence`, `source`, `dates_known`, and any other metadata. `created_at` / `updated_at` are the day the user said it (else the event date); with neither they are 1970-01-01 UTC and `_synap["dates_known"]` is `False`. Memories that come back carrying the store's tag are filtered by the sub-namespace you pass; memories without it are always returned. Today's server does not return the tag, so against it every memory is returned and the sub-namespace does not filter (see the warning below).
 
-**Read failures.** By default a failed read returns `None` / `[]` and logs at `ERROR`. To tell an outage from an empty memory: `SynapStore(sdk, on_error="raise")` raises `SynapIntegrationError`. This also covers a scope that `sdk.fetch` swallowed ("Scope 'user' fetch failed ... non-fatal"): the SDK leaves a failed scope out of `scopes_queried` and returns the rest, and the store compares that list with the scopes it asked for. With `"fallback"` it logs a WARNING ("read is incomplete") and uses the scopes that answered; a `delete` that meets the gap always raises. An empty `scopes_queried` from the real `sdk.fetch` means every scope it ran failed (a healthy empty memory still lists its scopes), so it is reported; an answer that has items but lists no scope is taken as a stand-in SDK and treated as complete. The conversation scope is expected only when a `conversation_id` and a query are both sent.
+**Read failures.** By default a failed read returns `[]` and logs at `ERROR`. To tell an outage from an empty memory: `SynapStore(sdk, on_error="raise")` raises `SynapIntegrationError`. This also covers a scope that `sdk.fetch` swallowed ("Scope 'user' fetch failed ... non-fatal"): the SDK leaves a failed scope out of `scopes_queried` and returns the rest, and the store compares that list with the scopes it asked for. With `"fallback"` it logs a WARNING ("read is incomplete") and uses the scopes that answered. An empty `scopes_queried` from the real `sdk.fetch` means every scope it ran failed (a healthy empty memory still lists its scopes), so it is reported; an answer that has items but lists no scope is taken as a stand-in SDK and treated as complete. The conversation scope is expected only when a `conversation_id` and a query are both sent.
 
 **Pass anything else `sdk.fetch` takes** with `fetch_options`:
 
@@ -85,17 +85,58 @@ store = SynapStore(sdk, fetch_options={
 
 The options apply to every call of the store, so on a shared store do not put per-user values in them (a `conversation_id`, for example).
 
-**`SynapStore(sdk, user_id="alice", customer_id="acme")` still works** (one user per store). ⚠ It reads and writes that one user's memory for everyone who runs the graph, whatever namespace is passed: do not compile it into a graph that serves several users. This includes `delete`: `adelete(("acme", "bob", "prefs"), "k")` on a store built for alice deletes **alice's** memory (within her identity only). The first delete from such a store logs a WARNING saying so. A shared store has none of this.
+**`SynapStore(sdk, user_id="alice", customer_id="acme")` still works** (one user per store). ⚠ It reads and writes that one user's memory for everyone who runs the graph, whatever namespace is passed: do not compile it into a graph that serves several users. This includes `delete_memory` and `forget`: `aforget(("acme", "bob"), "old address")` on a store built for alice acts on **alice's** memory. A shared store has none of this.
 
-Because the SDK reads every level above the one you ask for, a store built with both `user_id` and `customer_id` now also returns customer-level memories from `search` (it used to ask for the user scope only). `get` and `delete` (where they work, see the box below) only ever act on the store's own level.
+Because the SDK reads every level above the one you ask for, a store built with both `user_id` and `customer_id` now also returns customer-level memories from `search` (it used to ask for the user scope only).
 
 **Know the namespace convention.** The first `N` entries are the identity; a namespace that is *longer* is accepted and the extra entries become your sub-namespace. A wrong-length convention is therefore not detected: on a B2C account, `("acme", "alice", "prefs")` files everything under the user `acme`. Use the table above; the store cannot know which you meant.
 
-> **⚠ Read this before you rely on `get` or `delete`.** Today's Synap server does **not** return the metadata a caller attaches to a memory. `put` writes the store's tag (sub-namespace, key, identity) but it never comes back from `fetch`. So **against today's server `get(namespace, key)` returns `None` and `delete(namespace, key)` raises `SynapIntegrationError`**, whatever you stored. **`search` is the read path**: it returns every memory (yours from `put` and the ones Synap extracted from conversations) as ordinary memories, without sub-namespace filtering. `put` works. `get` and `delete` work only against a server that returns the tags. To delete today, take the memory's id from the search results (`value["_synap"]["id"]`) and call `sdk.memories.delete(memory_id)` (or `sdk.memories.forget(...)`); the store never deletes on a guess.
+## Synap is search-based: no lookup by key
 
-**Where `get` and `delete` do work, they act on the store's own level only.** A shared store (or a single-user store pinned by a `scope_path`) tags each `put` with its identity entries, so a team-level memory and a customer-level one with the same sub-namespace and key are told apart; `get` never returns an ancestor's memory as yours, and `delete` never deletes one. `search` does return ancestors, each with its true namespace and `_synap["scope"]`. Memories written by a single-user store carry no identity tag: a shared store finds them in `search` but cannot prove their level, so `get` and `delete` do not act on them.
+Agents ask Synap by search. Synap has **no exact `(namespace, key)` lookup and no namespace listing**, so these `BaseStore` methods raise `SynapStoreUnsupportedError` (a subclass of `NotImplementedError`) before anything is read or written:
 
-**`store.delete(namespace, key)`** finds the memory by its tag and calls `sdk.memories.delete`; it raises if it cannot find it, and never deletes on a guess. Against today's server it cannot find anything (see the box above): delete by id instead. `list_namespaces` returns `[]` (Synap has no namespace listing).
+| `BaseStore` method | Use instead |
+|---|---|
+| `get` / `aget(namespace, key)` | `search` / `asearch(namespace, query="...")`. Each hit carries its Synap id in `value["_synap"]["id"]`. |
+| `delete` / `adelete(namespace, key)` | `adelete_memory(namespace, memory_id)` with the id of a search hit, or `aforget(namespace, "a description of it")`. |
+| `list_namespaces` / `alist_namespaces()` | Keep the namespaces you use in your own app. |
+
+A `batch` / `abatch` holding a `GetOp`, a delete `PutOp` (value `None`) or a `ListNamespacesOp` raises the same error and runs none of its ops.
+
+**Migrating from 0.5.x.** Before 0.6.0 `get` returned `None` for everything, `delete(namespace, key)` raised `SynapIntegrationError` ("no memory found") and `list_namespaces` returned `[]`, because today's Synap server does not return the metadata a caller attaches to a memory, so the key tag `put` writes never came back. Code that calls `store.get(...)` and treats `None` as "not stored yet" now gets `SynapStoreUnsupportedError`: replace it with `search`. Code that called `store.delete(ns, key)` should search for the memory and call `adelete_memory(ns, hit.value["_synap"]["id"])`, or `aforget(ns, description)`.
+
+`put` still writes the tag (sub-namespace, key, identity): `search` reads it to filter by sub-namespace and to give each hit its key and true namespace, on a server that returns it. Against today's server every memory looks untagged, so `search` returns every memory of the identity (yours from `put` and the ones Synap extracted from conversations), without sub-namespace filtering, and `SynapStore(..., semantic_fallback=False)` returns nothing.
+
+## The Python SDK, on the store
+
+The Python SDK's capabilities are reachable from the store, except the two batch calls listed below, so most code never has to drop to the SDK. Standard LangGraph code (`put`, `search` with `BaseStore`'s arguments) is unchanged; the additions are optional keyword-only arguments and extra methods. The identity always comes from the namespace (shared store) or the constructor (single-user store), never from an argument. Raw results are the SDK's own typed objects. Every async method has a sync twin without the leading `a` (`await_ingestion` / `wait_for_ingestion`).
+
+| You want (SDK call) | On the store |
+|---|---|
+| Store a value with create options (`memories.create`) | `await store.aput(ns, key, value, document_type=, document_id=, document_created_at=, mode=, objective=, metadata=)` |
+| Store and wait until it is searchable (`wait_for_completion`) | `await store.aput(ns, key, value, wait=True, timeout_seconds=300)` returns the `MemoryStatusResponse` |
+| Store any document as is: text, dict, `TextPart`, `FilePart`, a list of parts (`memories.create`) | `await store.acreate_memory(ns, document, ...same options, wait=False)` returns `CreateMemoryResponse` |
+| Ingest a file (`memories.create_from_file`) | `await store.acreate_memory_from_file(ns, file_path=... / file=..., filename=... / text=..., document_type=, mode=, metadata=)` |
+| Ingestion status / wait (`memories.status`, `wait_for_completion`) | `await store.aget_ingestion_status(ingestion_id)`, `await store.await_ingestion(ingestion_id, timeout_seconds=, poll_interval_seconds=)` |
+| One memory by id (`memories.get`, `update`, `delete`) | `aget_memory(ns, memory_id)`, `aupdate_memory(ns, memory_id, document, merge_strategy=, document_type=, metadata=)`, `adelete_memory(ns, memory_id, permanent=False)` (soft delete by default, restorable) |
+| Delete a user's, conversation's or customer's data (`data.delete`) | `await store.adelete_data(ns, "user" / "conversation" / "customer", conversation_id=, dry_run=False, confirm=, wait=True, instances=, permanent=False)` returns `DeleteDataResult`. The user and customer come only from the namespace; `"customer"` needs a customer-level namespace |
+| Restore soft-deleted memories (`data.restore`), read a delete's record (`data.status`) | `await store.arestore(ns, memory_ids=None, deletion_id=None)` returns `RestoreResult`; `await store.adeletion_status(ns, deletion_id)` returns `DeleteDataResult` |
+| Forget by description (`memories.forget`) | `await store.aforget(ns, "description", mode="preview" or "direct", conversation_id=)` |
+| Search with per-call fetch options (`fetch`) | `await store.asearch(ns, query=..., mode=, precision_level=, types=, query_date=, max_results_per_query=, conversation_id=, scopes=, ...)` |
+| The raw fetch answer, with the SDK's own defaults (`fetch`; `user/customer/client/conversation.context.fetch` are `fetch` with `scopes=`) | `await store.afetch_raw(ns, query=None, **any_fetch_option)` returns `UnifiedContextResponse` |
+| User profile (`user.get_profile`) | `await store.aget_profile(ns)` |
+| Scope ladder (`get_scope_ladder`) | `await store.aget_scope_ladder(refresh=False)` |
+| Record a turn (`conversation.record_message`) | `await store.arecord_message(conversation_id, role, content, namespace=ns, model=, context_window=)`; `content` may be a list of strings, `TextPart` and `FilePart`. With `model`, `context_window` or a list it goes over REST (`sdk.conversation.record_message`) instead of the stream |
+| Push a whole transcript (`conversation.ingest_transcript`) | `await store.aingest_transcript(ns, conversation_id, transcript, conversation_type=, analysis=, metadata=, started_at=, ended_at=)` |
+| Compacted context for a prompt (`get_context_for_prompt`) | `await store.aget_context_for_prompt(conversation_id, style=, search_history=, query=)`, or `synap_st_prompt` / `create_synap_st_node` |
+| Compaction (`compact`, `get_compacted`, `get_compaction_status`) | `acompact(conversation_id, strategy=, compaction_level=, target_tokens=, force=)`, `aget_compacted(conversation_id, version=, format=)`, `aget_compaction_status(conversation_id)` |
+| Live stream reporting (`instance.*`) | `SynapLangGraphCallbackHandler`, `create_synap_turn_node` and friends |
+
+> **⚠ Calls by id are not checked against the namespace.** `aget_memory`, `aupdate_memory`, `adelete_memory`, `aget_ingestion_status`, `await_ingestion`, `arestore`, `adeletion_status` and the methods that take a `conversation_id` (`arecord_message`, `aingest_transcript`, `aget_context_for_prompt`, `acompact`, `aget_compacted`, `aget_compaction_status`) pass the id to the server as given. The namespace is only checked for shape. The server does not verify who owns a memory id, ingestion id or conversation id, so **any caller holding an id can read, rewrite or delete what it points to, another user's included**. Do not pass ids from untrusted input (for example a model's tool call) without your own check.
+
+**Not on the store, by owner decision:** `memories.batch_create` and `conversation.record_messages_batch`. Each request in them carries its own user ids, which would bypass the namespace identity. Call `acreate_memory` / `arecord_message` once per item, or call them on `store.sdk` directly (then you pass the ids yourself). Also not on the store: SDK administration (`configure`, `cache`, `credits`, `subscribe_to_compaction_updates`, `archive_tool_result`), which stays on `store.sdk`.
+
+**Defaults that differ from `sdk.fetch`, by owner decision.** `search` keeps `mode="accurate"` as its default (the SDK's `fetch` defaults to `"fast"`): an explicit exception to "same defaults as the SDK". It also reads with `include_conversation_context=False` (both set in the constructor; pass `mode="fast"` per call or in the constructor to change), always `response_shape="ranked"` and `max_results=limit+offset`. `afetch_raw` sends only what you pass, so it uses the SDK's own defaults (`mode="fast"`, `max_results=20`, by-type).
 
 ## What's in the box
 
@@ -295,13 +336,11 @@ async def remember(state, runtime):
 
 ## Error policy
 
-- **Writes** (`SynapStore.put`) surface SDK failures as `SynapIntegrationError`. Silent drops would hide ingestion outages.
-- **Reads** (`get`, `search`) degrade gracefully by default (`on_error="fallback"`): they log at `ERROR` and return `None`/`[]` rather than crashing the graph. `on_error="raise"` raises `SynapIntegrationError` instead.
-- **Deletes** (`SynapStore.delete`) raise `SynapIntegrationError` if the memory cannot be found (always, against today's server) or the SDK fails.
+- **Writes** (`SynapStore.put`) and every SDK method of the store (`acreate_memory`, `adelete_memory`, `aforget`, `afetch_raw` ...) surface SDK failures as `SynapIntegrationError` (the SDK's exception is its `__cause__`). Silent drops would hide ingestion outages.
+- **Reads** (`search`) degrade gracefully by default (`on_error="fallback"`): they log at `ERROR` and return `[]` rather than crashing the graph. `on_error="raise"` raises `SynapIntegrationError` instead.
+- **`get`, `delete`, `list_namespaces`** raise `SynapStoreUnsupportedError` (see "Synap is search-based").
 - **Identity** errors (namespace too short or empty, unknown `level`, no ladder) always raise.
 
-> **Note on the store's tag.** `put` tags each memory with its sub-namespace, key and identity so `get`, `delete` and the sub-namespace filter could find it. Today's server never returns caller metadata (on any instance, not only atomizing ones), so against it every memory looks untagged: `search` returns them all, `get` returns `None`, `delete` raises. `SynapStore(..., semantic_fallback=False)` returns only tagged items, which against today's server means nothing.
->
 > Job/document-level attribution (mapping fragments back to a source id) is not done in the store; build it in app code.
 
 ## When to use which checkpointer

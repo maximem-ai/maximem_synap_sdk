@@ -731,16 +731,34 @@ class MemoriesInterface:
             )
             raise
 
-    async def delete(self, memory_id: UUID) -> dict:
+    async def delete(self, memory_id: UUID, permanent: bool = False) -> dict:
         """
         Delete a memory.
 
+        By default the memory is soft-deleted: hidden from every read at once,
+        restorable with ``sdk.data.restore([memory_id])`` until ``purge_after``
+        (the instance's deletion period, 0 to 30 days, 30 by default), then
+        purged for good. ``status`` is ``"pending_purge"`` and
+        ``fully_removed`` is False, because the memory is hidden, not yet gone.
+
         Args:
             memory_id: The memory to delete
+            permanent: Remove it now, with no restore period. Needs a
+                management-level key (``delete:permanent``, ``delete:*``,
+                ``management:*`` or ``*``); a runtime key gets a 403.
 
         Returns:
-            Confirmation with deleted memory_id and timestamp
+            ``memory_id``, ``deleted_at``, ``status`` (``pending_purge``,
+            ``complete`` or ``partial``), ``purge_after`` (a datetime for a soft
+            delete), ``permanent``, ``fully_removed`` (True only when a
+            permanent delete cleared every store), ``still_present_in`` and
+            ``source_text_kept``.
+
+        The key must be allowed to delete (a read-only key gets a 403) and the
+        memory must be in the key's own instance (otherwise a 404).
         """
+        if not isinstance(permanent, bool):
+            raise InvalidInputError("permanent must be a boolean")
         self._sdk._ensure_initialized()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = time.time()
@@ -748,15 +766,29 @@ class MemoriesInterface:
         try:
             auth_context = await self._sdk._get_auth_context(correlation_id)
 
+            delete_kwargs = {"params": {"permanent": "true"}} if permanent else {}
             result = await self._sdk._http_transport.delete(
                 path=f"/api/v1/memories/{memory_id}",
                 auth_context=auth_context,
                 correlation_id=correlation_id,
+                **delete_kwargs,
             )
 
+            # `fully_removed` is False unless the server said True: a store that
+            # could not be cleared (named in `still_present_in`) may still serve
+            # the text, so a caller must not tell an end user it is gone.
             response = {
                 "memory_id": UUID(result["memory_id"]),
                 "deleted_at": datetime.fromisoformat(result["deleted_at"]),
+                "fully_removed": result.get("fully_removed") is True,
+                "still_present_in": list(result.get("still_present_in") or []),
+                "source_text_kept": result.get("source_text_kept") is True,
+                # B1. A server older than soft delete sends none of these; it
+                # deleted at once, so "complete".
+                "status": result.get("status") or "complete",
+                "purge_after": (datetime.fromisoformat(result["purge_after"])
+                                if result.get("purge_after") else None),
+                "permanent": result.get("permanent") is True,
             }
 
             latency_ms = int((time.time() - start_time) * 1000)

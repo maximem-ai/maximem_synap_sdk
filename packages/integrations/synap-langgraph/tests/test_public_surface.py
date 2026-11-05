@@ -52,6 +52,7 @@ def test_all_list_is_complete():
 
     expected = {
         "SynapStore",
+        "SynapStoreUnsupportedError",
         "SynapCheckpointSaver",
         "SynapLangGraphCallbackHandler",
         "create_synap_node",

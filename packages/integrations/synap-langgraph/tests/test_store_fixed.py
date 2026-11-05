@@ -133,9 +133,9 @@ def test_S3_inverted_scopes_are_not_hard_coded():
     assert "scopes" not in sdk.last_kwargs("fetch")
 
 
-def test_S3_inverted_fetch_options_apply_to_get_too():
+def test_S3_inverted_fetch_options_apply_to_search():
     sdk = Sdk()
-    run(store_for(sdk, fetch_options={"precision_level": "medium"}).aget(("n",), "k"))
+    run(store_for(sdk, fetch_options={"precision_level": "medium"}).asearch(("n",), query="k"))
     assert sdk.last_kwargs("fetch")["precision_level"] == "medium"
 
 
@@ -166,7 +166,6 @@ def test_S5_inverted_semantic_fallback_false_is_the_strict_opt_out():
 def test_S5_inverted_no_markers_stripped_warning(caplog):
     with caplog.at_level(logging.WARNING, logger="synap_langgraph.store"):
         run(store_for(Sdk()).asearch(("alice",), query="q"))
-        run(store_for(Sdk()).aget(("alice",), "k"))
     assert [r for r in caplog.records if "marker" in r.message.lower() or "strip" in r.message.lower()] == []
 
 
@@ -190,11 +189,6 @@ def test_S7_inverted_on_error_raise_makes_the_failure_visible():
     assert run(store_for(Sdk(empty), on_error="raise").asearch(("alice",), query="q")) == []
 
 
-def test_S7_inverted_get_honours_on_error_too():
-    sdk = Sdk().fails(RuntimeError("down"))
-    assert run(store_for(sdk).aget(("n",), "k")) is None
-    with pytest.raises(SynapIntegrationError, match="down"):
-        run(store_for(sdk, on_error="raise").aget(("n",), "k"))
 
 
 # ── S-14 inverted: the memory's own date ────────────────────────────────────
@@ -224,89 +218,28 @@ def test_created_at_falls_back_to_event_date_then_to_a_documented_sentinel():
     assert b.value["_synap"]["dates_known"] is False
 
 
-def test_get_item_dates_and_labels():
-    it = tagged("t1", 1, 0.9, "prefs", "lang")
-    it.said_at = SAID
-    item = run(store_for(Sdk(response_of(it))).aget(("prefs",), "lang"))
-    assert item.created_at == SAID and item.value["_synap"]["scope"] == "user"
 
 
 # ── P-5 inverted: delete reaches the SDK ────────────────────────────────────
 
-def test_P5_inverted_delete_finds_the_memory_by_its_tag_and_deletes_it():
-    sdk = Sdk(response_of(tagged(UUIDS[1], 1, 0.9, "alice/prefs", "language")))
-    run(store_for(sdk).adelete(("alice", "prefs"), "language"))
-    from uuid import UUID
-    sdk.memories.delete.assert_awaited_once_with(UUID(UUIDS[1]))
-    kw = sdk.last_kwargs("fetch")
-    assert kw["scopes"] == ["user"]                    # this store's own level only
-    assert kw["search_query"] == ["alice/prefs language"]
 
 
-def test_delete_via_put_none_and_the_base_class_delete():
-    sdk = Sdk(response_of(tagged(UUIDS[1], 1, 0.9, "prefs", "language")))
-    run(store_for(sdk).adelete(("prefs",), "language"))
-    assert sdk.memories.delete.await_count == 1
 
 
-def test_delete_removes_every_memory_carrying_the_tag():
-    sdk = Sdk(response_of(tagged(UUIDS[1], 1, 0.9, "p", "k"), tagged(UUIDS[2], 2, 0.8, "p", "k"),
-                          tagged(UUIDS[3], 3, 0.7, "p", "other")))
-    run(store_for(sdk).adelete(("p",), "k"))
-    deleted = {c.args[0].hex[-1] for c in sdk.memories.delete.await_args_list}
-    assert deleted == {"1", "2"}
 
 
-def test_delete_not_found_raises_a_clear_error_and_deletes_nothing():
-    sdk = Sdk(response_of(tagged(UUIDS[1], 1, 0.9, "p", "other")))
-    with pytest.raises(SynapIntegrationError, match="no memory found.*Nothing was deleted"):
-        run(store_for(sdk).adelete(("p",), "k"))
-    sdk.memories.delete.assert_not_awaited()
 
 
-def test_delete_ignores_untagged_items_and_non_uuid_ids():
-    sdk = Sdk(response_of(ranked("f1", 1, "facts", "untagged", 0.9, "user"),
-                          tagged("chunk_abc", 2, 0.8, "p", "k")))
-    with pytest.raises(SynapIntegrationError, match="no memory found"):
-        run(store_for(sdk).adelete(("p",), "k"))
-    sdk.memories.delete.assert_not_awaited()
 
 
-def test_delete_never_touches_a_level_above_the_stores_own():
-    customer_level = tagged(UUIDS[1], 1, 0.9, "p", "k", scope="customer")
-    sdk = Sdk(response_of(customer_level))
-    with pytest.raises(SynapIntegrationError, match="no memory found"):
-        run(store_for(sdk).adelete(("p",), "k"))
-    sdk.memories.delete.assert_not_awaited()
 
 
-def test_delete_lookup_failure_raises_even_with_on_error_fallback():
-    sdk = Sdk().fails(RuntimeError("down"))
-    with pytest.raises(SynapIntegrationError, match="down"):
-        run(store_for(sdk).adelete(("p",), "k"))
 
 
-def test_delete_sdk_failure_raises():
-    sdk = Sdk(response_of(tagged(UUIDS[1], 1, 0.9, "p", "k")))
-    sdk.memories.delete.side_effect = RuntimeError("500")
-    with pytest.raises(SynapIntegrationError, match="500"):
-        run(store_for(sdk).adelete(("p",), "k"))
 
 
-def test_delete_in_a_shared_store_uses_the_identity_and_the_sub_namespace():
-    sdk = Sdk(response_of(tagged(UUIDS[1], 1, 0.9, "prefs", "language", ident=("acme", "alice"))))
-    run(SynapStore(sdk).adelete(("acme", "alice", "prefs"), "language"))
-    kw = sdk.last_kwargs("fetch")
-    assert kw["user_id"] == "alice" and kw["customer_id"] == "acme" and kw["scopes"] == ["user"]
-    assert kw["search_query"] == ["prefs language"]
-    assert sdk.memories.delete.await_count == 1
 
 
-def test_customer_pool_store_deletes_at_customer_scope():
-    sdk = Sdk(response_of(tagged(UUIDS[1], 1, 0.9, "policies", "refund", scope="customer", ident=("acme",))))
-    run(SynapStore(sdk, level="customer").adelete(("acme", "policies"), "refund"))
-    assert sdk.last_kwargs("fetch")["scopes"] == ["customer"]
-    assert sdk.memories.delete.await_count == 1
 
 
 def test_no_stale_no_public_delete_api_text_remains():
@@ -320,10 +253,6 @@ def test_no_stale_no_public_delete_api_text_remains():
     assert offenders == []
 
 
-def test_list_namespaces_is_still_a_documented_no_op(caplog):
-    with caplog.at_level(logging.WARNING, logger="synap_langgraph.store"):
-        assert run(store_for(Sdk()).alist_namespaces()) == []
-    assert any("list_namespaces" in r.message for r in caplog.records)
 
 
 # ── integration impact inverted (package-level) ─────────────────────────────
