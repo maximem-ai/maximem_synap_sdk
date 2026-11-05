@@ -48,20 +48,8 @@ def test_search_does_not_filter_by_sub_namespace_because_nothing_is_tagged():
     assert len(run(store.asearch(("acme", "alice", "prefs"), query="q"))) == 2
 
 
-def test_get_returns_none_for_what_was_just_put():
-    sim, store = world()
-    assert run(store.aget(("acme", "alice", "prefs"), "language")) is None
 
 
-def test_delete_raises_an_error_that_says_what_to_do_and_deletes_nothing():
-    sim, store = world()
-    with pytest.raises(SynapIntegrationError) as ei:
-        run(store.adelete(("acme", "alice", "prefs"), "language"))
-    msg = str(ei.value)
-    assert "does not return" in msg
-    assert "sdk.memories.delete(memory_id)" in msg and "sdk.memories.forget" in msg
-    assert 'value["_synap"]["id"]' in msg.replace("\\", "")
-    assert sim.deleted == [] and len(sim.rows) == 1       # never deleted on a guess
 
 
 def test_deleting_by_the_id_from_search_works():

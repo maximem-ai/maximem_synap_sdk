@@ -1,10 +1,10 @@
 """SynapStore: LangGraph ``BaseStore`` backed by Synap semantic memory.
 
 Implements ``batch`` / ``abatch`` (the only abstract methods) and dispatches
-individual ops (:class:`PutOp`, :class:`GetOp`, :class:`SearchOp`,
-:class:`ListNamespacesOp`) to async helpers. The convenience API
-(``put``/``get``/``search``/``delete``/``list_namespaces`` + async variants)
-is inherited unchanged from ``BaseStore`` and rides through ``(a)batch``.
+:class:`PutOp` and :class:`SearchOp` to async helpers. ``put`` / ``search``
+(+ async variants) ride through ``(a)batch`` as in ``BaseStore``, with optional
+keyword-only SDK options on top. ``get`` / ``delete`` / ``list_namespaces``
+raise :class:`SynapStoreUnsupportedError` (Synap is search-based; see below).
 
 Who the memory belongs to
 -------------------------
@@ -41,9 +41,11 @@ Storage
 -------
 
 * ``put`` ingests the value (JSON in ``document``) with ``sdk.memories.create``
-  and tags it with its sub-namespace and key in ``metadata``.
-* ``get`` retrieves with ``sdk.fetch`` and returns the item carrying the exact
-  sub-namespace and key tag.
+  and tags it with its sub-namespace and key in ``metadata``. Optional
+  keyword arguments pass the SDK's own create options (``document_type``,
+  ``document_id``, ``document_created_at``, ``mode``, ``objective``,
+  ``metadata``) and ``wait=True`` waits for the ingestion and returns its
+  ``MemoryStatusResponse``. Standard ``put`` calls are unchanged.
 * ``search`` calls ``sdk.fetch(response_shape="ranked")`` for exactly
   ``limit + offset`` places (the server fills a top-N differently from a top-M,
   so the store does not ask for more than the caller wants). It asks for at
@@ -53,7 +55,9 @@ Storage
   store's tag (written by ``put``) are filtered by the requested sub-namespace
   prefix; items without it (memories Synap extracted from conversations) belong
   to the identity scope and are always returned. Nothing is dropped because
-  another item carries the tag.
+  another item carries the tag. Extra keyword arguments are ``sdk.fetch``
+  options for this one search (``mode``, ``precision_level``, ``types``,
+  ``query_date``, ``max_results_per_query``, ``conversation_id`` ...).
 * Every item's ``value`` holds the text (the dict for text that is a JSON object,
   which is what ``put`` writes, with the exact text in ``value["_synap"]["text"]``;
   anything else exactly as written, ``{"_raw": text}``, never re-typed: ``1.50``
@@ -62,41 +66,65 @@ Storage
 * ``created_at`` / ``updated_at`` are the day the user said it (``said_at``),
   else the event date, never the fetch time. With neither, they are the epoch
   (1970-01-01 UTC) and ``value["_synap"]["dates_known"]`` is ``False``.
-* ``delete`` finds the memory by its tag under the identity and calls
-  ``sdk.memories.delete``. A memory that cannot be found raises, and no
-  ``delete`` call is ever made on a guess.
-* ``get`` and ``delete`` act on the store's OWN level only. A shared store (and
-  a single-user store pinned by a ``scope_path``) tags each ``put`` with its
-  identity entries (``lg_store_id``); a memory without that tag or with another
-  level's is never returned by ``get`` and never deleted. ``search`` returns
-  ancestors' memories too, each with its true namespace and scope.
 
-⚠ **Today's Synap server does not return caller-supplied memory metadata.**
-The tag ``put`` writes (``lg_store*``) is accepted but never comes back from
-``fetch``. So against today's server ``get(namespace, key)`` returns ``None``
-for everything, ``delete(namespace, key)`` raises (it cannot find the memory)
-and ``search`` is the read path: it returns every memory as an ordinary
-memory, without sub-namespace filtering. ``get`` and ``delete`` work only
-against a server that returns the tags. To delete today, take the memory's id
-from the ``search`` results (``value["_synap"]["id"]``) and call
-``sdk.memories.delete(memory_id)``, or ``sdk.memories.forget(...)``.
+Synap is search-based: no lookup by key
+---------------------------------------
 
-* ``list_namespaces`` is a documented no-op that returns ``[]``: Synap has no
-  namespace enumeration.
+Agents ask Synap by search. There is no exact ``(namespace, key)`` lookup and
+no namespace enumeration, so ``get`` / ``aget``, ``delete`` / ``adelete`` and
+``list_namespaces`` / ``alist_namespaces`` (and a ``batch`` holding a
+``GetOp``, a delete ``PutOp`` or a ``ListNamespacesOp``) raise
+:class:`SynapStoreUnsupportedError`, a ``NotImplementedError``, before
+anything is read or written. Use instead:
+
+* to read: ``search`` / ``asearch`` (``query=`` says what to look for);
+* to delete one memory: ``adelete_memory(namespace, memory_id)`` with the id
+  of a search hit (``item.value["_synap"]["id"]``);
+* to delete by description: ``aforget(namespace, "the user's old address")``.
+
+(Before 0.6.0 ``get`` returned ``None`` for everything, ``delete`` raised "no
+memory found" and ``list_namespaces`` returned ``[]``: today's Synap server
+does not return the metadata a caller attaches to a memory, so the key tag
+``put`` writes never came back.) ``put`` still writes the tag because
+``search`` reads it to filter by sub-namespace on a server that returns it.
+
+The rest of the SDK, on the store
+---------------------------------
+
+The Python SDK's capabilities are methods of the store, identity from the
+namespace exactly as for ``search`` (except ``memories.batch_create`` and
+``conversation.record_messages_batch``, left out because each item carries
+its own user ids and would bypass the namespace identity; excluded by owner
+decision, still reachable on ``store.sdk``): ``acreate_memory`` (any
+document, file parts included), ``acreate_memory_from_file``,
+``aget_ingestion_status``, ``await_ingestion``, ``aget_memory``,
+``aupdate_memory``, ``adelete_memory``, ``aforget``, ``adelete_data``,
+``arestore``, ``adeletion_status``, ``afetch_raw`` (the SDK's
+own ``UnifiedContextResponse``, with the SDK's own defaults),
+``aget_profile``, ``aingest_transcript``, ``arecord_message``,
+``aget_context_for_prompt``, ``acompact``, ``aget_compacted``,
+``aget_compaction_status``, ``aget_scope_ladder``; each has a sync twin
+without the ``a``. Identity is never an argument of these methods.
+
+⚠ Calls by id (``aget_memory``, ``aupdate_memory``, ``adelete_memory``,
+``aget_ingestion_status``, ``await_ingestion``, ``arestore``,
+``adeletion_status``, and the conversation_id methods) are NOT checked against the namespace's identity: the server does
+not verify ownership by id, so any caller holding an id can act on it.
 
 Error policy
 ------------
 
-* Writes and ``delete`` raise :class:`SynapIntegrationError` on SDK failure.
+* Writes and every SDK method of the store (``acreate_memory``,
+  ``adelete_memory``, ``afetch_raw`` ...) raise :class:`SynapIntegrationError`
+  on SDK failure (the SDK's exception is its ``__cause__``).
 * Identity errors (short namespace, unknown level, no ladder) always raise.
-* Reads follow ``on_error``: ``"fallback"`` (default) logs at ERROR and returns
-  ``None`` / ``[]``; ``"raise"`` raises :class:`SynapIntegrationError`, so a
+* Reads (``search``) follow ``on_error``: ``"fallback"`` (default) logs at
+  ERROR and returns ``[]``; ``"raise"`` raises :class:`SynapIntegrationError`, so a
   failed read is distinguishable from an empty memory. This includes a read
   where ``sdk.fetch`` swallowed a failed scope ("non-fatal") and returned only
   the scopes that answered: the store compares the scopes it asked for with the
   answer's ``scopes_queried`` and, with ``"raise"``, raises (naming the scopes);
-  with ``"fallback"`` it logs a WARNING and uses what answered. A ``delete``
-  that meets such a gap always raises (it would otherwise say "no memory found").
+  with ``"fallback"`` it logs a WARNING and uses what answered.
 
 Anticipation (optional, outside the BaseStore contract): construct with
 ``include_conversation_context=True`` and drive the conversation channel via
@@ -117,10 +145,13 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, Iterator, Mapping, 
 from uuid import UUID
 
 from langgraph.store.base import (
+    NOT_PROVIDED,
     BaseStore,
     GetOp,
     Item,
     ListNamespacesOp,
+    NamespacePath,
+    NotProvided,
     Op,
     PutOp,
     Result,
@@ -181,6 +212,66 @@ _CALL_OPTIONS: ContextVar[Optional[Mapping[str, Any]]] = ContextVar(
 
 #: ``config["configurable"]`` key holding per-run fetch options (see ``SynapStore``).
 FETCH_OPTIONS_CONFIG_KEY = "synap_fetch_options"
+
+# memories.create options `put` / `acreate_memory` pass through. The identity
+# (user_id, customer_id, scope) is the store's own and never an option.
+_CREATE_OPTIONS = ("document_type", "document_id", "document_created_at", "mode",
+                   "objective", "metadata")
+# fetch arguments `afetch_raw` refuses: the identity is the namespace's, the
+# query is its own argument.
+_RAW_RESERVED = frozenset({"user_id", "customer_id", "scope_path", "search_query"})
+
+
+class SynapStoreUnsupportedError(NotImplementedError):
+    """Raised by the parts of LangGraph's ``BaseStore`` that Synap does not have.
+
+    Synap is a search-based memory: agents ask it by search. It has no exact
+    ``(namespace, key)`` lookup and no namespace listing, so ``get`` /
+    ``aget``, ``delete`` / ``adelete`` and ``list_namespaces`` /
+    ``alist_namespaces`` raise this (a ``NotImplementedError``) instead of
+    answering ``None`` / ``[]`` for memory that exists. The message names the
+    method to use instead: ``search`` / ``asearch`` to read,
+    ``adelete_memory(namespace, memory_id)`` (the id from a search hit's
+    ``value["_synap"]["id"]``) or ``aforget(namespace, description)`` to delete.
+    Nothing is read or written when it is raised.
+    """
+
+    def __init__(self, operation: str, alternative: str) -> None:
+        self.operation = operation
+        self.alternative = alternative
+        super().__init__(
+            f"SynapStore.{operation} is not supported: Synap is a search-based memory "
+            f"and has no exact key lookup or namespace listing. {alternative}")
+
+
+_GET_ALTERNATIVE = (
+    "Use search()/asearch(namespace, query=...) to find the memory; each hit carries "
+    "its id in value['_synap']['id'].")
+_DELETE_ALTERNATIVE = (
+    "Use adelete_memory(namespace, memory_id) / delete_memory(...) with the id from a "
+    "search hit (value['_synap']['id']), or aforget(namespace, description) / "
+    "forget(...) to delete by describing the memory.")
+_LIST_ALTERNATIVE = (
+    "Keep the namespaces you use in your own application; search() accepts any "
+    "namespace that starts with the identity.")
+
+
+def _unsupported_op(op: Op) -> Optional[SynapStoreUnsupportedError]:
+    if isinstance(op, GetOp):
+        return SynapStoreUnsupportedError("get", _GET_ALTERNATIVE)
+    if isinstance(op, PutOp) and op.value is None:
+        return SynapStoreUnsupportedError("delete", _DELETE_ALTERNATIVE)
+    if isinstance(op, ListNamespacesOp):
+        return SynapStoreUnsupportedError("list_namespaces", _LIST_ALTERNATIVE)
+    return None
+
+
+def _refuse_unsupported(ops: list) -> None:
+    """Raise before running anything when a batch holds an op Synap lacks."""
+    for op in ops:
+        error = _unsupported_op(op)
+        if error is not None:
+            raise error
 
 
 def _check_options(options: Mapping[str, Any], where: str) -> Dict[str, Any]:
@@ -380,8 +471,6 @@ class SynapStore(BaseStore):
         self.fetch_options = options
         self.scope_path = dict(scope_path) if scope_path else None
         self._shared = shared
-        self._listns_warned = False
-        self._delete_warned = False
         self._fetch_checked = False
 
     # ── the SDK of this call ────────────────────────────────────────────────
@@ -503,13 +592,17 @@ class SynapStore(BaseStore):
     # ── abstract methods ────────────────────────────────────────────────────
 
     async def abatch(self, ops: Iterable[Op]) -> list[Result]:
-        return await self._run_ops(list(ops), None, self._call_options())
+        ops = list(ops)
+        _refuse_unsupported(ops)
+        return await self._run_ops(ops, None, self._call_options())
 
     def batch(self, ops: Iterable[Op]) -> list[Result]:
+        ops = list(ops)
+        _refuse_unsupported(ops)
         # Provider and options are read here, in the caller's thread and
         # context; the coroutine runs on the bridge's loop, which has neither.
         pending = self._sdk_provider() if self._sdk_provider is not None else None
-        return run_async(self._run_ops(list(ops), pending, self._call_options()))
+        return run_async(self._run_ops(ops, pending, self._call_options()))
 
     async def _run_ops(self, ops: list, pending: Any, options: Mapping[str, Any]) -> list[Result]:
         opt_token = _CALL_OPTIONS.set(dict(options))
@@ -526,19 +619,16 @@ class SynapStore(BaseStore):
     # ── dispatcher ──────────────────────────────────────────────────────────
 
     async def _dispatch(self, op: Op) -> Result:
+        error = _unsupported_op(op)
+        if error is not None:
+            raise error
         if isinstance(op, PutOp):
-            # value=None on PutOp signals delete (matches the base-class pattern)
-            if op.value is None:
-                return await self._adelete(op.namespace, op.key)
-            return await self._aput(op.namespace, op.key, op.value, op.index)
-        if isinstance(op, GetOp):
-            return await self._aget(op.namespace, op.key)
+            await self._aput(op.namespace, op.key, op.value, op.index)
+            return None
         if isinstance(op, SearchOp):
             return await self._asearch(
                 op.namespace_prefix, op.query, op.filter, op.limit, op.offset,
             )
-        if isinstance(op, ListNamespacesOp):
-            return await self._alist_namespaces(op)
         raise ValueError(f"SynapStore: unsupported op type {type(op).__name__}")
 
     # ── who is this call about ──────────────────────────────────────────────
@@ -644,8 +734,6 @@ class SynapStore(BaseStore):
         target: _Target,
         queries: Optional[Sequence[str]],
         max_results: int,
-        *,
-        own_scope_only: bool = False,
     ) -> Any:
         kwargs: Dict[str, Any] = {
             "mode": self.mode,
@@ -662,25 +750,22 @@ class SynapStore(BaseStore):
         kwargs["response_shape"] = "ranked"
         if target.own_scope == _CLIENT:
             kwargs["scopes"] = [_CLIENT]
-        elif own_scope_only:
-            kwargs["scopes"] = [target.own_scope]
         response = await self.sdk.fetch(**kwargs)
         return response, _unanswered_scopes(kwargs, response)
 
-    def _incomplete(self, op: str, missing: list[str], *, strict: bool, **context: Any) -> None:
+    def _incomplete(self, op: str, missing: list[str], **context: Any) -> None:
         """A scope the fetch asked for did not answer.
 
         ``sdk.fetch`` catches a scope that raised ("non-fatal") and returns the
         scopes that did answer; the only trace is that the scope is missing from
         ``scopes_queried``. That is an outage, not empty memory. Always logged;
-        raised when ``on_error="raise"`` (or ``strict``: a delete, which would
-        otherwise report a missing memory). With ``on_error="fallback"`` the
+        raised when ``on_error="raise"``. With ``on_error="fallback"`` the
         partial answer is used, as before.
         """
         message = (f"the memory read is incomplete: scope(s) {missing} failed and were "
                    "left out of the answer by sdk.fetch (see the 'non-fatal' warning "
                    "above). An outage looks like empty memory without this check.")
-        if strict or self.on_error == "raise":
+        if self.on_error == "raise":
             logger.error("%s: %s", op, message)
             raise SynapIntegrationError(op, message, {"scopes": missing, **context})
         logger.warning("%s: %s Using the scopes that answered.", op, message)
@@ -719,58 +804,6 @@ class SynapStore(BaseStore):
         if self.on_error == "raise":
             raise SynapIntegrationError(op, str(exc), context) from exc
 
-    async def _aget(
-        self,
-        namespace: tuple[str, ...],
-        key: str,
-    ) -> Optional[Item]:
-        target = await self._target(namespace, what="get")
-        sub = _ns_str(target.sub)
-        self._check_fetch_support(target)
-        try:
-            response, missing = await self._fetch(target, [f"{sub} {key}"], 50)
-        except Exception as exc:  # noqa: BLE001 — policy decided by on_error
-            self._read_failed(
-                "langgraph.store.get", exc,
-                "SynapStore.get: sdk.fetch failed namespace=%s key=%s error=%s",
-                _h(sub), _h(key), exc, namespace=_h(sub), key=_h(key))
-            return None
-        if missing:
-            self._incomplete("langgraph.store.get", missing, strict=False,
-                             namespace=_h(sub), key=_h(key))
-
-        # Only an item at this store's OWN level: an ancestor's memory (a
-        # customer pool item with the same sub-namespace and key) is never
-        # presented as the caller's own. `search` still returns ancestors, with
-        # their true namespace and scope.
-        for item, category in _iter_items(response):
-            md = getattr(item, "metadata", None) or {}
-            if (md.get(_MARKER) and md.get(_NS, "") == sub and md.get(_KEY) == key
-                    and self._is_own(target, md)):
-                return _item_to_item(item, category, response, target.identity + target.sub, key)
-        return None
-
-    def _is_own(self, target: _Target, md: Dict[str, Any]) -> bool:
-        """Whether a tagged memory is provably at THIS store's own level.
-
-        Shared store: its identity tag equals this call's identity entries
-        (a team memory and a customer memory differ there; the server's scope
-        label cannot tell them apart). A memory with no identity tag (written
-        by a single-user store) is not provably ours. Single-user store: the
-        server's scope label, when there is one, must be the store's own.
-        """
-        if self._shared:
-            if md.get(_ID) != target.id_tag:
-                return False
-            if target.user_id and md.get("scope") and md.get("scope") != target.own_scope:
-                return False
-            return True
-        if target.id_tag is not None:  # single-user store pinned by a scope_path
-            return md.get(_ID) == target.id_tag and (
-                not md.get("scope") or md.get("scope") == target.own_scope)
-        label = md.get("scope")
-        return not label or label == target.own_scope
-
     def _places_to_ask(self, wanted: int, sub_prefix: tuple[str, ...],
                        filter_: Optional[dict[str, Any]]) -> int:
         """How many places to ask the server for: what the caller asked for
@@ -808,7 +841,7 @@ class SynapStore(BaseStore):
                 query_len=sum(map(len, queries)))
             return []
         if missing:
-            self._incomplete("langgraph.store.search", missing, strict=False,
+            self._incomplete("langgraph.store.search", missing,
                              namespace_prefix=_h(_ns_str(namespace_prefix)))
 
         matches: list[SearchItem] = []
@@ -853,20 +886,29 @@ class SynapStore(BaseStore):
         self,
         namespace: tuple[str, ...],
         key: str,
-        value: dict[str, Any],
+        value: Mapping[str, Any],
         index: Any = None,
-    ) -> None:
+        options: Optional[Mapping[str, Any]] = None,
+    ) -> Any:
+        """Ingest one ``put``; returns the SDK's ``CreateMemoryResponse``.
+
+        ``options``: ``memories.create`` options (:data:`_CREATE_OPTIONS`);
+        a caller's ``metadata`` is merged under the store's own tag keys, which
+        it may not set.
+        """
         target = await self._target(namespace, what="put")
         sub = _ns_str(target.sub)
-        # `get` / `search` put a `_synap` block in the value; writing a value
-        # back must not store that block in the memory text.
+        # `search` puts a `_synap` block in the value; writing a value back
+        # must not store that block in the memory text.
         value = {k: v for k, v in value.items() if k != "_synap"}
         document = json.dumps(value, default=str)
-        metadata = {
+        options = dict(options or {})
+        metadata = _caller_metadata(options.pop("metadata", None), "put")
+        metadata.update({
             _MARKER: True,
             _NS: sub,
             _KEY: key,
-        }
+        })
         if target.id_tag is not None:
             metadata[_ID] = target.id_tag
         h_sub, h_key = _h(sub), _h(key)
@@ -876,89 +918,780 @@ class SynapStore(BaseStore):
             namespace=h_sub,
             key=h_key,
         ):
-            await self.sdk.memories.create(
+            return await self.sdk.memories.create(
                 document=document,
                 metadata=metadata,
+                **options,
                 **target.write_kwargs,
             )
 
-    async def _adelete(
+    # ── BaseStore methods, with the SDK's options on top ────────────────────
+
+    async def aput(
         self,
         namespace: tuple[str, ...],
         key: str,
-    ) -> None:
-        """Delete what ``put`` stored under ``(namespace, key)``.
+        value: Mapping[str, Any],
+        index: Any = None,
+        *,
+        ttl: Union[float, None, NotProvided] = NOT_PROVIDED,
+        document_type: Optional[str] = None,
+        document_id: Optional[str] = None,
+        document_created_at: Optional[datetime] = None,
+        mode: Optional[str] = None,
+        objective: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+        wait: bool = False,
+        timeout_seconds: int = 300,
+        poll_interval_seconds: int = 2,
+    ) -> Any:
+        """``BaseStore.aput``, plus ``sdk.memories.create``'s options.
 
-        Finds the memories by the store's tag among the identity's OWN level
-        (never a level above it: a user store cannot delete the customer's
-        pool), then ``sdk.memories.delete`` each. Raises when none is found:
-        ``put`` is ingested asynchronously and extraction may rewrite the
-        text, so a very recent ``put`` may not be findable yet.
+        Without the extra arguments this is LangGraph's ``aput``, unchanged
+        (through ``abatch``) and returns ``None``. The extras are passed to
+        ``sdk.memories.create`` as given (``mode`` left out means the SDK's
+        default, ``"long-range"``); ``metadata`` is merged with the store's
+        tag. ``wait=True`` waits for the ingestion
+        (``sdk.memories.wait_for_completion``) and returns the SDK's
+        ``MemoryStatusResponse``; otherwise ``None``. ``ttl`` is not supported
+        (Synap keeps memory until it is deleted).
         """
-        op = "langgraph.store.delete"
-        target = await self._target(namespace, what="delete")
-        sub = _ns_str(target.sub)
-        if not self._shared and not self._delete_warned:
-            self._delete_warned = True
-            logger.warning(
-                "SynapStore.delete on a store built with user_id=%s customer_id=%s: "
-                "deletes act on that construction identity whatever namespace is "
-                "passed. Use a shared store (no ids) if this graph serves several "
-                "users. This warning fires once.",
-                _h(self.user_id) if self.user_id else None,
-                _h(self.customer_id) if self.customer_id else None)
-        self._check_fetch_support(target)
-        h_sub, h_key = _h(sub), _h(key)
-        async with wrap_sdk_errors_async(op, logger, namespace=h_sub, key=h_key):
-            response, missing = await self._fetch(
-                target, [f"{sub} {key}"], 50, own_scope_only=True)
-        if missing:
-            self._incomplete(op, missing, strict=True, namespace=h_sub, key=h_key)
+        options = _given_create_options(
+            document_type=document_type, document_id=document_id,
+            document_created_at=document_created_at, mode=mode, objective=objective,
+            metadata=metadata)
+        if not options and not wait:
+            return await super().aput(namespace, key, value, index, ttl=ttl)
+        _check_put(namespace, value, ttl)
 
-        ids: list[UUID] = []
-        for item, _category in _iter_items(response):
-            md = getattr(item, "metadata", None) or {}
-            if not (md.get(_MARKER) and md.get(_NS, "") == sub and md.get(_KEY) == key):
-                continue
-            # Provably this store's own level, and labelled by the server. The
-            # response's scope_map is NOT used: the SDK fills it with the name
-            # of the fetch that returned the item, which says nothing about
-            # the item's own level.
-            if not md.get("scope") or not self._is_own(target, md):
-                continue
+        async def go() -> Any:
+            created = await self._aput(namespace, str(key), value, index, options)
+            if not wait:
+                return None
+            return await self._await_created(
+                created, timeout_seconds, poll_interval_seconds, "put")
+
+        return await self._with_sdk(go)
+
+    def put(
+        self,
+        namespace: tuple[str, ...],
+        key: str,
+        value: Mapping[str, Any],
+        index: Any = None,
+        *,
+        ttl: Union[float, None, NotProvided] = NOT_PROVIDED,
+        document_type: Optional[str] = None,
+        document_id: Optional[str] = None,
+        document_created_at: Optional[datetime] = None,
+        mode: Optional[str] = None,
+        objective: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+        wait: bool = False,
+        timeout_seconds: int = 300,
+        poll_interval_seconds: int = 2,
+    ) -> Any:
+        """Sync variant of :meth:`aput`."""
+        options = _given_create_options(
+            document_type=document_type, document_id=document_id,
+            document_created_at=document_created_at, mode=mode, objective=objective,
+            metadata=metadata)
+        if not options and not wait:
+            return super().put(namespace, key, value, index, ttl=ttl)
+        _check_put(namespace, value, ttl)
+
+        async def go() -> Any:
+            created = await self._aput(namespace, str(key), value, index, options)
+            if not wait:
+                return None
+            return await self._await_created(
+                created, timeout_seconds, poll_interval_seconds, "put")
+
+        return self._sync(go)
+
+    async def asearch(
+        self,
+        namespace_prefix: tuple[str, ...],
+        /,
+        *,
+        query: Union[str, Sequence[str], None] = None,
+        filter: Optional[dict[str, Any]] = None,
+        limit: int = 10,
+        offset: int = 0,
+        refresh_ttl: Optional[bool] = None,
+        **fetch_options: Any,
+    ) -> list[SearchItem]:
+        """``BaseStore.asearch``, plus ``sdk.fetch`` options for this one search.
+
+        Any extra keyword is an ``sdk.fetch`` argument: ``mode``,
+        ``precision_level``, ``types``, ``query_date``,
+        ``max_results_per_query``, ``conversation_id``,
+        ``include_conversation_context``, ``scopes``, ``include_scope_labels``,
+        ``context_mode``, ``include_profile``, ``last_n_conversations``. They
+        sit on top of the constructor's ``fetch_options`` and the run config's
+        (see the class docstring). The store's own arguments (identity,
+        ``search_query``, ``response_shape``, ``max_results``) raise
+        ``ValueError``: use :meth:`afetch_raw` for a by-type answer or another
+        ``max_results``. ``query`` may be a list of strings (one fetch).
+        """
+        if not fetch_options:
+            return await super().asearch(
+                namespace_prefix, query=query, filter=filter, limit=limit,
+                offset=offset, refresh_ttl=refresh_ttl)
+        with self.with_fetch_options(**fetch_options):
+            return await super().asearch(
+                namespace_prefix, query=query, filter=filter, limit=limit,
+                offset=offset, refresh_ttl=refresh_ttl)
+
+    def search(
+        self,
+        namespace_prefix: tuple[str, ...],
+        /,
+        *,
+        query: Union[str, Sequence[str], None] = None,
+        filter: Optional[dict[str, Any]] = None,
+        limit: int = 10,
+        offset: int = 0,
+        refresh_ttl: Optional[bool] = None,
+        **fetch_options: Any,
+    ) -> list[SearchItem]:
+        """Sync variant of :meth:`asearch`."""
+        if not fetch_options:
+            return super().search(
+                namespace_prefix, query=query, filter=filter, limit=limit,
+                offset=offset, refresh_ttl=refresh_ttl)
+        with self.with_fetch_options(**fetch_options):
+            return super().search(
+                namespace_prefix, query=query, filter=filter, limit=limit,
+                offset=offset, refresh_ttl=refresh_ttl)
+
+    # ── BaseStore methods Synap does not have ───────────────────────────────
+
+    async def aget(self, namespace: tuple[str, ...], key: str, *,
+                   refresh_ttl: Optional[bool] = None) -> Optional[Item]:
+        """Not supported: raises :class:`SynapStoreUnsupportedError`. Synap is
+        search-based; use :meth:`asearch`."""
+        raise SynapStoreUnsupportedError("aget", _GET_ALTERNATIVE)
+
+    def get(self, namespace: tuple[str, ...], key: str, *,
+            refresh_ttl: Optional[bool] = None) -> Optional[Item]:
+        """Not supported: raises :class:`SynapStoreUnsupportedError`. Synap is
+        search-based; use :meth:`search`."""
+        raise SynapStoreUnsupportedError("get", _GET_ALTERNATIVE)
+
+    async def adelete(self, namespace: tuple[str, ...], key: str) -> None:
+        """Not supported: raises :class:`SynapStoreUnsupportedError`. Use
+        :meth:`adelete_memory` with a search hit's id, or :meth:`aforget`."""
+        raise SynapStoreUnsupportedError("adelete", _DELETE_ALTERNATIVE)
+
+    def delete(self, namespace: tuple[str, ...], key: str) -> None:
+        """Not supported: raises :class:`SynapStoreUnsupportedError`. Use
+        :meth:`delete_memory` with a search hit's id, or :meth:`forget`."""
+        raise SynapStoreUnsupportedError("delete", _DELETE_ALTERNATIVE)
+
+    async def alist_namespaces(self, *, prefix: Optional[NamespacePath] = None,
+                               suffix: Optional[NamespacePath] = None,
+                               max_depth: Optional[int] = None, limit: int = 100,
+                               offset: int = 0) -> list[tuple[str, ...]]:
+        """Not supported: raises :class:`SynapStoreUnsupportedError`. Synap has
+        no namespace listing."""
+        raise SynapStoreUnsupportedError("alist_namespaces", _LIST_ALTERNATIVE)
+
+    def list_namespaces(self, *, prefix: Optional[NamespacePath] = None,
+                        suffix: Optional[NamespacePath] = None,
+                        max_depth: Optional[int] = None, limit: int = 100,
+                        offset: int = 0) -> list[tuple[str, ...]]:
+        """Not supported: raises :class:`SynapStoreUnsupportedError`. Synap has
+        no namespace listing."""
+        raise SynapStoreUnsupportedError("list_namespaces", _LIST_ALTERNATIVE)
+
+    # ── running an SDK call with this store's SDK ───────────────────────────
+
+    async def _with_sdk(self, fn: Callable[[], Awaitable[Any]], pending: Any = None) -> Any:
+        """Run ``fn`` with the SDK of this call resolved (``sdk_provider``)."""
+        if self._sdk_provider is not None and (_ACTIVE_SDK.get() or (None,))[0] is not self:
+            token = _ACTIVE_SDK.set((self, await self._resolve_sdk(pending)))
             try:
-                ids.append(UUID(str(getattr(item, "id", ""))))
-            except ValueError:
-                continue  # e.g. a chunk id: not a memory
-        if not ids:
-            raise SynapIntegrationError(
-                op,
-                f"no memory found for namespace={tuple(namespace)!r} key={key!r}. "
-                "Nothing was deleted. Synap's server does not return the metadata "
-                "a caller attaches to a memory, so the tag this store writes on "
-                "`put` normally cannot be read back and `delete(namespace, key)` "
-                "cannot find anything. To delete, take the memory's id from the "
-                "`fetch`/`search` results (`value[\"_synap\"][\"id\"]`) and call "
-                "`sdk.memories.delete(memory_id)`, or describe it to "
-                "`sdk.memories.forget(description, user_id=..., ...)`. (Also: a "
-                "put is ingested asynchronously; a key never put is not found; a "
-                "memory with no identity tag is not provably this level's.)",
-                {"namespace": h_sub, "key": h_key},
-            )
-        for memory_id in dict.fromkeys(ids):
-            async with wrap_sdk_errors_async(
-                op, logger, namespace=h_sub, key=h_key, memory_id=str(memory_id),
-            ):
-                await self.sdk.memories.delete(memory_id)
+                return await fn()
+            finally:
+                _ACTIVE_SDK.reset(token)
+        return await fn()
 
-    async def _alist_namespaces(self, op: ListNamespacesOp) -> list[tuple[str, ...]]:
-        if not self._listns_warned:
-            logger.warning(
-                "SynapStore.list_namespaces: Synap does not expose a namespace "
-                "enumeration API; returning []. This warning fires once."
-            )
-            self._listns_warned = True
-        return []
+    def _sync(self, fn: Callable[[], Awaitable[Any]]) -> Any:
+        """Sync twin of an async store method: the provider is called here, in
+        the caller's thread and context, as ``batch`` does."""
+        pending = self._sdk_provider() if self._sdk_provider is not None else None
+        return run_async(self._with_sdk(fn, pending))
+
+    async def _sdk_call(self, op: str, call: Callable[[], Awaitable[Any]], **context: Any) -> Any:
+        async with wrap_sdk_errors_async(f"langgraph.store.{op}", logger, **context):
+            return await call()
+
+    async def _await_created(self, created: Any, timeout_seconds: int,
+                             poll_interval_seconds: int, op: str) -> Any:
+        ingestion_id = getattr(created, "ingestion_id", None)
+        if not ingestion_id:
+            raise SynapIntegrationError(
+                f"langgraph.store.{op}",
+                "wait=True: memories.create returned no ingestion_id to wait for.")
+        return await self._sdk_call(
+            f"{op}.wait", lambda: self.sdk.memories.wait_for_completion(
+                ingestion_id, timeout_seconds=timeout_seconds,
+                poll_interval_seconds=poll_interval_seconds))
+
+    async def _user_target(self, namespace: tuple[str, ...], what: str) -> _Target:
+        target = await self._target(tuple(namespace), what=what)
+        if not target.user_id:
+            raise SynapIntegrationError(
+                f"langgraph.store.{what}",
+                f"{what} needs a user: the namespace (or the store's construction "
+                "identity) must name one. This store's level has no user.")
+        return target
+
+    # ── writing memory ──────────────────────────────────────────────────────
+
+    async def acreate_memory(
+        self,
+        namespace: tuple[str, ...],
+        document: Any,
+        *,
+        document_type: Optional[str] = None,
+        document_id: Optional[str] = None,
+        document_created_at: Optional[datetime] = None,
+        mode: Optional[str] = None,
+        objective: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+        wait: bool = False,
+        timeout_seconds: int = 300,
+        poll_interval_seconds: int = 2,
+    ) -> Any:
+        """``sdk.memories.create`` for the namespace's identity, document as given.
+
+        ``document`` is anything the SDK takes: a string, a dict, a
+        ``TextPart``, a ``FilePart`` (an image), or a list of them. Unlike
+        :meth:`aput` nothing is JSON-encoded and no store tag is added. Returns
+        the SDK's ``CreateMemoryResponse`` (``ingestion_id``, ``status``), or
+        with ``wait=True`` the ``MemoryStatusResponse`` once the ingestion
+        finished. ``mode`` left out is the SDK's default (``"long-range"``).
+        The sub-namespace after the identity is not stored (Synap keeps no
+        namespaces).
+        """
+        options = _given_create_options(
+            document_type=document_type, document_id=document_id,
+            document_created_at=document_created_at, mode=mode, objective=objective,
+            metadata=metadata)
+        if "metadata" in options:
+            options["metadata"] = _caller_metadata(options["metadata"], "create_memory")
+
+        async def go() -> Any:
+            target = await self._target(tuple(namespace), what="create_memory")
+            created = await self._sdk_call("create_memory", lambda: self.sdk.memories.create(
+                document=document, **options, **target.write_kwargs))
+            if not wait:
+                return created
+            return await self._await_created(
+                created, timeout_seconds, poll_interval_seconds, "create_memory")
+
+        return await self._with_sdk(go)
+
+    def create_memory(self, namespace: tuple[str, ...], document: Any, **kwargs: Any) -> Any:
+        """Sync variant of :meth:`acreate_memory` (same keyword arguments)."""
+        return self._sync(lambda: self.acreate_memory(namespace, document, **kwargs))
+
+    async def acreate_memory_from_file(
+        self,
+        namespace: tuple[str, ...],
+        *,
+        file_path: Optional[str] = None,
+        file: Any = None,
+        filename: Optional[str] = None,
+        text: Optional[str] = None,
+        document_type: Optional[str] = None,
+        mode: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> Any:
+        """``sdk.memories.create_from_file`` for the namespace's user: exactly one
+        of ``file_path``, ``file`` (a binary file object, with ``filename``) or
+        ``text``. ``relationship_type`` follows the identity: ``"b2b"`` when it
+        has a customer, else ``"b2c"``. Returns the SDK's
+        ``CreateMemoryResponse``. Needs a user in the namespace."""
+        options: Dict[str, Any] = {
+            k: v for k, v in (("file_path", file_path), ("file", file), ("filename", filename),
+                              ("text", text), ("document_type", document_type), ("mode", mode))
+            if v is not None}
+        if metadata is not None:
+            options["metadata"] = _caller_metadata(metadata, "create_memory_from_file")
+
+        async def go() -> Any:
+            target = await self._user_target(namespace, "create_memory_from_file")
+            extra: Dict[str, Any] = {"scope": dict(target.scope_path)} if target.scope_path else {}
+            return await self._sdk_call(
+                "create_memory_from_file", lambda: self.sdk.memories.create_from_file(
+                    user_id=target.user_id, customer_id=target.customer_id,
+                    relationship_type="b2b" if target.customer_id else "b2c",
+                    **options, **extra))
+
+        return await self._with_sdk(go)
+
+    def create_memory_from_file(self, namespace: tuple[str, ...], **kwargs: Any) -> Any:
+        """Sync variant of :meth:`acreate_memory_from_file`."""
+        return self._sync(lambda: self.acreate_memory_from_file(namespace, **kwargs))
+
+    async def aget_ingestion_status(self, ingestion_id: Any) -> Any:
+        """``sdk.memories.status``: the SDK's ``MemoryStatusResponse`` for an
+        ingestion (the ``ingestion_id`` of :meth:`acreate_memory`).
+
+        ⚠ The ingestion id is not checked against any identity: the server does
+        not verify who owns it, so any caller holding one can read its status."""
+        return await self._with_sdk(lambda: self._sdk_call(
+            "get_ingestion_status", lambda: self.sdk.memories.status(ingestion_id)))
+
+    def get_ingestion_status(self, ingestion_id: Any) -> Any:
+        """Sync variant of :meth:`aget_ingestion_status`."""
+        return self._sync(lambda: self.aget_ingestion_status(ingestion_id))
+
+    async def await_ingestion(self, ingestion_id: Any, *, timeout_seconds: int = 300,
+                              poll_interval_seconds: int = 2) -> Any:
+        """``sdk.memories.wait_for_completion``: waits until the ingestion
+        finished and returns the SDK's ``MemoryStatusResponse``.
+
+        ⚠ The ingestion id is not checked against any identity: the server does
+        not verify who owns it, so any caller holding one can read its status."""
+        return await self._with_sdk(lambda: self._sdk_call(
+            "await_ingestion", lambda: self.sdk.memories.wait_for_completion(
+                ingestion_id, timeout_seconds=timeout_seconds,
+                poll_interval_seconds=poll_interval_seconds)))
+
+    def wait_for_ingestion(self, ingestion_id: Any, *, timeout_seconds: int = 300,
+                           poll_interval_seconds: int = 2) -> Any:
+        """Sync variant of :meth:`await_ingestion`."""
+        return self._sync(lambda: self.await_ingestion(
+            ingestion_id, timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds))
+
+    # ── one memory, by id ───────────────────────────────────────────────────
+    # ⚠ The memory id is NOT checked against the namespace's identity. The
+    # namespace is only checked for shape; the server keys these calls by id
+    # alone and does not verify ownership, so any caller holding an id can
+    # read, rewrite or delete that memory, whoever it belongs to.
+
+    async def aget_memory(self, namespace: tuple[str, ...], memory_id: Any) -> Any:
+        """``sdk.memories.get``: the SDK's ``Memory`` for a memory id (from a
+        search hit's ``value["_synap"]["id"]``).
+
+        ⚠ The memory id is NOT checked against the namespace's identity: the
+        server does not verify ownership by id, so any caller holding an id
+        (another user's included) can act on it. The namespace is only checked
+        for shape. Do not pass ids from untrusted input (e.g. a model's tool
+        call) without your own check."""
+        async def go() -> Any:
+            await self._target(tuple(namespace), what="get_memory")
+            return await self._sdk_call(
+                "get_memory", lambda: self.sdk.memories.get(memory_id),
+                memory_id=str(memory_id))
+        return await self._with_sdk(go)
+
+    def get_memory(self, namespace: tuple[str, ...], memory_id: Any) -> Any:
+        """Sync variant of :meth:`aget_memory`."""
+        return self._sync(lambda: self.aget_memory(namespace, memory_id))
+
+    async def aupdate_memory(
+        self,
+        namespace: tuple[str, ...],
+        memory_id: Any,
+        document: str,
+        *,
+        merge_strategy: str = "smart-merge",
+        document_type: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> Any:
+        """``sdk.memories.update``: returns the SDK's updated ``Memory``.
+
+        ⚠ The memory id is NOT checked against the namespace's identity: the
+        server does not verify ownership by id, so any caller holding an id
+        (another user's included) can act on it. The namespace is only checked
+        for shape. Do not pass ids from untrusted input (e.g. a model's tool
+        call) without your own check."""
+        async def go() -> Any:
+            await self._target(tuple(namespace), what="update_memory")
+            return await self._sdk_call(
+                "update_memory", lambda: self.sdk.memories.update(
+                    memory_id, document, merge_strategy=merge_strategy,
+                    document_type=document_type,
+                    metadata=dict(metadata) if metadata is not None else None),
+                memory_id=str(memory_id))
+        return await self._with_sdk(go)
+
+    def update_memory(self, namespace: tuple[str, ...], memory_id: Any, document: str,
+                      **kwargs: Any) -> Any:
+        """Sync variant of :meth:`aupdate_memory`."""
+        return self._sync(lambda: self.aupdate_memory(namespace, memory_id, document, **kwargs))
+
+    async def adelete_memory(self, namespace: tuple[str, ...], memory_id: Any, *,
+                             permanent: bool = False) -> Any:
+        """``sdk.memories.delete``: deletes one memory by id (from a search hit's
+        ``value["_synap"]["id"]``) and returns the SDK's answer. This replaces
+        ``adelete(namespace, key)``, which Synap cannot do.
+
+        ``permanent`` is the SDK's: ``False`` (default) soft-deletes (hidden at
+        once, restorable with :meth:`arestore` until ``purge_after``);
+        ``True`` removes it now and needs a management-level key.
+
+        ⚠ The memory id is NOT checked against the namespace's identity: the
+        server does not verify ownership by id, so any caller holding an id
+        (another user's included) can act on it. The namespace is only checked
+        for shape. Do not pass ids from untrusted input (e.g. a model's tool
+        call) without your own check."""
+        # sent only when set, so a default call works with an SDK that
+        # predates the argument
+        extra: Dict[str, Any] = {"permanent": True} if permanent else {}
+
+        async def go() -> Any:
+            await self._target(tuple(namespace), what="delete_memory")
+            return await self._sdk_call(
+                "delete_memory", lambda: self.sdk.memories.delete(memory_id, **extra),
+                memory_id=str(memory_id))
+        return await self._with_sdk(go)
+
+    def delete_memory(self, namespace: tuple[str, ...], memory_id: Any, *,
+                      permanent: bool = False) -> Any:
+        """Sync variant of :meth:`adelete_memory`."""
+        return self._sync(lambda: self.adelete_memory(namespace, memory_id, permanent=permanent))
+
+    # ── deleting data by identity (sdk.data) ────────────────────────────────
+
+    async def adelete_data(
+        self,
+        namespace: tuple[str, ...],
+        scope: str,
+        *,
+        conversation_id: Optional[str] = None,
+        dry_run: bool = False,
+        confirm: Optional[str] = None,
+        wait: bool = True,
+        instances: Optional[Union[str, list[str]]] = None,
+        permanent: bool = False,
+    ) -> Any:
+        """``sdk.data.delete`` for the namespace's identity: delete one user's
+        data, one conversation's, or one customer's. Returns the SDK's
+        ``DeleteDataResult``.
+
+        The user and customer come ONLY from the namespace (or the
+        single-user store's construction identity), never from an argument.
+        ``scope`` must match the namespace's own level: ``"user"`` and
+        ``"conversation"`` need a user in it (``conversation_id`` then names
+        the conversation), ``"customer"`` needs a customer-level namespace
+        (no user), so a user's namespace can never delete the whole customer.
+
+        The rest is the SDK's, same names and defaults: ``dry_run`` counts and
+        changes nothing; ``confirm`` (required unless ``dry_run``) must equal
+        the id of the scope being deleted (user, customer or conversation id);
+        ``wait`` repeats while the server says to continue; ``instances``
+        (``"all"`` or ids) and ``permanent`` need a management key. Memories
+        are soft-deleted by default and restorable with :meth:`arestore`
+        (``deletion_id=result.deletion_id``) until ``purge_after``.
+
+        ⚠ ``conversation_id`` is not checked against the user by this store;
+        the SDK sends it with the namespace's user and the server scopes the
+        delete to that user's instance and client.
+        """
+        op = "delete_data"
+        if scope not in ("user", "conversation", "customer"):
+            raise ValueError(
+                f"adelete_data: scope must be 'user', 'conversation' or 'customer', got {scope!r}")
+
+        async def go() -> Any:
+            target = await self._target(tuple(namespace), what=op)
+            if scope in ("user", "conversation") and not target.user_id:
+                raise SynapIntegrationError(
+                    f"langgraph.store.{op}",
+                    f"scope={scope!r} needs a user in the namespace; this one names none.")
+            if scope == "customer" and (target.user_id or not target.customer_id):
+                raise SynapIntegrationError(
+                    f"langgraph.store.{op}",
+                    "scope='customer' needs a customer-level namespace (a store with "
+                    "level='customer', or one built with customer_id only). A user's "
+                    "namespace never deletes the whole customer.")
+            if scope == "conversation" and not conversation_id:
+                raise SynapIntegrationError(
+                    f"langgraph.store.{op}", "scope='conversation' needs conversation_id.")
+            kwargs: Dict[str, Any] = {
+                "scope": scope, "dry_run": dry_run, "confirm": confirm, "wait": wait,
+                "customer_id": target.customer_id,
+            }
+            if scope != "customer":
+                kwargs["user_id"] = target.user_id
+            if conversation_id is not None:
+                kwargs["conversation_id"] = conversation_id
+            if instances is not None:
+                kwargs["instances"] = instances
+            if permanent:
+                kwargs["permanent"] = True
+            return await self._sdk_call(op, lambda: self.sdk.data.delete(**kwargs))
+        return await self._with_sdk(go)
+
+    def delete_data(self, namespace: tuple[str, ...], scope: str, **kwargs: Any) -> Any:
+        """Sync variant of :meth:`adelete_data` (same keyword arguments)."""
+        return self._sync(lambda: self.adelete_data(namespace, scope, **kwargs))
+
+    async def arestore(
+        self,
+        namespace: tuple[str, ...],
+        memory_ids: Optional[list[str]] = None,
+        deletion_id: Optional[str] = None,
+    ) -> Any:
+        """``sdk.data.restore``: bring soft-deleted memories back until their
+        purge date. Exactly one of ``memory_ids`` (up to 200) or
+        ``deletion_id`` (from :meth:`adelete_data`). Returns the SDK's
+        ``RestoreResult`` (ids that could not be restored are in
+        ``not_restorable_ids``).
+
+        ⚠ The ids are NOT checked against the namespace's identity: the server
+        does not verify ownership by id, so any caller holding an id can
+        restore it. The namespace is only checked for shape."""
+        async def go() -> Any:
+            await self._target(tuple(namespace), what="restore")
+            return await self._sdk_call("restore", lambda: self.sdk.data.restore(
+                memory_ids=memory_ids, deletion_id=deletion_id))
+        return await self._with_sdk(go)
+
+    def restore(self, namespace: tuple[str, ...], memory_ids: Optional[list[str]] = None,
+                deletion_id: Optional[str] = None) -> Any:
+        """Sync variant of :meth:`arestore`."""
+        return self._sync(lambda: self.arestore(namespace, memory_ids, deletion_id))
+
+    async def adeletion_status(self, namespace: tuple[str, ...], deletion_id: str) -> Any:
+        """``sdk.data.status``: the audit record of a delete (status, counts,
+        ``still_present_in``), as the SDK's ``DeleteDataResult``.
+
+        ⚠ The deletion id is NOT checked against the namespace's identity: the
+        server does not verify ownership by id. The namespace is only checked
+        for shape."""
+        async def go() -> Any:
+            await self._target(tuple(namespace), what="deletion_status")
+            return await self._sdk_call(
+                "deletion_status", lambda: self.sdk.data.status(deletion_id))
+        return await self._with_sdk(go)
+
+    def deletion_status(self, namespace: tuple[str, ...], deletion_id: str) -> Any:
+        """Sync variant of :meth:`adeletion_status`."""
+        return self._sync(lambda: self.adeletion_status(namespace, deletion_id))
+
+    async def aforget(
+        self,
+        namespace: tuple[str, ...],
+        description: str,
+        *,
+        mode: str = "preview",
+        conversation_id: Optional[str] = None,
+    ) -> Any:
+        """``sdk.memories.forget`` for the namespace's user: forget memories by
+        describing them. ``mode="preview"`` (the SDK's default) files a request
+        a person approves in the dashboard; ``"direct"`` deletes at once.
+        Returns the SDK's ``ForgetResponse``. Needs a user in the namespace."""
+        async def go() -> Any:
+            target = await self._user_target(namespace, "forget")
+            extra: Dict[str, Any] = {}
+            if conversation_id is not None:
+                extra["conversation_id"] = conversation_id
+            return await self._sdk_call("forget", lambda: self.sdk.memories.forget(
+                description, mode=mode, **extra, **target.write_kwargs))
+        return await self._with_sdk(go)
+
+    def forget(self, namespace: tuple[str, ...], description: str, **kwargs: Any) -> Any:
+        """Sync variant of :meth:`aforget`."""
+        return self._sync(lambda: self.aforget(namespace, description, **kwargs))
+
+    # ── reading, raw ────────────────────────────────────────────────────────
+
+    async def afetch_raw(
+        self,
+        namespace: tuple[str, ...],
+        query: Union[str, Sequence[str], None] = None,
+        **fetch_options: Any,
+    ) -> Any:
+        """``sdk.fetch`` for the namespace's identity; returns the SDK's own
+        ``UnifiedContextResponse`` (typed lists, ``items`` when ranked,
+        conversation context, profile, ``scope_map``, ``scopes_queried``...).
+
+        Only what is passed is sent, so every default is the SDK's own (``mode
+        ="fast"``, ``max_results=20``, ``response_shape="by_type"``,
+        ``include_conversation_context=True`` ...), not the store's. ``query``
+        is a string or a list of strings (``search_query``). Any ``sdk.fetch``
+        argument may be passed except the identity (``user_id``,
+        ``customer_id``, ``scope_path``) and ``search_query``, which raise
+        ``ValueError``. A ``conversation_id`` may be any string. Errors raise
+        :class:`SynapIntegrationError` whatever ``on_error`` says.
+        """
+        clash = sorted(_RAW_RESERVED & set(fetch_options))
+        if clash:
+            raise ValueError(
+                f"afetch_raw: may not set {clash}: the identity comes from the "
+                "namespace and the query is the `query` argument.")
+        queries = _queries_of(query)
+
+        async def go() -> Any:
+            target = await self._target(tuple(namespace), what="fetch_raw")
+            kwargs: Dict[str, Any] = dict(fetch_options)
+            if kwargs.get("conversation_id"):
+                kwargs["conversation_id"] = coerce_conversation_id(kwargs["conversation_id"])
+            if queries:
+                kwargs["search_query"] = queries
+            if target.own_scope == _CLIENT and "scopes" not in kwargs:
+                kwargs["scopes"] = [_CLIENT]
+            kwargs.update(target.read_kwargs)
+            return await self._sdk_call("fetch_raw", lambda: self.sdk.fetch(**kwargs))
+
+        return await self._with_sdk(go)
+
+    def fetch_raw(self, namespace: tuple[str, ...], query: Union[str, Sequence[str], None] = None,
+                  **fetch_options: Any) -> Any:
+        """Sync variant of :meth:`afetch_raw`."""
+        return self._sync(lambda: self.afetch_raw(namespace, query, **fetch_options))
+
+    async def aget_profile(self, namespace: tuple[str, ...]) -> Any:
+        """``sdk.user.get_profile`` for the namespace's user: the SDK's
+        ``UserProfileModel``. Needs a user in the namespace."""
+        async def go() -> Any:
+            target = await self._user_target(namespace, "get_profile")
+            return await self._sdk_call("get_profile", lambda: self.sdk.user.get_profile(
+                user_id=target.user_id, customer_id=target.customer_id))
+        return await self._with_sdk(go)
+
+    def get_profile(self, namespace: tuple[str, ...]) -> Any:
+        """Sync variant of :meth:`aget_profile`."""
+        return self._sync(lambda: self.aget_profile(namespace))
+
+    async def aget_scope_ladder(self, *, refresh: bool = False) -> Any:
+        """``sdk.get_scope_ladder``: the account's ``ScopeLadder`` (``None`` when
+        it cannot be determined)."""
+        return await self._with_sdk(lambda: self._sdk_call(
+            "get_scope_ladder", lambda: self.sdk.get_scope_ladder(refresh=refresh)))
+
+    def get_scope_ladder(self, *, refresh: bool = False) -> Any:
+        """Sync variant of :meth:`aget_scope_ladder`."""
+        return self._sync(lambda: self.aget_scope_ladder(refresh=refresh))
+
+    # ── conversations ───────────────────────────────────────────────────────
+
+    async def aingest_transcript(
+        self,
+        namespace: tuple[str, ...],
+        conversation_id: str,
+        transcript: Any,
+        *,
+        conversation_type: Optional[str] = None,
+        analysis: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        started_at: Optional[datetime] = None,
+        ended_at: Optional[datetime] = None,
+    ) -> Any:
+        """``sdk.conversation.ingest_transcript`` for the namespace's user: push a
+        whole conversation (a string or a list of turns) for ingestion. Returns
+        the SDK's ``TranscriptIngestResponse``; wait on its ingestion with
+        :meth:`await_ingestion`. Needs a user in the namespace. The
+        transcript is filed under the namespace's user; ``conversation_id``
+        itself is not checked against that identity by the server."""
+        async def go() -> Any:
+            target = await self._user_target(namespace, "ingest_transcript")
+            extra: Dict[str, Any] = {"scope_path": dict(target.scope_path)} if target.scope_path else {}
+            return await self._sdk_call(
+                "ingest_transcript", lambda: self.sdk.conversation.ingest_transcript(
+                    conversation_id=conversation_id, user_id=target.user_id,
+                    transcript=transcript, customer_id=target.customer_id,
+                    conversation_type=conversation_type, analysis=analysis,
+                    metadata=metadata, started_at=started_at, ended_at=ended_at, **extra))
+        return await self._with_sdk(go)
+
+    def ingest_transcript(self, namespace: tuple[str, ...], conversation_id: str,
+                          transcript: Any, **kwargs: Any) -> Any:
+        """Sync variant of :meth:`aingest_transcript`."""
+        return self._sync(lambda: self.aingest_transcript(
+            namespace, conversation_id, transcript, **kwargs))
+
+    async def aget_context_for_prompt(
+        self,
+        conversation_id: str,
+        *,
+        style: str = "structured",
+        search_history: bool = True,
+        query: Optional[str] = None,
+    ) -> Any:
+        """``sdk.conversation.context.get_context_for_prompt``: the compacted
+        conversation plus recent turns, ready for a prompt. Returns the SDK's
+        ``ContextForPromptResponse``. (``synap_st_prompt`` /
+        ``create_synap_st_node`` wire the same call into a graph.)
+
+        ⚠ ``conversation_id`` is not checked against any identity: the server
+        does not verify who owns a conversation id, so any caller holding one
+        can act on it."""
+        return await self._with_sdk(lambda: self._sdk_call(
+            "get_context_for_prompt",
+            lambda: self.sdk.conversation.context.get_context_for_prompt(
+                conversation_id=conversation_id, style=style,
+                search_history=search_history, query=query)))
+
+    def get_context_for_prompt(self, conversation_id: str, **kwargs: Any) -> Any:
+        """Sync variant of :meth:`aget_context_for_prompt`."""
+        return self._sync(lambda: self.aget_context_for_prompt(conversation_id, **kwargs))
+
+    async def acompact(
+        self,
+        conversation_id: str,
+        *,
+        strategy: Optional[str] = None,
+        compaction_level: Optional[str] = None,
+        target_tokens: Optional[int] = None,
+        force: bool = False,
+    ) -> Any:
+        """``sdk.conversation.context.compact``: start compacting a conversation
+        (asynchronous on the server). ``compaction_level`` is the SDK's
+        backward-compatible alias for ``strategy``. Returns the SDK's
+        ``CompactionTriggerResponse``.
+
+        ⚠ ``conversation_id`` is not checked against any identity: the server
+        does not verify who owns a conversation id, so any caller holding one
+        can act on it."""
+        return await self._with_sdk(lambda: self._sdk_call(
+            "compact", lambda: self.sdk.conversation.context.compact(
+                conversation_id=conversation_id, strategy=strategy,
+                compaction_level=compaction_level, target_tokens=target_tokens,
+                force=force)))
+
+    def compact(self, conversation_id: str, **kwargs: Any) -> Any:
+        """Sync variant of :meth:`acompact`."""
+        return self._sync(lambda: self.acompact(conversation_id, **kwargs))
+
+    async def aget_compacted(self, conversation_id: str, *, version: Optional[int] = None,
+                             format: str = "structured") -> Any:
+        """``sdk.conversation.context.get_compacted``: the SDK's
+        ``CompactionResponse``, or ``None`` when there is none yet.
+
+        ⚠ ``conversation_id`` is not checked against any identity: the server
+        does not verify who owns a conversation id, so any caller holding one
+        can act on it."""
+        return await self._with_sdk(lambda: self._sdk_call(
+            "get_compacted", lambda: self.sdk.conversation.context.get_compacted(
+                conversation_id=conversation_id, version=version, format=format)))
+
+    def get_compacted(self, conversation_id: str, **kwargs: Any) -> Any:
+        """Sync variant of :meth:`aget_compacted`."""
+        return self._sync(lambda: self.aget_compacted(conversation_id, **kwargs))
+
+    async def aget_compaction_status(self, conversation_id: str) -> Any:
+        """``sdk.conversation.context.get_compaction_status``: the SDK's
+        ``CompactionStatusResponse``.
+
+        ⚠ ``conversation_id`` is not checked against any identity: the server
+        does not verify who owns a conversation id, so any caller holding one
+        can act on it."""
+        return await self._with_sdk(lambda: self._sdk_call(
+            "get_compaction_status", lambda: self.sdk.conversation.context.get_compaction_status(
+                conversation_id=conversation_id)))
+
+    def get_compaction_status(self, conversation_id: str) -> Any:
+        """Sync variant of :meth:`aget_compaction_status`."""
+        return self._sync(lambda: self.aget_compaction_status(conversation_id))
 
     # ── anticipation (not part of BaseStore) ────────────────────────────────
 
@@ -966,11 +1699,13 @@ class SynapStore(BaseStore):
         self,
         conversation_id: str,
         role: str,
-        content: str,
+        content: Union[str, Sequence[Any]],
         *,
         session_id: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
         namespace: Optional[tuple[str, ...]] = None,
+        model: Optional[str] = None,
+        context_window: Optional[int] = None,
     ) -> None:
         """Feed a turn to Synap's conversation channel so anticipation can
         surface just-stated context on subsequent reads (construct the store
@@ -992,15 +1727,28 @@ class SynapStore(BaseStore):
         for every other call); without it the call raises, because a turn must
         not be filed under a guessed user.
 
-        ⚠ ``session_id`` is not sent: the stream owns the session, and the
-        shared turn writer has no field for one.
+        ⚠ ``session_id`` is not sent on that path: the stream owns the
+        session, and the shared turn writer has no field for one.
+
+        ``model``, ``context_window`` and list-of-parts ``content`` (strings,
+        ``TextPart``, ``FilePart``) are ``sdk.conversation.record_message``'s
+        own arguments, with its names and defaults (``None``). A call that uses
+        any of them is sent with ``sdk.conversation.record_message`` (REST),
+        exactly as the SDK sends it, ``session_id`` included, and not on the
+        stream (the shared stream writer carries text only). Still
+        best-effort: a failure is logged and swallowed. A call without them
+        is unchanged.
+
+        ⚠ ``conversation_id`` is not checked against the namespace's identity:
+        the server does not verify who owns a conversation id.
         """
         if self._sdk_provider is not None and (_ACTIVE_SDK.get() or (None,))[0] is not self:
             token = _ACTIVE_SDK.set((self, await self._resolve_sdk()))
             try:
                 return await self.arecord_message(
                     conversation_id, role, content, session_id=session_id,
-                    metadata=metadata, namespace=namespace)
+                    metadata=metadata, namespace=namespace, model=model,
+                    context_window=context_window)
             finally:
                 _ACTIVE_SDK.reset(token)
         if self._shared:
@@ -1018,6 +1766,23 @@ class SynapStore(BaseStore):
                 "SynapStore.record_message needs a user_id (a conversation turn "
                 "belongs to a user); skipping."
             )
+            return
+        if model is not None or context_window is not None or not isinstance(content, str):
+            # The SDK's own record_message carries these; the shared stream
+            # writer does not. One transport only, so never written twice.
+            rest: Dict[str, Any] = {
+                k: v for k, v in (("customer_id", customer_id or None),
+                                  ("session_id", session_id), ("metadata", metadata),
+                                  ("scope_path", dict(path) if path else None),
+                                  ("model", model), ("context_window", context_window))
+                if v is not None}
+            try:
+                await self.sdk.conversation.record_message(
+                    conversation_id=coerce_conversation_id(conversation_id), role=role,
+                    content=list(content) if not isinstance(content, str) else content,
+                    user_id=user_id, **rest)
+            except Exception as exc:  # noqa: BLE001 — best-effort, like the stream path
+                logger.error("SynapStore.record_message failed (REST): %s", exc, exc_info=True)
             return
         # Stream metadata is string key/value on the wire; coerce rather than
         # let a non-string value fail the send and silently demote the turn to
@@ -1039,11 +1804,13 @@ class SynapStore(BaseStore):
         self,
         conversation_id: str,
         role: str,
-        content: str,
+        content: Union[str, Sequence[Any]],
         *,
         session_id: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
         namespace: Optional[tuple[str, ...]] = None,
+        model: Optional[str] = None,
+        context_window: Optional[int] = None,
     ) -> None:
         """Sync wrapper around :meth:`arecord_message`."""
         pending = self._sdk_provider() if self._sdk_provider is not None else None
@@ -1055,7 +1822,8 @@ class SynapStore(BaseStore):
             try:
                 await self.arecord_message(
                     conversation_id, role, content,
-                    session_id=session_id, metadata=metadata, namespace=namespace)
+                    session_id=session_id, metadata=metadata, namespace=namespace,
+                    model=model, context_window=context_window)
             finally:
                 if token is not None:
                     _ACTIVE_SDK.reset(token)
@@ -1066,6 +1834,38 @@ class SynapStore(BaseStore):
 # ── helpers ────────────────────────────────────────────────────────────────
 
 _BUCKETS = ("facts", "preferences", "episodes", "emotions", "temporal_events")
+
+
+def _given_create_options(**options: Any) -> Dict[str, Any]:
+    """The ``memories.create`` options a caller actually gave (``None`` = not given,
+    so the SDK's own default applies)."""
+    return {k: v for k, v in options.items() if v is not None}
+
+
+def _caller_metadata(metadata: Optional[Mapping[str, Any]], where: str) -> Dict[str, Any]:
+    """A caller's ``metadata`` for ``memories.create``; it may not set the
+    store's own tag keys."""
+    if metadata is None:
+        return {}
+    if not isinstance(metadata, Mapping):
+        raise ValueError(f"{where}: metadata must be a mapping, got {type(metadata).__name__}")
+    clash = sorted(set(metadata) & set(_TAG_KEYS))
+    if clash:
+        raise ValueError(f"{where}: metadata may not set the store's own keys {clash}")
+    return dict(metadata)
+
+
+def _check_put(namespace: tuple[str, ...], value: Any, ttl: Any) -> None:
+    """``BaseStore.put``'s own checks, for a put that does not go through it."""
+    from langgraph.store.base import _validate_namespace
+
+    _validate_namespace(namespace)
+    if value is None:
+        raise SynapStoreUnsupportedError("delete", _DELETE_ALTERNATIVE)
+    if ttl not in (NOT_PROVIDED, None):
+        raise NotImplementedError(
+            "TTL is not supported by SynapStore. Use a store implementation that "
+            "supports TTL or set ttl=None.")
 
 
 def _iter_items(response: Any) -> list[tuple[Any, str]]:
@@ -1292,4 +2092,4 @@ def _parse_value(document: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {"_raw": document}
 
 
-__all__ = ["SynapStore", "synap_meta", "UNKNOWN_DATE"]
+__all__ = ["SynapStore", "SynapStoreUnsupportedError", "synap_meta", "UNKNOWN_DATE"]

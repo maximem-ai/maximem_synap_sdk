@@ -108,11 +108,14 @@ def test_namespace_shorter_than_n_raises_and_asks_nothing(ns):
 def test_every_operation_fails_closed_on_a_short_namespace():
     sdk = Sdk()
     store = SynapStore(sdk)
-    for coro in (store.aget(("acme",), "k"), store.aput(("acme",), "k", {"a": 1}),
-                 store.adelete(("acme",), "k")):
+    for coro in (store.aput(("acme",), "k", {"a": 1}),
+                 store.adelete_memory(("acme",), "00000000-0000-0000-0000-000000000001"),
+                 store.aforget(("acme",), "old address"), store.afetch_raw(("acme",), "q"),
+                 store.acreate_memory(("acme",), "text")):
         with pytest.raises(SynapIntegrationError, match="too short"):
             run(coro)
     assert sdk.calls_to("fetch") == [] and sdk.calls_to("memories.create") == []
+    assert sdk.calls_to("memories.forget") == [] and not sdk.memories.delete.await_count
 
 
 def test_short_namespace_raises_even_with_on_error_fallback():
@@ -262,14 +265,6 @@ def test_tagged_items_follow_the_sub_namespace_prefix_untagged_are_always_return
     assert hits[2].namespace == ("acme", "alice", "prefs")   # untagged: the namespace asked for
 
 
-def test_get_in_a_shared_store_matches_the_exact_sub_namespace_and_key():
-    ident = ("acme", "alice")
-    resp = response_of(tagged("t1", 1, 0.9, "prefs", "language", value='{"v": "en"}', ident=ident),
-                       tagged("t2", 2, 0.8, "other", "language", value='{"v": "fr"}', ident=ident))
-    sdk = Sdk(resp)
-    item = run(SynapStore(sdk).aget(("acme", "alice", "prefs"), "language"))
-    assert item.value["v"] == "en" and item.namespace == ("acme", "alice", "prefs")
-    assert run(SynapStore(sdk).aget(("acme", "alice", "nope"), "language")) is None
 
 
 # ── record_message on a shared store ────────────────────────────────────────

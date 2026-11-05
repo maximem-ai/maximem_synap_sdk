@@ -340,6 +340,38 @@ export interface ForgetCandidate {
 
 export type ForgetStatus = 'nothing_matches' | 'preview' | 'deleted' | 'partial';
 
+/**
+ * Result of `memories.delete`. Mirrors the dict Python's `memories.delete` returns.
+ * `fully_removed` is false unless the server said true: a store named in
+ * `still_present_in` may still serve the text, so do not tell an end user it is gone.
+ */
+export interface DeleteMemoryResult {
+  memory_id: string;
+  deleted_at: string;
+  fully_removed: boolean;
+  still_present_in: string[];
+  /** The source document stays because other memories still rest on it. */
+  source_text_kept: boolean;
+  /**
+   * `pending_purge` (the default soft delete: hidden now, restorable with
+   * `data.restore([id])` until `purge_after`), `complete` (a permanent delete
+   * finished) or `partial`. `complete` from a server older than soft delete.
+   */
+  status: string;
+  /** When a soft-deleted memory is purged (ISO 8601), or null. */
+  purge_after: string | null;
+  permanent: boolean;
+}
+
+/** Options of `memories.delete`. */
+export interface DeleteMemoryOptions {
+  /**
+   * Remove it now, with no restore period. Needs a management-level key
+   * (delete:permanent, delete:*, management:* or *).
+   */
+  permanent?: boolean;
+}
+
 /** Result of `memories.forget`. Mirrors Python's `ForgetResponse`. */
 export interface ForgetResult {
   status: ForgetStatus;
@@ -407,7 +439,7 @@ export interface MemoriesInterface {
   create_from_file(options: CreateFromFileOptions): Promise<CreateMemoryResult>;
   get(memoryId: string): Promise<Json>;
   update(options: UpdateMemoryOptions): Promise<Json>;
-  delete(memoryId: string): Promise<Json>;
+  delete(memoryId: string, options?: DeleteMemoryOptions): Promise<DeleteMemoryResult>;
   /**
    * Forget memories by describing them in the user's own words. Use it when
    * you do not hold memory ids; to delete one memory by id, use `delete()`.
@@ -685,7 +717,9 @@ export function createMemoriesInterface(
       });
     },
 
-    async delete(memoryId) {
+    async delete(memoryId, options) {
+      const permanent = options?.permanent ?? false;
+      if (typeof permanent !== 'boolean') throw new InvalidInputError('permanent must be a boolean');
       // The 0.3.x wrapper let you delete "all of this user's memories" from a
       // process-local id list, which deleted nothing in serverless while
       // reporting success. Deliberately not ported.
@@ -697,7 +731,21 @@ export function createMemoriesInterface(
             'reporting success.',
         );
       }
-      return transport.request<Json>('memories_delete', { pathParams: { memory_id: memoryId } });
+      const r = await transport.request<Record<string, unknown>>('memories_delete', {
+        pathParams: { memory_id: memoryId },
+        ...(permanent ? { query: { permanent: 'true' } } : {}),
+      });
+      return {
+        memory_id: String(r?.['memory_id'] ?? memoryId),
+        deleted_at: String(r?.['deleted_at'] ?? ''),
+        fully_removed: r?.['fully_removed'] === true,
+        still_present_in: Array.isArray(r?.['still_present_in'])
+          ? (r['still_present_in'] as string[]) : [],
+        source_text_kept: r?.['source_text_kept'] === true,
+        status: typeof r?.['status'] === 'string' && r['status'] ? (r['status'] as string) : 'complete',
+        purge_after: typeof r?.['purge_after'] === 'string' ? (r['purge_after'] as string) : null,
+        permanent: r?.['permanent'] === true,
+      };
     },
 
     async forget(options) {

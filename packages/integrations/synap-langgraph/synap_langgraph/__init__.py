@@ -8,6 +8,10 @@ Exposes:
   memory: one shared store, the user taken from the first entries of the
   namespace on every call. Semantic search via ``store.asearch`` returns
   Synap's own ranked order, with each item labelled in ``value["_synap"]``.
+  Synap is search-based: ``get`` / ``delete`` / ``list_namespaces`` raise
+  :class:`SynapStoreUnsupportedError`; the Python SDK's capabilities (except
+  the two batch calls, see the README) are methods of the store (``acreate_memory``, ``adelete_memory``, ``aforget``,
+  ``afetch_raw``, ``await_ingestion`` ...).
 
 - :class:`SynapCheckpointSaver` — **deprecated.** It cannot restore what it
   saves: Synap extracts facts from the checkpoint and ``fetch`` returns those,
@@ -43,7 +47,7 @@ Exposes:
   (``SYNAP_AUTO_LISTEN=false`` turns that off).
 """
 
-from synap_langgraph.store import SynapStore
+from synap_langgraph.store import SynapStore, SynapStoreUnsupportedError
 from synap_langgraph.checkpointer import SynapCheckpointSaver
 from synap_langgraph.callbacks import SynapLangGraphCallbackHandler
 from synap_langgraph.short_term import create_synap_st_node, synap_st_prompt
@@ -57,6 +61,7 @@ from synap_langchain.graph import create_synap_node
 
 __all__ = [
     "SynapStore",
+    "SynapStoreUnsupportedError",
     "SynapCheckpointSaver",
     "SynapLangGraphCallbackHandler",
     "create_synap_node",

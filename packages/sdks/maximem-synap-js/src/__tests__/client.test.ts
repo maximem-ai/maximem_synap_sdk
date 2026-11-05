@@ -246,6 +246,41 @@ describe('SynapClient', () => {
       expect((spy.mock.calls[0] as unknown as [string, RequestInit])[1].method).toBe('DELETE');
     });
 
+    it('delete is soft by default and sends permanent only when asked (B1)', async () => {
+      const spy = vi.fn(async () => json({
+        memory_id: 'mem-1', deleted_at: 'x', status: 'pending_purge',
+        purge_after: '2026-12-03T00:00:00Z', permanent: false, fully_removed: false,
+      }));
+      const r = await client(spy as unknown as typeof fetch).memories.delete('mem-1');
+      expect(String(spy.mock.calls[0]![0])).not.toContain('permanent');
+      expect([r.status, r.purge_after, r.permanent]).toEqual(['pending_purge', '2026-12-03T00:00:00Z', false]);
+      await client(spy as unknown as typeof fetch).memories.delete('mem-1', { permanent: true });
+      expect(String(spy.mock.calls[1]![0])).toContain('permanent=true');
+      const old = vi.fn(async () => json({ memory_id: 'mem-1', deleted_at: 'x' }));
+      expect((await client(old as unknown as typeof fetch).memories.delete('mem-1')).status)
+        .toBe('complete');
+    });
+
+    it('delete reports fully_removed, false unless the server said true', async () => {
+      const partial = vi.fn(async () => json({
+        memory_id: 'mem-1', deleted_at: '2026-11-03T00:00:00Z', fully_removed: false,
+        still_present_in: ['search index'], source_text_kept: true,
+      }));
+      const r = await client(partial as unknown as typeof fetch).memories.delete('mem-1');
+      expect(r.fully_removed).toBe(false);
+      expect(r.still_present_in).toEqual(['search index']);
+      expect(r.source_text_kept).toBe(true);
+      const old = vi.fn(async () => json({ memory_id: 'mem-1', deleted_at: 'x' }));
+      const r2 = await client(old as unknown as typeof fetch).memories.delete('mem-1');
+      expect(r2.fully_removed).toBe(false);
+      expect(r2.still_present_in).toEqual([]);
+      const full = vi.fn(async () => json({
+        memory_id: 'mem-1', deleted_at: 'x', fully_removed: true, still_present_in: [],
+      }));
+      expect((await client(full as unknown as typeof fetch).memories.delete('mem-1')).fully_removed)
+        .toBe(true);
+    });
+
     it('updates with PATCH and omits unset fields', async () => {
       const spy = vi.fn(async () => json({ ok: true }));
       await client(spy as unknown as typeof fetch).memories.update({ memory_id: 'm1', document: 'new' });

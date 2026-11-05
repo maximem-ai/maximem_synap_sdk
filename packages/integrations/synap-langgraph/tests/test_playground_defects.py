@@ -43,12 +43,6 @@ def test_swallow_raise_mode_raises_when_every_scope_failed_search_shared_store()
         run(store.asearch(("acme", "alice"), query="tea"))
 
 
-def test_swallow_raise_mode_raises_on_get():
-    store = SynapStore(RealFetchSdk(outage={"user"}), user_id="alice", customer_id="acme",
-                       on_error="raise")
-    with pytest.raises(SynapIntegrationError) as err:
-        run(store.aget(("memories",), "k"))
-    assert err.value.operation == "langgraph.store.get"
 
 
 def test_swallow_raise_mode_is_quiet_when_every_scope_answered():
@@ -74,12 +68,6 @@ def test_swallow_only_the_scopes_asked_for_count():
     assert run(store.asearch(("memories",), query="tea"))
 
 
-def test_swallow_delete_names_the_outage_not_a_missing_memory():
-    store = SynapStore(RealFetchSdk(outage={"user"}), user_id="alice", customer_id="acme")
-    with pytest.raises(SynapIntegrationError) as err:
-        run(store.adelete(("memories",), "k"))
-    assert "incomplete" in str(err.value) or "failed" in str(err.value)
-    assert "no memory found" not in str(err.value)
 
 
 # ── shared helpers ───────────────────────────────────────────────────────────
@@ -319,12 +307,12 @@ def test_percall_context_manager_and_isolation_between_concurrent_calls():
     assert seen == {"fast": "fast", "accurate": "accurate", "plain": "accurate"}
 
 
-def test_percall_options_override_the_constructors_and_apply_to_get():
+def test_percall_options_override_the_constructors():
     sdk = Sdk()
     store = SynapStore(sdk, user_id="alice", customer_id="acme",
                        fetch_options={"precision_level": "high", "types": ["facts"]})
     with store.with_fetch_options(precision_level="medium"):
-        run(store.aget(("n",), "k"))
+        run(store.asearch(("n",), query="k"))
     kw = sdk.last_kwargs("fetch")
     assert kw["precision_level"] == "medium" and kw["types"] == ["facts"]
 

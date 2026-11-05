@@ -26,7 +26,7 @@ import {
 import { flattenContextItems, type FlatMemory } from './context/flatten.js';
 import {
   createMemoriesInterface, type CreateMemoryOptions, type CreateMemoryResult,
-  type MemoriesInterface,
+  type MemoriesInterface, type DeleteMemoryResult,
 } from './memories/interface.js';
 import {
   createConversationNamespace, CompactionSubscribers, type ConversationNamespace,
@@ -756,7 +756,7 @@ export class SynapClient {
    * The `{ userId }` form is gone: it relied on a process-local id list and so
    * deleted nothing in serverless while reporting success (gotcha G-F).
    */
-  async deleteMemory(options: { memoryId?: string; memory_id?: string }): Promise<Json> {
+  async deleteMemory(options: { memoryId?: string; memory_id?: string }): Promise<DeleteMemoryResult> {
     return this.memories.delete(options.memory_id ?? options.memoryId ?? '');
   }
 

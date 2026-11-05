@@ -214,10 +214,6 @@ class TestConstruction:
         assert store.semantic_fallback is True
         assert store.include_conversation_context is False
 
-    def test_initial_warn_flag_is_false(self):
-        sdk = _make_sdk()
-        store = SynapStore(sdk, user_id="u1")
-        assert not store._listns_warned
 
 
 # ---------------------------------------------------------------------------
@@ -306,80 +302,6 @@ class TestPutOp:
 # ---------------------------------------------------------------------------
 
 
-class TestGetOp:
-    @pytest.mark.asyncio
-    async def test_get_returns_item_when_marker_and_ns_key_match(self):
-        item = _make_item("agents/u1", "prefs", content='{"dark_mode": true}')
-        sdk = _make_sdk(fetch_items=[item])
-        store = SynapStore(sdk, user_id="u1", customer_id="c1")
-        results = await store.abatch([GetOp(namespace=("agents", "u1"), key="prefs")])
-        assert results[0] is not None
-        assert isinstance(results[0], Item)
-        assert results[0].key == "prefs"
-        assert {k: v for k, v in results[0].value.items() if k != "_synap"} == {"dark_mode": True}
-        assert results[0].value["_synap"]["id"] == "item_prefs"
-
-    @pytest.mark.asyncio
-    async def test_get_returns_none_when_key_not_in_results(self):
-        item = _make_item("agents/u1", "other_key")
-        sdk = _make_sdk(fetch_items=[item])
-        store = _make_store(sdk=sdk)
-        results = await store.abatch([GetOp(namespace=("agents", "u1"), key="missing")])
-        assert results[0] is None
-
-    @pytest.mark.asyncio
-    async def test_get_returns_none_when_no_results(self):
-        sdk = _make_sdk(fetch_items=[])
-        store = _make_store(sdk=sdk)
-        results = await store.abatch([GetOp(namespace=("ns",), key="k")])
-        assert results[0] is None
-
-    @pytest.mark.asyncio
-    async def test_get_matches_preference_via_summary_field(self):
-        """Preferences use .summary rather than .content for text."""
-        pref = _make_item("ns", "pref-k", bucket="preferences")
-        pref.content = None
-        pref.summary = "User prefers dark mode"
-        pref.metadata = {_MARKER: True, _NS: "ns", _KEY: "pref-k"}
-        sdk = _make_sdk(fetch_items=[pref])
-        store = _make_store(sdk=sdk)
-        results = await store.abatch([GetOp(namespace=("ns",), key="pref-k")])
-        assert results[0] is not None
-        # summary text goes through _parse_value as raw (non-JSON) → {"_raw": ...}
-        assert results[0].value["_raw"] == "User prefers dark mode"
-
-    @pytest.mark.asyncio
-    async def test_get_namespace_tuple_reconstructed_on_item(self):
-        item = _make_item("a/b/c", "k1")
-        sdk = _make_sdk(fetch_items=[item])
-        store = _make_store(sdk=sdk)
-        results = await store.abatch([GetOp(namespace=("a", "b", "c"), key="k1")])
-        assert results[0] is not None
-        assert results[0].namespace == ("a", "b", "c")
-
-    @pytest.mark.asyncio
-    async def test_get_returns_none_and_does_not_warn_when_items_are_untagged(self, caplog):
-        """Items without the store's tag are ordinary conversation memories:
-        get has no exact key to resolve, returns None, and does NOT log the old
-        'markers stripped' warning (it fired on every normal response)."""
-        item = _make_item("ns", "k", strip_markers=True)
-        sdk = _make_sdk(fetch_items=[item])
-        store = _make_store(sdk=sdk)
-        with caplog.at_level(logging.WARNING, logger="synap_langgraph.store"):
-            results = await store.abatch([GetOp(namespace=("ns",), key="k")])
-        assert results[0] is None
-        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
-
-    @pytest.mark.asyncio
-    async def test_get_sdk_failure_degrades_to_none(self, caplog):
-        """Read-side SDK failure must never crash an agent turn — return None."""
-        sdk = _make_sdk(fetch_raise=RuntimeError("fetch outage"))
-        store = _make_store(sdk=sdk)
-        with caplog.at_level(logging.ERROR, logger="synap_langgraph.store"):
-            results = await store.abatch([GetOp(namespace=("ns",), key="k")])
-        assert results[0] is None
-        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
-        assert len(errors) >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -569,24 +491,6 @@ class TestSearchOp:
 # ---------------------------------------------------------------------------
 
 
-class TestListNamespacesOp:
-    @pytest.mark.asyncio
-    async def test_list_namespaces_returns_empty(self):
-        sdk = _make_sdk()
-        store = _make_store(sdk=sdk)
-        results = await store.abatch([ListNamespacesOp()])
-        assert results[0] == []
-
-    @pytest.mark.asyncio
-    async def test_list_namespaces_warns_once(self, caplog):
-        sdk = _make_sdk()
-        store = _make_store(sdk=sdk)
-        with caplog.at_level(logging.WARNING, logger="synap_langgraph.store"):
-            await store.abatch([ListNamespacesOp()])
-            await store.abatch([ListNamespacesOp()])
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert len(warnings) == 1
-        assert store._listns_warned is True
 
 
 # ---------------------------------------------------------------------------
@@ -775,17 +679,16 @@ class TestArecordMessageStreamFirst:
 
 
 class TestSyncBatch:
-    def test_sync_put_then_get(self):
+    def test_sync_put_then_search(self):
         item = _make_item("ns", "k1", content='{"ping": "pong"}')
         sdk = _make_sdk(fetch_items=[item])
         store = _make_store(sdk=sdk)
         # sync put
         put_results = store.batch([PutOp(namespace=("ns",), key="k1", value={"ping": "pong"})])
         assert put_results == [None]
-        # sync get
-        get_results = store.batch([GetOp(namespace=("ns",), key="k1")])
-        assert get_results[0] is not None
-        assert get_results[0].key == "k1"
+        # sync search
+        found = store.batch([SearchOp(namespace_prefix=("ns",), query="ping")])
+        assert found[0] and found[0][0].key == "k1"
 
 
 # ---------------------------------------------------------------------------

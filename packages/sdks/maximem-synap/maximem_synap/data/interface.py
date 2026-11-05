@@ -2,11 +2,11 @@
 
 import time
 from urllib.parse import quote
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from ..models.errors import InvalidInputError
 from ..utils.correlation import generate_correlation_id
-from .models import DATA_SCOPES, DeleteDataResult
+from .models import DATA_SCOPES, MAX_RESTORE_IDS, DeleteDataResult, RestoreResult
 
 # The most calls `wait=True` makes. The server deletes at most a fixed number of
 # rows per call and asks to be called again; 50 calls is far beyond any real size.
@@ -24,8 +24,16 @@ def build_delete_body(
     conversation_id: Optional[str] = None,
     dry_run: bool = False,
     confirm: Optional[str] = None,
+    instances: Optional[Union[str, List[str]]] = None,
+    permanent: bool = False,
 ) -> Dict[str, Any]:
-    """Validate and build the request body. Raises before any request is sent."""
+    """Validate and build the request body. Raises before any request is sent.
+
+    Without ``instances`` or ``permanent`` the body is byte-identical to earlier
+    versions (``permanent`` is sent only when True; the server refuses unknown fields).
+    """
+    if not isinstance(permanent, bool):
+        raise InvalidInputError("permanent must be a boolean")
     if isinstance(scope, dict):
         raise InvalidInputError(
             "scope must be one of: user, conversation, customer. A dict is not "
@@ -58,15 +66,62 @@ def build_delete_body(
         if confirm != target:
             raise InvalidInputError(f"confirm must equal the {field} being deleted")
 
-    return {
+    if instances is not None:
+        instances = _check_instances(instances)
+
+    body = {
         "scope": scope,
-        "instance_id": instance_id,
+        "instance_id": instance_id if instances is None else None,
         "user_id": user_id,
         "customer_id": customer_id,
         "conversation_id": conversation_id,
         "dry_run": dry_run,
         "confirm": confirm,
     }
+    if instances is not None:
+        body["instance_ids"] = instances
+    if permanent:
+        body["permanent"] = True
+    return body
+
+
+def _check_instances(instances: Any) -> Union[str, List[str]]:
+    if instances == "all":
+        return "all"
+    if isinstance(instances, str) or not isinstance(instances, (list, tuple)):
+        raise InvalidInputError(
+            'instances must be "all" or a list of instance ids')
+    out: List[str] = []
+    for i in instances:
+        if not isinstance(i, str) or not i.strip():
+            raise InvalidInputError("instances must not contain an empty instance id")
+        if i.strip() not in out:
+            out.append(i.strip())
+    if not out:
+        raise InvalidInputError('instances is empty: name at least one instance, or "all"')
+    return out
+
+
+def build_restore_body(
+    memory_ids: Any, deletion_id: Any, instance_id: str
+) -> Dict[str, Any]:
+    """Validate and build the restore body. Raises before any request is sent."""
+    if (memory_ids is None) == (deletion_id is None):
+        raise InvalidInputError("send exactly one of memory_ids or deletion_id")
+    if deletion_id is not None:
+        if not isinstance(deletion_id, str) or not deletion_id.strip():
+            raise InvalidInputError("deletion_id must not be empty")
+        return {"deletion_id": deletion_id.strip(), "instance_id": instance_id}
+    if isinstance(memory_ids, str) or not isinstance(memory_ids, (list, tuple)):
+        raise InvalidInputError("memory_ids must be a list of memory ids")
+    ids = [str(i) for i in memory_ids]
+    if not ids:
+        raise InvalidInputError("memory_ids must not be empty")
+    if len(ids) > MAX_RESTORE_IDS:
+        raise InvalidInputError(f"at most {MAX_RESTORE_IDS} memory_ids per call")
+    if any(not i.strip() for i in ids):
+        raise InvalidInputError("memory_ids must not contain empty ids")
+    return {"memory_ids": ids, "instance_id": instance_id}
 
 
 class DataInterface:
@@ -97,6 +152,8 @@ class DataInterface:
         dry_run: bool = False,
         confirm: Optional[str] = None,
         wait: bool = True,
+        instances: Optional[Union[str, List[str]]] = None,
+        permanent: bool = False,
     ) -> DeleteDataResult:
         """
         Delete data for one user, one conversation or one customer.
@@ -104,16 +161,22 @@ class DataInterface:
         scope="conversation" removes that conversation's turns, summaries,
         telemetry and turn buffer ONLY. Memories learned from it are kept: use
         scope="user" or memories.delete to remove them. Data in another
-        instance of the same client is never touched; stores that cannot be
-        scoped by instance are skipped and named in `still_present_in`.
+        instance of the same client is not touched unless you ask for it with
+        `instances`; stores that cannot be scoped by instance are skipped and
+        named in `still_present_in`.
 
         scope="customer" needs a management key (management:* or *); a runtime
-        key is refused with 403. LLM call traces are not removed (llm_call_bodies
-        up to 14 days, llm_calls up to 180 days).
+        key is refused with 403.
 
-        This is permanent. Any valid Synap API key of the instance with
-        permission to delete may call it; it can only delete inside its own
-        instance and client.
+        Memories are soft-deleted by default: hidden from every read at once,
+        restorable with ``restore(deletion_id=result.deletion_id)`` until
+        ``result.purge_after`` (the instance's deletion period, 0 to 30 days,
+        30 by default), then purged for good; ``status`` is
+        ``"pending_purge"``. Conversations, profile and source text are removed
+        at once and do not come back with a restore. ``permanent=True``
+        removes the memories now too and needs a management-level key. Any
+        valid Synap API key of the instance with permission to delete may call
+        it; it can only delete inside its own instance and client.
 
         Args:
             scope: "user", "conversation" or "customer". Client-wide delete is
@@ -127,6 +190,16 @@ class DataInterface:
                 being deleted (user_id, customer_id or conversation_id).
             wait: Repeat the call while the server says `continue_` (its size
                 cap stopped the call), up to 50 calls. False returns after one.
+            instances: Delete in several instances of the client at once:
+                "all", or a list of instance ids. Needs a management key that
+                is not bound to one instance (a key bound to an instance may
+                only name its own). The result then carries one entry per
+                instance in `instances`, and the top-level `status`,
+                `fully_removed` and `still_present_in` cover all of them.
+                Omit it to delete in this SDK's instance only, as before.
+            permanent: Remove the memories now instead of after the deletion
+                period. Needs a management-level key (``delete:permanent``,
+                ``delete:*``, ``management:*`` or ``*``).
 
         Returns:
             DeleteDataResult. A store that could not be cleared is in
@@ -151,6 +224,8 @@ class DataInterface:
             conversation_id=conversation_id,
             dry_run=dry_run,
             confirm=confirm,
+            instances=instances,
+            permanent=permanent,
         )
 
         result: Optional[DeleteDataResult] = None
@@ -168,11 +243,52 @@ class DataInterface:
                 break
 
         assert result is not None
-        if not dry_run and result.status in ("complete", "partial", "in_progress"):
+        if not dry_run and result.status in (
+            "complete", "pending_purge", "partial", "in_progress"
+        ):
             result.local_cleared = self._sdk._evict_deleted(
                 scope, user_id, customer_id, conversation_id
             )
         return result
+
+    async def restore(
+        self,
+        memory_ids: Optional[List[str]] = None,
+        deletion_id: Optional[str] = None,
+    ) -> RestoreResult:
+        """
+        Bring deleted memories back, until their purge date.
+
+        A deleted memory stays hidden and restorable for the instance's
+        deletion period (0 to 30 days, 30 by default) and is then purged for
+        good. Restoring needs the same key permissions as delete, and only
+        reaches memories of this instance.
+
+        Args:
+            memory_ids: Up to 200 memory ids.
+            deletion_id: Instead of ids, every memory one ``data.delete`` call
+                hid (its result's ``deletion_id``). Send exactly one of the two.
+
+        Returns:
+            RestoreResult. Ids that could not be restored (not found, not
+            deleted, or past the purge date) are in `not_restorable_ids`; that
+            is a result, not an exception.
+
+        Raises:
+            InvalidInputError: bad arguments (caught before any request).
+            AuthenticationError: 401, or 403 (key not allowed).
+        """
+        body = build_restore_body(memory_ids, deletion_id, self._sdk.instance_id)
+        self._sdk._ensure_initialized()
+        correlation_id = generate_correlation_id(self._sdk.instance_id)
+        auth_context = await self._sdk._get_auth_context(correlation_id)
+        raw = await self._sdk._http_transport.post(
+            path="/v1/data/restore",
+            auth_context=auth_context,
+            json=body,
+            correlation_id=correlation_id,
+        )
+        return RestoreResult(**raw)
 
     async def status(self, deletion_id: str) -> DeleteDataResult:
         """Read the audit record of a delete (status, counts, still_present_in)."""
