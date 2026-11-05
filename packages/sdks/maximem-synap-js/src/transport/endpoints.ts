@@ -30,6 +30,7 @@ export const ENDPOINTS = {
   memories_delete: { method: "DELETE", path: "/api/v1/memories/{memory_id}", idempotent: true },
   memories_forget: { method: "POST", path: "/api/v1/memories/forget", idempotent: false },
   data_delete: { method: "POST", path: "/v1/data/delete", idempotent: true },
+  data_restore: { method: "POST", path: "/v1/data/restore", idempotent: true },
   data_delete_status: { method: "GET", path: "/v1/data/delete/{deletion_id}", idempotent: true },
   context_fetch_user: { method: "POST", path: "/v1/context/user/fetch", idempotent: true },
   context_fetch_customer: { method: "POST", path: "/v1/context/customer/fetch", idempotent: true },

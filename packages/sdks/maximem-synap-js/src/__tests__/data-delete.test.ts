@@ -95,6 +95,57 @@ describe('request', () => {
     expect(r.counts).toEqual({});
     expect(r.local_cleared).toEqual([]);
   });
+
+  it('not_covered is read when sent and empty from an older server', async () => {
+    const sent = await data((async () => ok({
+      status: 'complete', fully_removed: true, not_covered: ['request log bodies: ...'],
+    })) as unknown as typeof fetch).delete({ scope: 'user', user_id: 'u', confirm: 'u' });
+    expect(sent.not_covered).toEqual(['request log bodies: ...']);
+    const older = await data((async () => ok({
+      status: 'complete', fully_removed: true,
+    })) as unknown as typeof fetch).delete({ scope: 'user', user_id: 'u', confirm: 'u' });
+    expect(older.not_covered).toEqual([]);
+  });
+});
+
+describe('instances (several instances in one call, like Python)', () => {
+  it('sends "all" last and no bound instance', () => {
+    const body = buildDeleteBody(
+      { scope: 'user', userId: 'u1', confirm: 'u1', instances: 'all' }, 'inst_test',
+    ) as Record<string, unknown>;
+    expect(body['instance_ids']).toBe('all');
+    expect(body['instance_id']).toBeNull();
+    expect(Object.keys(body).at(-1)).toBe('instance_ids');
+  });
+
+  it('trims and de-duplicates a list', () => {
+    const body = buildDeleteBody(
+      { scope: 'user', userId: 'u1', confirm: 'u1', instances: [' inst_a', 'inst_a', 'inst_b'] },
+      'inst_test',
+    ) as Record<string, unknown>;
+    expect(body['instance_ids']).toEqual(['inst_a', 'inst_b']);
+  });
+
+  it.each([['inst_a'], [[]], [['']], [[3]]])('refuses %j before any request', async (bad) => {
+    const spy = vi.fn(async () => ok({}));
+    const d = data(spy as unknown as typeof fetch);
+    await expect(d.delete({ scope: 'user', userId: 'u1', confirm: 'u1', instances: bad as never }))
+      .rejects.toBeInstanceOf(InvalidInputError);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('without instances the body is unchanged', () => {
+    const body = buildDeleteBody({ scope: 'user', userId: 'u1', confirm: 'u1' }, 'inst_test');
+    expect(Object.keys(body as object)).not.toContain('instance_ids');
+  });
+
+  it('fills the per-instance fields', async () => {
+    const spy = vi.fn(async () => ok({ status: 'complete', instances: [{ instance_id: 'inst_a' }] }));
+    const r = await data(spy as unknown as typeof fetch)
+      .delete({ scope: 'user', userId: 'u1', confirm: 'u1', instances: 'all' });
+    expect(r.instances).toEqual([{ instance_id: 'inst_a' }]);
+    expect(r.not_started).toEqual([]);
+  });
 });
 
 describe('wait loop', () => {

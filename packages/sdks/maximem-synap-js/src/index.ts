@@ -28,7 +28,7 @@ export {
   type DocumentType, type IngestMode, type UpdateMemoryOptions, type WaitOptions,
   type CreateFromFileOptions, type BatchCreateResult,
   FORGET_MODES, type ForgetOptions, type ForgetResult, type ForgetCandidate,
-  type ForgetMode, type ForgetStatus, type CreateDocument,
+  type ForgetMode, type ForgetStatus, type CreateDocument, type DeleteMemoryResult, type DeleteMemoryOptions,
 } from './memories/interface.js';
 export {
   OBJECTIVES, textPart, filePart,
@@ -37,6 +37,7 @@ export {
 } from './memories/parts.js';
 export {
   DATA_SCOPES, type DataInterface, type DataScope, type DeleteDataOptions, type DeleteDataResult,
+  MAX_RESTORE_IDS, type RestoreResult, type RestoreOptions,
 } from './data/interface.js';
 export type {
   ConversationNamespace, RecordMessageOptions, IngestTranscriptOptions,
