@@ -44,10 +44,21 @@ def test_a_403_is_an_authentication_error_and_not_retried():
     assert not isinstance(err, SynapTransientError)
 
 
-@pytest.mark.parametrize("status", [405, 410, 413, 415, 418])
+@pytest.mark.parametrize("status", [410, 418])
 def test_any_other_4xx_is_permanent(status):
     err = _raise_for(status)
     assert type(err) is SynapPermanentError
+    assert not isinstance(err, SynapTransientError)
+
+
+@pytest.mark.parametrize("status", [405, 413, 415])
+def test_a_refused_method_size_or_media_type_is_invalid_input(status):
+    """405, 413 and 415 are the request's own fault: InvalidInputError, a
+    permanent error, so `except SynapPermanentError` still catches them and
+    they are never retried."""
+    err = _raise_for(status)
+    assert type(err) is InvalidInputError
+    assert isinstance(err, SynapPermanentError)
     assert not isinstance(err, SynapTransientError)
 
 

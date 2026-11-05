@@ -4,6 +4,10 @@
 
 Behaviour change: methods that used to answer wrongly now raise.
 
+Needs `maximem-synap>=0.8.0` (was 0.7.2): `adelete_memory(..., permanent=True)`,
+`arestore` and `adelete_data(..., permanent=True / instances=[...])` call SDK
+features first released in 0.8.0.
+
 ### Changed
 - `SynapStore.get` / `aget`, `delete` / `adelete` and `list_namespaces` /
   `alist_namespaces` raise `SynapStoreUnsupportedError` (new, a subclass of

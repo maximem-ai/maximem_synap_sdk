@@ -15,7 +15,7 @@ authors = [
 keywords = ["synap", "memory", "langgraph", "ai", "agents", "checkpointer", "store"]
 
 dependencies = [
-    "maximem-synap>=0.7.2",
+    "maximem-synap>=0.8.0",
     "maximem-synap-integrations-common>=0.3.1",
     "maximem-synap-langchain>=0.4.2",
     "langgraph>=1.0",
