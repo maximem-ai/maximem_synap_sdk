@@ -643,8 +643,8 @@ class HTTPTransport:
                 # We received a complete response, so the server told us what it
                 # did. The retryable statuses here (429, 503) are rejections
                 # issued before the request was processed.
-                outcome_unknown = False
                 last_error = self._map_status_error(e, correlation_id)
+                outcome_unknown = getattr(last_error, "outcome_unknown", False)
 
             except InstanceNotReadyError as e:
                 # Remember the refusal so the next calls do not need a round trip.
@@ -657,8 +657,8 @@ class HTTPTransport:
                 # raises it, so before this arm it went straight to the
                 # `except SynapError: raise` below and was never retried,
                 # while the JS SDK retried the same statuses. The server
-                # answered, so the outcome is known.
-                outcome_unknown = False
+                # answered, so the outcome is known, except for a 504.
+                outcome_unknown = e.outcome_unknown
                 last_error = e
 
             except SynapError:
@@ -851,10 +851,15 @@ class HTTPTransport:
             )
 
         if response.status_code >= 500:
-            raise ServiceUnavailableError(
+            err = ServiceUnavailableError(
                 error_message,
                 correlation_id=correlation_id,
             )
+            # A 504 is a gateway giving up, not the origin answering: the origin may
+            # have finished and only the response was lost. The retry gate treats it
+            # like a read timeout (JS does too: `isOutcomeUnknown`).
+            err.outcome_unknown = response.status_code == 504
+            raise err
 
         # Any other 4xx is the request's fault and will fail the same way
         # again, so it is permanent, as the JS SDK now raises it. It was a
@@ -1144,7 +1149,7 @@ class HTTPTransport:
                 last_error = NetworkTimeoutError(f"Connection failed: {e}", correlation_id=correlation_id)
             except SynapTransientError as e:
                 # A 429 or 5xx the server answered with; see `request`.
-                outcome_unknown = False
+                outcome_unknown = e.outcome_unknown
                 last_error = e
             except SynapError:
                 raise

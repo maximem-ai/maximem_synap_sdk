@@ -26,8 +26,9 @@ const KNOWN_STATUS_DIFFS: Record<number, { js: string; reason: string }> = {
   504: {
     js: 'AgentUnavailableError',
     reason:
-      'Python raises ServiceUnavailableError. Both are transient, so retrying is ' +
-      'the same; which class a 504 should be is an open product call.',
+      'Python raises ServiceUnavailableError. The class name differs and is an open product call. ' +
+      'Retry behaviour is the same: both treat a 504 as outcome-unknown, so a GET retries and a ' +
+      'non-idempotent POST is sent once (python/tests/test_http_504_no_retry_on_create.py).',
   },
 };
 

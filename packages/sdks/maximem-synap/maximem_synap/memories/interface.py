@@ -752,7 +752,8 @@ class MemoriesInterface:
             ``complete`` or ``partial``), ``purge_after`` (a datetime for a soft
             delete), ``permanent``, ``fully_removed`` (True only when a
             permanent delete cleared every store), ``still_present_in`` and
-            ``source_text_kept``.
+            ``source_text_kept`` (True when a permanent delete left a shared
+            source document in place; always False for a soft delete).
 
         The key must be allowed to delete (a read-only key gets a 403) and the
         memory must be in the key's own instance (otherwise a 404).

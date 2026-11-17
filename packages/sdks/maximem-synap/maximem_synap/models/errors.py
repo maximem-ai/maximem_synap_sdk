@@ -24,7 +24,11 @@ class SynapError(Exception):
 class SynapTransientError(SynapError):
     """Transient error - retry may succeed."""
 
-    pass
+    #: True when it is genuinely unknown whether the server processed the request (a gateway 504,
+    #: a read timeout). A caller must not retry a non-idempotent call after such an error: it could
+    #: be stored and billed twice. The transport sets it; JS decides the same in
+    #: ``isOutcomeUnknown`` (transport/http.ts) rather than on the error object.
+    outcome_unknown: bool = False
 
 
 class SynapPermanentError(SynapError):

@@ -286,6 +286,7 @@ export class GrpcStreamClient {
   #state: StreamState = 'disconnected';
   #call: DuplexCall | null = null;
   #reconnectAttempts = 0;
+  #reconnecting = false;
   #lastPongAt = 0;
   #missedHeartbeats = 0;
   #heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -404,6 +405,9 @@ export class GrpcStreamClient {
     const now = Date.now();
     // Unacknowledged first: an event written to the old stream is older than
     // anything that piled up after it died.
+    // All stamped now: the age limit is for an outage in THIS process, and a
+    // process that restarts after a crash must still send what the journal kept,
+    // however long the restart took. Same as Python.
     for (const event of [...unacked, ...queued]) {
       this.#sendQueue.push({
         queuedAt: now, event: event as unknown as ConversationEventInput,
@@ -758,6 +762,9 @@ export class GrpcStreamClient {
     const call = (stub['Listen'] as (m: unknown) => DuplexCall)(metadata);
     call.on('data', (msg) => this.#handleMessage(msg as Record<string, unknown>));
     call.on('error', (err) => {
+      // A6-04. grpc-js emits 'error' and then 'end' for the same dead call.
+      // Only the call this client currently owns may start a reconnect.
+      if (this.#call !== call) return;
       // A credit refusal arrives here, not from waitForReady: the channel is
       // healthy and the gate aborts the call itself.
       const creditError = creditErrorFromRpc(err);
@@ -767,7 +774,10 @@ export class GrpcStreamClient {
       }
       void this.#handleDisconnect(`error: ${String(err)}`);
     });
-    call.on('end', () => { void this.#handleDisconnect('server_close'); });
+    call.on('end', () => {
+      if (this.#call !== call) return;
+      void this.#handleDisconnect('server_close');
+    });
 
     // NOTE, and this is where JS and Python legitimately differ.
     //
@@ -856,7 +866,22 @@ export class GrpcStreamClient {
       // Logged, as Python logs it, and not fatal: the server sends it for one
       // refused event or session_start and keeps the stream open. Until 0.5.18
       // it was dropped here without a word.
-      console.warn(`[synap] server error signal (stream stays open): ${signal.reason ?? ''}`);
+      //
+      // When it names an event (`metadata.event_id`) that event was refused for
+      // good, not held: it stops being held (so it is not replayed into the same
+      // refusal on every reconnect) and the caller is told. Mirrors Python.
+      const refused = signal.metadata?.['event_id'];
+      if (refused) {
+        const held = this.#unacked.get(refused);
+        this.#unacked.delete(refused);
+        this.#journal.recordDropped(refused);
+        console.warn(
+          `[synap] server refused event ${refused}${held ? ` (${String(held.event.event_type ?? '')})` : ''} `
+          + `and it will not be retried: ${signal.reason ?? ''}`,
+        );
+      } else {
+        console.warn(`[synap] server error signal (stream stays open): ${signal.reason ?? ''}`);
+      }
     }
   }
 
@@ -1065,8 +1090,25 @@ export class GrpcStreamClient {
   }
 
   async #handleDisconnect(_reason: string): Promise<void> {
-    if (this.#shutdownRequested) return;
+    // One reconnect at a time (A6-04). The stream error, the heartbeat timer and
+    // a failed write can all report the same dead stream; each used to start its
+    // own reconnect, and the second `#establish` replaced the first stream's
+    // handle, leaving that stream open and unowned.
+    if (this.#shutdownRequested || this.#reconnecting) return;
+    this.#reconnecting = true;
+    let retry = false;
+    try {
+      await this.#reconnectOnce();
+    } catch {
+      retry = true;
+    } finally {
+      this.#reconnecting = false;
+    }
+    if (retry) void this.#handleDisconnect('reconnect_failed');
+  }
 
+  /** Throws when the new stream could not be established (the caller retries). */
+  async #reconnectOnce(): Promise<void> {
     this.#closeCall();
     this.#setState('reconnecting');
 
@@ -1092,7 +1134,7 @@ export class GrpcStreamClient {
         this.#handleCreditStop(error as SynapError);
         return;
       }
-      void this.#handleDisconnect('reconnect_failed');
+      throw error;
     }
   }
 

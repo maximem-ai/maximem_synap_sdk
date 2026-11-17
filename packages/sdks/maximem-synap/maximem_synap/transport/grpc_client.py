@@ -456,7 +456,11 @@ class GRPCTransport:
             return
         now = datetime.now(timezone.utc)
         # Unacknowledged first: an event written to the old stream is older
-        # than anything that piled up after it died.
+        # than anything that piled up after it died. All stamped now: the age
+        # limit is for an outage in THIS process, and a process that restarts
+        # after a crash must still send what the journal kept, however long the
+        # restart took (a refused event is no longer a reason to age them:
+        # the server acknowledges it and the SDK drops it on the error signal).
         for payload in unacked + queued:
             self._send_queue.append((now, payload))
         logger.info(
@@ -1283,7 +1287,26 @@ class GRPCTransport:
             # stream down for it dropped and rebuilt the connection on every
             # such event. A fatal server error ends the stream, which the read
             # loop already handles as server_close.
-            logger.warning(f"Server error signal (stream stays open): {reason}")
+            #
+            # When the error names an event (`metadata["event_id"]`) that event
+            # was refused for good, not held: it is dropped from the
+            # unacknowledged set so it is not replayed into the same refusal on
+            # every reconnect, and the caller is told in the log. (An SDK older
+            # than 0.5.20 reconnects on any error signal; the server
+            # acknowledges the refused event first, so there is nothing for it
+            # to replay.)
+            refused = dict(getattr(signal, "metadata", None) or {}).get("event_id")
+            if refused:
+                held = self._unacked.pop(refused, None)
+                self._journal.record_dropped(refused)
+                logger.warning(
+                    "Server refused event %s%s and it will not be retried: %s",
+                    refused,
+                    f" ({held[1].get('event_type')})" if held else "",
+                    reason,
+                )
+            else:
+                logger.warning(f"Server error signal (stream stays open): {reason}")
         else:
             logger.warning(f"Unknown signal type '{signal_type}': {reason}")
 

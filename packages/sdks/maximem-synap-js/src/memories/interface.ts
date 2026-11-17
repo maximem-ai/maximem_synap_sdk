@@ -350,7 +350,10 @@ export interface DeleteMemoryResult {
   deleted_at: string;
   fully_removed: boolean;
   still_present_in: string[];
-  /** The source document stays because other memories still rest on it. */
+  /**
+   * The source document stays because other memories still rest on it.
+   * Reported for permanent deletes only; always false for a soft delete.
+   */
   source_text_kept: boolean;
   /**
    * `pending_purge` (the default soft delete: hidden now, restorable with
