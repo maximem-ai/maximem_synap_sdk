@@ -721,6 +721,15 @@ export function createInstanceNamespace(
     },
 
     async record_thinking(options: RecordThinkingOptions) {
+      // First, as Python checks it (`_check_customer_id`). record_thinking writes
+      // to the stream directly rather than through send_message, so it skipped
+      // the B2C customer_id rule and the server refused the event on the stream,
+      // where nothing surfaced it.
+      if (hasCustomerIdCheck) {
+        await checkCustomerId(
+          options.customer_id ?? options.customerId, 'InstanceInterface.record_thinking',
+        );
+      }
       if (client === null) throw new ListeningNotActiveError('Listening is not active');
       const conversationId = options.conversation_id ?? options.conversationId ?? '';
       ensureSession(
