@@ -486,6 +486,96 @@ def has_query(search_query: Any) -> bool:
     return any(isinstance(q, str) and q.strip() for q in (search_query or []))
 
 
+#: What a context item can be (D123): a memory, a passage of a document, a
+#: record, or something fetched live.
+ITEM_KINDS = ("memory", "passage", "record", "fetched")
+
+#: The document filters a fetch takes, in the order they are sent.
+DOCUMENT_FILTERS = ("kinds", "document_types", "document_ids", "as_of", "source_kind_hint")
+
+
+def document_filters(
+    search_query: Any,
+    *,
+    kinds: Optional[List[str]] = None,
+    document_types: Optional[List[str]] = None,
+    document_ids: Optional[List[str]] = None,
+    as_of: Any = None,
+    source_kind_hint: Optional[str] = None,
+) -> Dict[str, Any]:
+    """The document filters a fetch names, checked, in wire order.
+
+    Empty when none is set, so the body and the cache key of a fetch without
+    them are what they always were. ``document_ids`` are the caller's own ids,
+    resolved by the server within the fetch's scope chain (T31). ``as_of`` is
+    an ISO-8601 string or a datetime.
+
+    Raises:
+        InvalidInputError: a filter that is not a list of strings, or a kind
+            that is not one of ``ITEM_KINDS``.
+        FiltersNeedQueryError: filters with no ``search_query`` (D185). To
+            read a document without a query, use ``documents.get``.
+    """
+    from .errors import FiltersNeedQueryError, InvalidInputError
+
+    out: Dict[str, Any] = {}
+    for name, value in (("kinds", kinds), ("document_types", document_types),
+                        ("document_ids", document_ids)):
+        if value is None:
+            continue
+        if not isinstance(value, (list, tuple)) or not all(
+            isinstance(v, str) and v for v in value
+        ):
+            raise InvalidInputError(f"{name} must be a list of non-empty strings")
+        out[name] = list(value)
+    bad = [k for k in out.get("kinds", []) if k not in ITEM_KINDS]
+    if bad:
+        raise InvalidInputError(
+            f"Invalid kinds {bad}. Expected any of: {', '.join(ITEM_KINDS)}"
+        )
+    if as_of is not None:
+        if isinstance(as_of, datetime):
+            from pydantic import TypeAdapter
+
+            out["as_of"] = TypeAdapter(datetime).dump_python(as_of, mode="json")
+        elif isinstance(as_of, str) and as_of.strip():
+            out["as_of"] = as_of
+        else:
+            raise InvalidInputError("as_of must be an ISO-8601 string or a datetime")
+    filtered = bool(out)
+    # T54: a hint tilts the source-kind weight (D122), so it is sent and keyed
+    # like the filters, but it filters nothing and needs no query.
+    if source_kind_hint is not None:
+        if not isinstance(source_kind_hint, str) or source_kind_hint not in ITEM_KINDS:
+            raise InvalidInputError(
+                f"Invalid source_kind_hint {source_kind_hint!r}. "
+                f"Expected one of: {', '.join(ITEM_KINDS)}"
+            )
+        out["source_kind_hint"] = source_kind_hint
+    if filtered and not has_query(search_query):
+        raise FiltersNeedQueryError(
+            "kinds, document_types, document_ids and as_of narrow a search, so they "
+            "need a search_query. To read a document without one, use "
+            "documents.get (or knowledge.query to ask across documents)."
+        )
+    return out
+
+
+#: The by-type keys documents add (T2).
+DOCUMENT_ITEM_KEYS = ("passages", "records", "fetched")
+
+
+def _document_lists(data: Dict[str, Any]) -> Dict[str, Any]:
+    """The by-type document lists the response carried, as dicts. A key that
+    is absent or empty is left out, so the field stays None."""
+    out: Dict[str, Any] = {}
+    for key in DOCUMENT_ITEM_KEYS:
+        items = data.get(key)
+        if isinstance(items, list) and items:
+            out[key] = [dict(it) for it in items if isinstance(it, dict)]
+    return out
+
+
 def conversation_state_context(prompt: Dict[str, Any], conversation_id: str) -> Dict[str, Any]:
     """The answer to a conversation fetch without a query, in the fetch's wire shape.
 
@@ -792,6 +882,12 @@ class ContextResponse(BaseModel):
     # `response_shape="ranked"` only: the chunks, quotes from source documents.
     # A by-type response files them under `facts` instead.
     excerpts: List[Fact] = Field(default_factory=list)
+    # Documents in the by-type shape (T2): passages, records and fetched items,
+    # each as the server sent it, carrying `citation` as the ranked shape does.
+    # None when the server sent none (it leaves an empty one out).
+    passages: Optional[List[Dict[str, Any]]] = None
+    records: Optional[List[Dict[str, Any]]] = None
+    fetched: Optional[List[Dict[str, Any]]] = None
     conversation_context: Optional[ConversationContextModel] = None
     # C4 conversation-summary sections (populated only in summary mode).
     profile: Optional["UserProfileModel"] = None
@@ -893,6 +989,7 @@ class ContextResponse(BaseModel):
             temporal_events=temporal_events,
             items=ranked,
             excerpts=excerpts,
+            **_document_lists(data),
             conversation_context=conv_ctx,
             profile=profile,
             conversations=conversations,

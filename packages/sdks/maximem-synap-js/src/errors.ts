@@ -45,7 +45,19 @@ export type SynapErrorCode =
   | 'session_expired'
   | 'listening_already_active'
   | 'listening_not_active'
-  | 'agent_unavailable';
+  | 'agent_unavailable'
+  // Documents (tech spec, API and wire contract, Errors). Each is also the
+  // server's own code for it.
+  | 'file_too_large'
+  | 'batch_too_large'
+  | 'unsupported_format'
+  | 'url_not_fetched'
+  | 'filters_need_query'
+  | 'missing_scope'
+  | 'feature_not_in_plan'
+  | 'document_id_in_use'
+  | 'ambiguous_document'
+  | 'insufficient_credits_for_document';
 
 const BRAND = Symbol.for('@maximem/synap-js-sdk.SynapError');
 
@@ -74,14 +86,22 @@ export class SynapError extends Error {
   readonly code: SynapErrorCode;
   readonly correlationId: string | null;
   readonly transient: boolean;
+  /**
+   * The server's machine-readable error code (`file_too_large`,
+   * `invalid_utility`, ...), when the response carried one. Python calls it
+   * `code`; here `code` is the class's own discriminator, so the server's
+   * travels under this name. For the Documents classes the two are the same.
+   */
+  serverCode: string | null;
 
-  constructor(message: string, options: SynapErrorOptions = {}) {
+  constructor(message: string, options: SynapErrorOptions & { serverCode?: string | null } = {}) {
     super(message, options.cause !== undefined ? { cause: options.cause } : undefined);
     const ctor = new.target as typeof SynapError;
     this.name = new.target.name;
     this.code = ctor.errorCode;
     this.transient = ctor.isTransient;
     this.correlationId = options.correlationId ?? null;
+    this.serverCode = options.serverCode ?? null;
     Object.defineProperty(this, BRAND, { value: true, enumerable: false });
     // Without this, subclassing a built-in under a downlevel target breaks the
     // prototype chain and `instanceof` fails even within a single copy.
@@ -378,6 +398,127 @@ export class ListeningNotActiveError extends SynapPermanentError {
   static override readonly errorCode: SynapErrorCode = 'listening_not_active';
 }
 
+// ─── Documents (tech spec, API and wire contract, Errors) ────────────────────
+// Each code the Documents routes answer with has its own class, a subclass of
+// the class its HTTP status already raised, so an existing
+// `instanceof InvalidInputError` (or ConflictError, AuthenticationError,
+// InsufficientCreditsError) still catches it. Mirrors errors.py.
+
+/** A file or body is over 10 MB (HTTP 413 `file_too_large`). */
+export class FileTooLargeError extends InvalidInputError {
+  static override readonly errorCode: SynapErrorCode = 'file_too_large';
+}
+
+/** A batch is over 100 items or 50 MB (HTTP 413 `batch_too_large`). */
+export class BatchTooLargeError extends InvalidInputError {
+  static override readonly errorCode: SynapErrorCode = 'batch_too_large';
+}
+
+/** The file's format is not accepted (HTTP 415 `unsupported_format`). */
+export class UnsupportedFormatError extends InvalidInputError {
+  static override readonly errorCode: SynapErrorCode = 'unsupported_format';
+}
+
+/**
+ * A file part carried only a URL (HTTP 422 `url_not_fetched`). The SDK fetches
+ * a `filePart({ url })` itself; the server never fetches a caller's URL.
+ */
+export class UrlNotFetchedError extends InvalidInputError {
+  static override readonly errorCode: SynapErrorCode = 'url_not_fetched';
+}
+
+/**
+ * Document filters on a fetch with no query (HTTP 422 `filters_need_query`).
+ * A fetch with `kinds`, `document_types`, `document_ids` or `as_of` needs a
+ * `search_query`. To read a document without one, use `documents.get`.
+ */
+export class FiltersNeedQueryError extends InvalidInputError {
+  static override readonly errorCode: SynapErrorCode = 'filters_need_query';
+}
+
+/**
+ * The API key lacks the scope this route needs (HTTP 403 `missing_scope`).
+ * `scope` names it, for example `sdk:default` for a write-only key on a read route.
+ */
+export class MissingScopeError extends AuthenticationError {
+  static override readonly errorCode: SynapErrorCode = 'missing_scope';
+  readonly scope: string | null;
+
+  constructor(message: string, options: SynapErrorOptions & { scope?: string | null } = {}) {
+    super(message, { ...options, serverCode: 'missing_scope' });
+    this.scope = options.scope ?? null;
+  }
+}
+
+/**
+ * The plan does not include this feature (HTTP 403 `feature_not_in_plan`): a
+ * premium parser, a connector or live fetch. `upgradeUrl` is where to upgrade.
+ */
+export class FeatureNotInPlanError extends AuthenticationError {
+  static override readonly errorCode: SynapErrorCode = 'feature_not_in_plan';
+  readonly feature: string | null;
+  readonly planId: string | null;
+  readonly upgradeUrl: string | null;
+  readonly requestId: string | null;
+
+  constructor(
+    message: string,
+    options: SynapErrorOptions & {
+      feature?: string | null;
+      planId?: string | null;
+      upgradeUrl?: string | null;
+      requestId?: string | null;
+    } = {},
+  ) {
+    super(message, { ...options, serverCode: 'feature_not_in_plan' });
+    this.feature = options.feature ?? null;
+    this.planId = options.planId ?? null;
+    this.upgradeUrl = options.upgradeUrl ?? null;
+    this.requestId = options.requestId ?? null;
+  }
+}
+
+/** A restore found a newer document holding the same identity (HTTP 409 `document_id_in_use`). */
+export class DocumentIdInUseError extends ConflictError {
+  static override readonly errorCode: SynapErrorCode = 'document_id_in_use';
+}
+
+/**
+ * A `document_id` names more than one document across scopes (HTTP 409
+ * `ambiguous_document`). `matches` lists each match's scope. Pass the
+ * `user_id`, `customer_id` or `scope` that names one, or its `document_key`.
+ */
+export class AmbiguousDocumentError extends ConflictError {
+  static override readonly errorCode: SynapErrorCode = 'ambiguous_document';
+  readonly matches: Record<string, unknown>[];
+
+  constructor(message: string, options: SynapErrorOptions & { matches?: Record<string, unknown>[] | null } = {}) {
+    super(message, { ...options, serverCode: 'ambiguous_document' });
+    this.matches = [...(options.matches ?? [])];
+  }
+}
+
+/** The name the tech spec uses. Python: `AmbiguousDocument`. */
+export const AmbiguousDocument = AmbiguousDocumentError;
+
+/**
+ * Overages are off and the balance is below this document's estimate (HTTP 402
+ * `insufficient_credits_for_document`).
+ */
+export class InsufficientCreditsForDocumentError extends InsufficientCreditsError {
+  static override readonly errorCode: SynapErrorCode = 'insufficient_credits_for_document';
+  readonly estimateCredits: number | null;
+
+  constructor(
+    message: string,
+    options: SynapErrorOptions & { estimateCredits?: number | null; balanceCredits?: number | null } = {},
+  ) {
+    super(message, { ...options, balanceCredits: options.balanceCredits ?? null });
+    this.serverCode = 'insufficient_credits_for_document';
+    this.estimateCredits = options.estimateCredits ?? null;
+  }
+}
+
 // ─── Hierarchy metadata (drives the cross-copy instanceof above) ──────────────
 
 const PARENT: Partial<Record<SynapErrorCode, SynapErrorCode>> = {
@@ -402,6 +543,16 @@ const PARENT: Partial<Record<SynapErrorCode, SynapErrorCode>> = {
   session_expired: 'permanent',
   listening_already_active: 'permanent',
   listening_not_active: 'permanent',
+  file_too_large: 'invalid_input',
+  batch_too_large: 'invalid_input',
+  unsupported_format: 'invalid_input',
+  url_not_fetched: 'invalid_input',
+  filters_need_query: 'invalid_input',
+  missing_scope: 'authentication',
+  feature_not_in_plan: 'authentication',
+  document_id_in_use: 'conflict',
+  ambiguous_document: 'conflict',
+  insufficient_credits_for_document: 'insufficient_credits',
 };
 
 function descendsFrom(actual: string | undefined, expected: string): boolean {

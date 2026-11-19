@@ -12,7 +12,7 @@
  */
 
 import type { Json, RawContext } from './types.js';
-import type { AnticipationCache, LookupResult } from './anticipation-cache.js';
+import type { AnticipationCache, DocumentFilters, LookupResult } from './anticipation-cache.js';
 
 export type Scope = 'conversation' | 'user' | 'customer' | 'client';
 
@@ -34,6 +34,8 @@ export interface AnticipationLookupParams {
    * no scope for which dropping it would be the safe thing to do.
    */
   scopeRung?: string | null | undefined;
+  /** The fetch's document filters (D120), passed through every scope unchanged. */
+  filters?: DocumentFilters | null | undefined;
 }
 
 /**
@@ -48,17 +50,19 @@ export function scopeLookupParams(
   scope: Scope,
   params: AnticipationLookupParams,
 ): AnticipationLookupParams {
-  const { searchQuery, entityId, customerId, clientId, conversationId, scopeRung, maxResultsPerQuery } = params;
+  const {
+    searchQuery, entityId, customerId, clientId, conversationId, scopeRung, maxResultsPerQuery, filters,
+  } = params;
   switch (scope) {
     case 'conversation':
-      return { searchQuery, entityId, customerId, clientId, conversationId, scopeRung, maxResultsPerQuery };
+      return { searchQuery, entityId, customerId, clientId, conversationId, scopeRung, maxResultsPerQuery, filters };
     case 'user':
       // No conversationId: a user-scope fetch is not bound to one thread.
-      return { searchQuery, entityId, customerId, clientId, scopeRung, maxResultsPerQuery };
+      return { searchQuery, entityId, customerId, clientId, scopeRung, maxResultsPerQuery, filters };
     case 'customer':
-      return { searchQuery, entityId: null, customerId, clientId, scopeRung, maxResultsPerQuery };
+      return { searchQuery, entityId: null, customerId, clientId, scopeRung, maxResultsPerQuery, filters };
     case 'client':
-      return { searchQuery, entityId: null, customerId: null, clientId, scopeRung, maxResultsPerQuery };
+      return { searchQuery, entityId: null, customerId: null, clientId, scopeRung, maxResultsPerQuery, filters };
   }
 }
 
@@ -136,6 +140,7 @@ export async function tryServeFromCache(
       scopeRung: scoped.scopeRung ?? null,
       maxItems,
       maxResultsPerQuery: scoped.maxResultsPerQuery ?? null,
+      filters: scoped.filters ?? null,
     });
     if (hit === null) return { response: null, hit: null };
     return { response: buildAnticipationResponse(hit), hit };

@@ -3,7 +3,7 @@
  *
  * Source:    synap/proto/synap_service.proto
  * Generator: synap/sdk/scripts/gen_proto_descriptor.mjs
- * Proto SHA: 2f2b7989ea808cf5
+ * Proto SHA: d94a2fdddcd58aa6
  *
  * The proto is inlined as a JSON descriptor rather than loaded from disk so
  * that bundlers and Vercel file tracing cannot lose it. Regenerate with
@@ -11,7 +11,7 @@
  */
 
 /** sha256 (first 16 hex chars) of the proto this descriptor was built from. */
-export const PROTO_SHA = '2f2b7989ea808cf5';
+export const PROTO_SHA = 'd94a2fdddcd58aa6';
 
 export const SYNAP_PROTO_DESCRIPTOR = {
   "nested": {
@@ -628,6 +628,26 @@ export const SYNAP_PROTO_DESCRIPTOR = {
                 "date_prefix": {
                   "type": "string",
                   "id": 18
+                },
+                "document_id": {
+                  "type": "string",
+                  "id": 19
+                },
+                "kind": {
+                  "type": "string",
+                  "id": 20
+                },
+                "document_type": {
+                  "type": "string",
+                  "id": 21
+                },
+                "document_key": {
+                  "type": "string",
+                  "id": 22
+                },
+                "citation_json": {
+                  "type": "string",
+                  "id": 23
                 }
               }
             },

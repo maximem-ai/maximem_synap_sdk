@@ -36,11 +36,27 @@ import {
  */
 type BlobSource = NonNullable<ConstructorParameters<typeof Blob>[0]>[number];
 
-/** Mirrors the Python DocumentType enum. */
+/**
+ * The document types the server knows (D8), for documentation and
+ * autocomplete. Mirrors the Python DocumentType enum. `document_type` is a
+ * plain string on the wire: any value is sent as given, and the server
+ * matches free text against the type descriptions.
+ */
 export const DOCUMENT_TYPES = [
   'ai-chat-conversation', 'document', 'email', 'pdf', 'image', 'audio', 'meeting-transcript',
+  'support-conversation', 'call-transcript', 'team-chat', 'group-chat', 'ticket',
+  'knowledge-article', 'policy', 'contract', 'financial-record', 'report',
+  'profile-record', 'memory-record',
 ] as const;
 export type DocumentType = (typeof DOCUMENT_TYPES)[number];
+
+/** `document_format` values (D9): for text whose format cannot be seen. */
+export const DOCUMENT_FORMATS = ['text', 'markdown', 'html', 'csv', 'json'] as const;
+export type DocumentFormat = (typeof DOCUMENT_FORMATS)[number];
+
+/** Batch limits (product spec, Batch), checked before anything is sent. */
+export const MAX_BATCH_ITEMS = 100;
+export const MAX_BATCH_BYTES = 50 * 1024 * 1024;
 
 /** Mirrors the Python IngestMode enum. */
 export const INGEST_MODES = ['fast', 'long-range'] as const;
@@ -55,14 +71,33 @@ export const DEFAULT_INGEST_MODE: IngestMode = 'long-range';
  *
  * A string, a dict, a `TextPart` or a list with no file in it is sent as JSON
  * to `/create`, byte for byte as a string always was (a list is joined with
- * `"\n"`). Any `FilePart` sends the call as multipart to `/create-multipart`.
+ * `"\n"`). Any `FilePart` sends the call as multipart to `/create-multipart`:
+ * up to 10 files, 10 MB each, images and documents. Documents need document
+ * ingestion enabled on the instance (415 `UnsupportedFormatError` otherwise).
+ * This replaces the deprecated `create_from_file` (D164).
  */
 export type CreateDocument =
   | string
   | Record<string, unknown>
   | TextPart
   | FilePart
-  | Array<string | TextPart | FilePart>;
+  | Array<string | TextPart | FilePart>
+  // A load of memory records, only with document_type 'memory-record' (D153).
+  | Array<Record<string, unknown>>;
+
+/** `on_conflict` values for memory records (D155). Python: `ON_CONFLICT_VALUES`. */
+export const ON_CONFLICT_VALUES = ['supersede', 'keep_both', 'reject'] as const;
+export type OnConflict = (typeof ON_CONFLICT_VALUES)[number];
+
+/**
+ * A list `document` with `document_type: 'memory-record'` is records, sent as
+ * it is. Any other list is parts, exactly as before. Python: `memories.create`.
+ */
+function isRecordLoad(options: CreateMemoryOptions): boolean {
+  const o = options as unknown as Record<string, unknown>;
+  return either<string>(o, 'document_type', 'documentType') === 'memory-record'
+    && Array.isArray(options.document);
+}
 
 export interface CreateMemoryOptions {
   document: CreateDocument;
@@ -100,6 +135,37 @@ export interface CreateMemoryOptions {
    * characters. Sent only when set, so a call without it is unchanged.
    */
   objective?: Objective | string | null;
+  /** For text whose format cannot be seen (D9). */
+  document_format?: DocumentFormat | null;
+  documentFormat?: DocumentFormat | null;
+  /**
+   * How the document is used (D31): `read_frequency`, `modification_frequency`,
+   * `question_style`, `retrieval_mode`. Any left out is inferred.
+   */
+  utility?: Record<string, unknown> | null;
+  /** A per-call ingestion plan override, e.g. `{ extraction: 'detailed' }` (D34). */
+  plan?: Record<string, unknown> | null;
+  /**
+   * The conversation a file was sent in (1 to 200 characters), so deleting the
+   * conversation also deletes the file it brought (D183).
+   */
+  conversation_id?: string | null;
+  conversationId?: string | null;
+  /**
+   * Where the document came from (D21, D86): `system`, `external_id`, `url`,
+   * `container`, `fetched_at`, `source_revision`, `source_modified_at`. A Date
+   * value is sent as ISO-8601.
+   */
+  source?: Record<string, unknown> | null;
+  /** Who each speaker label is (D21): label -> `{ user_id | customer_id | role }`. */
+  participants?: Record<string, unknown> | null;
+  /**
+   * Memory records only (D155): `supersede` (the server's default),
+   * `keep_both` or `reject`. Each record's outcome is on `status()` under
+   * `records`. Sent only when set.
+   */
+  on_conflict?: OnConflict | null;
+  onConflict?: OnConflict | null;
 }
 
 /**
@@ -125,6 +191,18 @@ export interface CreateMemoryResult {
    * rest of the document was ingested.
    */
   attachments?: AttachmentResult[] | null;
+  /** Stable across versions: the address for the documents routes (T12). */
+  document_key?: string | null;
+  /** The resolved type (D11). */
+  document_type?: string | null;
+  /** caller, call-shape, format, rules, model, default or pending (T4). */
+  type_source?: string | null;
+  /** D91. */
+  version?: number | null;
+  /** created, unchanged, new_version, stale or pending. */
+  version_status?: string | null;
+  /** accepted, searchable, processed or failed (D137). */
+  processing_stage?: string | null;
   [key: string]: unknown;
 }
 
@@ -150,13 +228,9 @@ function createFields(options: CreateMemoryOptions, defaultType: string | null):
   const documentType = either<string>(o, 'document_type', 'documentType') ?? defaultType;
   const mode = (options.mode as string) ?? DEFAULT_INGEST_MODE;
 
-  // Validated client-side because Python's enum coercion raises before any
-  // request is sent. A silent pass-through would turn a typo into a server
-  // error, or worse, a silently different extraction path.
-  if (documentType !== null && !(DOCUMENT_TYPES as readonly string[]).includes(documentType)) {
-    throw new InvalidInputError(
-      `Invalid document_type '${documentType}'. Expected one of: ${DOCUMENT_TYPES.join(', ')}`,
-    );
+  // A plain string (D8): any value is sent as given, as Python sends it.
+  if (documentType !== null && typeof documentType !== 'string') {
+    throw new InvalidInputError('document_type must be a string');
   }
   if (!(INGEST_MODES as readonly string[]).includes(mode)) {
     throw new InvalidInputError(
@@ -187,7 +261,68 @@ function createFields(options: CreateMemoryOptions, defaultType: string | null):
   if (options.objective !== undefined && options.objective !== null) {
     fields['objective'] = options.objective;
   }
+  Object.assign(fields, documentFields(options));
   return fields;
+}
+
+function isoValues(value: unknown): unknown {
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(isoValues);
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, isoValues(v)]));
+  }
+  return value;
+}
+
+/**
+ * The Documents fields that are set, in the order Python sends them, after
+ * `objective`. Each only when set, so a caller who sets none of them sends
+ * exactly the old body. Only the shape is checked here; what the objects hold
+ * is checked by the server (422). Python: `check_document_fields` and
+ * `document_fields_wire`.
+ */
+export function documentFields(options: CreateMemoryOptions): Json {
+  const o = options as unknown as Record<string, unknown>;
+  const out: Json = {};
+  const format = either<string>(o, 'document_format', 'documentFormat');
+  if (format !== undefined && format !== null) {
+    if (!(DOCUMENT_FORMATS as readonly string[]).includes(format)) {
+      throw new InvalidInputError(
+        `Invalid document_format '${format}'. Expected one of: ${DOCUMENT_FORMATS.join(', ')}`,
+      );
+    }
+    out['document_format'] = format;
+  }
+  for (const name of ['utility', 'plan'] as const) {
+    const v = o[name];
+    if (v === undefined || v === null) continue;
+    if (typeof v !== 'object' || Array.isArray(v)) throw new InvalidInputError(`${name} must be a dict`);
+    out[name] = isoValues(v) as Json;
+  }
+  const conversationId = either<string>(o, 'conversation_id', 'conversationId');
+  if (conversationId !== undefined && conversationId !== null) {
+    if (typeof conversationId !== 'string' || [...conversationId].length < 1
+      || [...conversationId].length > 200) {
+      throw new InvalidInputError('conversation_id must be a string of 1 to 200 characters');
+    }
+    out['conversation_id'] = conversationId;
+  }
+  for (const name of ['source', 'participants'] as const) {
+    const v = o[name];
+    if (v === undefined || v === null) continue;
+    if (typeof v !== 'object' || Array.isArray(v)) throw new InvalidInputError(`${name} must be a dict`);
+    out[name] = isoValues(v) as Json;
+  }
+  const onConflict = either<string>(o, 'on_conflict', 'onConflict');
+  if (onConflict !== undefined && onConflict !== null) {
+    if (!(ON_CONFLICT_VALUES as readonly string[]).includes(onConflict)) {
+      throw new InvalidInputError(
+        `Invalid on_conflict '${onConflict}'. Expected one of: ${ON_CONFLICT_VALUES.join(', ')}`,
+      );
+    }
+    out['on_conflict'] = onConflict;
+  }
+  return out;
 }
 
 /**
@@ -247,7 +382,9 @@ function jsonDocument(document: unknown, where: string): unknown {
  * `memories.create` as multipart, built by `buildCreateManifest`.
  */
 export function buildCreateBody(options: CreateMemoryOptions): Json {
-  const document = jsonDocument(options.document, 'This request');
+  const document = isRecordLoad(options)
+    ? [...(options.document as unknown[])]
+    : jsonDocument(options.document, 'This request');
   if (!document) throw new InvalidInputError('document is required');
   return { document, ...createFields(options, DEFAULT_DOCUMENT_TYPE) };
 }
@@ -262,13 +399,20 @@ export function buildCreateManifest(
   options: CreateMemoryOptions,
   parts: Array<TextPart | FilePart>,
   files: Array<{ filename: string; media_type: string }>,
+  fieldPrefix = 'file_',
 ): Json {
   let next = 0;
   const document = parts.map((p): WireTextPart | WireFilePart => {
     if (!isFilePart(p)) return { type: 'text', text: (p as TextPart).text };
     const index = next++;
     const file = files[index]!;
-    return { type: 'file', field: `file_${index}`, filename: file.filename, media_type: file.media_type };
+    const wire: WireFilePart = {
+      type: 'file', field: `${fieldPrefix}${index}`, filename: file.filename, media_type: file.media_type,
+    };
+    // This file's own type and identity (D10, D171), only when set.
+    if (p.document_type != null) wire.document_type = p.document_type;
+    if (p.document_id != null) wire.document_id = p.document_id;
+    return wire;
   });
   return { document, ...createFields(options, null) };
 }
@@ -350,7 +494,10 @@ export interface DeleteMemoryResult {
   deleted_at: string;
   fully_removed: boolean;
   still_present_in: string[];
-  /** The source document stays because other memories still rest on it. */
+  /**
+   * The source document stays because other memories still rest on it.
+   * Reported for permanent deletes only; always false for a soft delete.
+   */
   source_text_kept: boolean;
   /**
    * `pending_purge` (the default soft delete: hidden now, restorable with
@@ -543,6 +690,29 @@ export interface WaitOptions {
 // never emitted by the server and are kept only so an older value still stops.
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'partial_success', 'error', 'cancelled']);
 
+let createFromFileWarned = false;
+
+/** Test hook: lets a test see the one warning again. */
+export function resetCreateFromFileWarning(): void {
+  createFromFileWarned = false;
+}
+
+/**
+ * `create_from_file` is deprecated (D164): one `console.warn` per process,
+ * naming its replacement. Python raises a DeprecationWarning, also once.
+ */
+function warnCreateFromFileDeprecated(): void {
+  if (createFromFileWarned) return;
+  createFromFileWarned = true;
+  console.warn(
+    'memories.create_from_file is deprecated and will be removed in the next major ' +
+      'version. Once document ingestion is enabled for your instance, use ' +
+      'memories.create(document=FilePart(...)) instead: it takes the same files, ' +
+      'plus a document_id so a re-upload becomes a new version, a document date, ' +
+      'objective and source.',
+  );
+}
+
 export function createMemoriesInterface(
   transport: HttpTransport,
   // Called after a forget that deleted something, so the caller can stop serving
@@ -556,7 +726,7 @@ export function createMemoriesInterface(
       if (customerId !== undefined && customerId !== null && customerId !== '') {
         await transport.checkCustomerId(customerId, 'memories.create');
       }
-      const n = normaliseContent(options.document, 'document');
+      const n = isRecordLoad(options) ? null : normaliseContent(options.document, 'document');
       if (n === null || n.kind === 'text') {
         return transport.request<CreateMemoryResult>('memories_create', {
           body: buildCreateBody(options),
@@ -605,19 +775,65 @@ export function createMemoriesInterface(
       if (!Array.isArray(docs) || docs.length === 0) {
         throw new InvalidInputError('documents must be a non-empty array');
       }
+      if (docs.length > MAX_BATCH_ITEMS) {
+        throw new InvalidInputError(
+          `A batch takes at most ${MAX_BATCH_ITEMS} items; got ${docs.length}`,
+        );
+      }
       const failFast = options.fail_fast ?? options.failFast ?? false;
-      return transport.request<BatchCreateResult>('memories_batch', {
-        body: {
-          documents: docs.map((d) => {
-            jsonDocument(d.document, 'memories.batch_create');
-            return buildCreateBody(d);
-          }),
-          fail_fast: failFast,
-        },
-      });
+      const normalised = docs.map((d) =>
+        (isRecordLoad(d) ? null : normaliseContent(d.document, 'document')));
+      if (!normalised.some((n) => n !== null && n.kind === 'parts')) {
+        // No file: today's JSON body, byte for byte.
+        return transport.request<BatchCreateResult>('memories_batch', {
+          body: { documents: docs.map((d) => buildCreateBody(d)), fail_fast: failFast },
+        });
+      }
+
+      // A batch with files is multipart: a `manifest` of `items` (each in the
+      // shape of a single create's manifest), and one form field per file,
+      // `file_<item>_<n>`. Mirrors Python's `_batch_manifest`.
+      const fetchImpl = ((url: string, init?: RequestInit) =>
+        transport.fetchExternal(url, init)) as typeof fetch;
+      const form = new FormData();
+      const items: Json[] = [];
+      let total = 0;
+      for (let index = 0; index < docs.length; index++) {
+        const d = docs[index]!;
+        const n = normalised[index];
+        if (n === null || n === undefined || n.kind === 'text') {
+          items.push(buildCreateBody(d));
+          continue;
+        }
+        buildCreateManifest(d, n.parts.filter((p) => !isFilePart(p)), []);
+        const files: Awaited<ReturnType<typeof resolveFile>>[] = [];
+        for (const p of n.parts.filter(isFilePart)) {
+          const file = await resolveFile(p, fetchImpl);
+          total += file.bytes.byteLength;
+          if (total > MAX_BATCH_BYTES) {
+            throw new InvalidInputError(
+              `The files in this batch come to more than ${MAX_BATCH_BYTES} bytes ` +
+                `(${MAX_BATCH_BYTES / (1024 * 1024)} MB), the limit for one batch`,
+            );
+          }
+          files.push(file);
+        }
+        items.push(buildCreateManifest(d, n.parts, files, `file_${index}_`));
+        files.forEach((file, i) => {
+          form.set(
+            `file_${index}_${i}`,
+            new Blob([file.bytes as unknown as BlobSource], { type: file.media_type }),
+            file.filename,
+          );
+        });
+      }
+      form.set('manifest', JSON.stringify({ items, fail_fast: failFast }));
+      // Not retried: the endpoint is declared non-idempotent.
+      return transport.request<BatchCreateResult>('memories_batch', { body: form, rawBody: true });
     },
 
     async create_from_file(options) {
+      warnCreateFromFileDeprecated();
       const userId = options.user_id ?? options.userId;
       const customerId = options.customer_id ?? options.customerId;
       // Checked first, as Python checks it: a flat map of level key to id.

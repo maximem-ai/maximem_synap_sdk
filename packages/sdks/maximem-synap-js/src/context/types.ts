@@ -85,6 +85,14 @@ export interface RawContext {
   items?: RawContextItem[];
   /** `response_shape: "ranked"` only: the chunks, quotes from source documents. */
   excerpts?: RawContextItem[];
+  /**
+   * Documents in the by-type shape (T2): passages, records and fetched items,
+   * each carrying `citation` as the ranked shape does. Absent when empty: the
+   * server leaves an empty one out. Python: `ContextResponse.passages` etc.
+   */
+  passages?: RawContextItem[];
+  records?: RawContextItem[];
+  fetched?: RawContextItem[];
   conversation_context?: RawConversationContext | null;
   metadata?: Json;
   [key: string]: unknown;
@@ -247,6 +255,10 @@ export interface NormalisedContext {
   items?: RawContextItem[];
   /** `response_shape: "ranked"` only, and absent otherwise: the chunks, quotes from source documents. */
   excerpts?: RawContextItem[];
+  /** Documents in the by-type shape (T2), each with its `citation`; absent when none. */
+  passages?: RawContextItem[];
+  records?: RawContextItem[];
+  fetched?: RawContextItem[];
 }
 
 // ─── Request options ──────────────────────────────────────────────────────────
@@ -336,4 +348,27 @@ export interface FetchOptions {
    */
   response_shape?: string;
   responseShape?: string;
+
+  /**
+   * Document filters (D123). Each is sent only when set, so a fetch without
+   * them sends the body it always did. Set, they narrow the anticipation cache
+   * too, and they need a `search_query`: without one the fetch throws
+   * `FiltersNeedQueryError` (D185). `kinds`: any of `memory`, `passage`,
+   * `record`, `fetched`. `document_ids` are your own ids, resolved within the
+   * fetch's scope. `as_of` is ISO-8601 or a Date, and is never answered from
+   * the cache.
+   */
+  kinds?: string[];
+  document_types?: string[];
+  documentTypes?: string[];
+  document_ids?: string[];
+  documentIds?: string[];
+  as_of?: string | Date;
+  asOf?: string | Date;
+  /**
+   * T54: tilts the source-kind weight for this request (D122), one of the
+   * `kinds` values. Sent only when set; it filters nothing and needs no query.
+   */
+  source_kind_hint?: string;
+  sourceKindHint?: string;
 }

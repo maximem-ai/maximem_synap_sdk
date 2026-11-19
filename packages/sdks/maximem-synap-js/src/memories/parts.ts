@@ -1,5 +1,5 @@
 /**
- * Content parts: text and files (today, images) carried by `memories.create`,
+ * Content parts: text and files carried by `memories.create`,
  * `conversation.record_message` and `instance.send_message`.
  *
  * Mirrors `TextPart`, `FilePart` and `AttachmentResult` in the Python SDK.
@@ -55,6 +55,13 @@ export interface TextPart {
  * Build one with `filePart()`, which fills `filename` and `media_type`. A
  * literal `{ type: 'file', ... }` works too; the same defaults are applied when
  * it is sent.
+ *
+ * `memories.create` takes documents as well as images: pdf, docx, xlsx, pptx,
+ * txt, md, csv, html and json besides png, jpeg and webp (D170). Documents need
+ * document ingestion enabled on the instance; until it is, and for any format
+ * the server does not take, the server refuses the file (415
+ * `unsupported_format`), not here. `record_message` and `send_message` take
+ * images only. Mirrors Python's `FilePart` docstring.
  */
 export interface FilePart {
   type: 'file';
@@ -67,6 +74,17 @@ export interface FilePart {
   filename?: string;
   /** Defaults to a guess from `filename`, else `"application/octet-stream"`. */
   media_type?: string;
+  /**
+   * This file's own type (D10). `memories.create` and `batch_create` only; the
+   * chat routes refuse a part that carries it.
+   */
+  document_type?: string;
+  /**
+   * This file's own identity (D171): a re-sent file with the same id becomes a
+   * new version of it. Without one the file is identified by its content.
+   * `memories.create` and `batch_create` only.
+   */
+  document_id?: string;
 }
 
 export interface FilePartInit {
@@ -76,6 +94,10 @@ export interface FilePartInit {
   filename?: string | null;
   media_type?: string | null;
   mediaType?: string | null;
+  document_type?: string | null;
+  documentType?: string | null;
+  document_id?: string | null;
+  documentId?: string | null;
 }
 
 /** One item of a content list. A bare string is a text part. */
@@ -136,7 +158,34 @@ export function filePart(init: FilePartInit): FilePart {
   else part.url = init.url as string;
   part.filename = filename;
   part.media_type = mediaType;
+  const documentType = init.document_type ?? init.documentType ?? null;
+  const documentId = init.document_id ?? init.documentId ?? null;
+  for (const [name, value] of [['document_type', documentType], ['document_id', documentId]] as const) {
+    if (value !== null && (typeof value !== 'string' || value === '')) {
+      // Python's message, word for word.
+      throw new InvalidInputError(`FilePart.${name} must be a non-empty string`);
+    }
+  }
+  if (documentType !== null) part.document_type = documentType;
+  if (documentId !== null) part.document_id = documentId;
   return brand(part);
+}
+
+/**
+ * Refuse a file part carrying `document_type` or `document_id` on a chat route
+ * (`record_message`, `send_message`): they take images only. Python refuses it
+ * in `to_parts` unless `documents=True`, with the same message.
+ */
+export function rejectDocumentFields(parts: Array<TextPart | FilePart>, field: string): void {
+  parts.forEach((p, i) => {
+    if (isFilePart(p) && (p.document_type != null || p.document_id != null)) {
+      throw new InvalidInputError(
+        `${field}[${i}] carries document_type or document_id, which only ` +
+          'memories.create takes. Messages take images only; send the ' +
+          'document with memories.create(document=FilePart(...)).',
+      );
+    }
+  });
 }
 
 export function isTextPart(value: unknown): value is TextPart {
@@ -460,12 +509,17 @@ export interface WireTextPart {
   text: string;
 }
 
-/** A file in a `memories.create` multipart manifest; its bytes are the form field `field`. */
+/**
+ * A file in a `memories.create` multipart manifest; its bytes are the form
+ * field `field`. `document_type` and `document_id` only when set.
+ */
 export interface WireFilePart {
   type: 'file';
   field: string;
   filename: string;
   media_type: string;
+  document_type?: string;
+  document_id?: string;
 }
 
 /** A file carried inline as base64 (record_message JSON, the gRPC metadata key). */
@@ -499,7 +553,9 @@ export interface InlineParts {
 export async function toInlineParts(
   parts: Array<TextPart | FilePart>,
   fetchImpl: typeof fetch,
+  field = 'content',
 ): Promise<InlineParts> {
+  rejectDocumentFields(parts, field);
   const resolved = await Promise.all(
     parts.map((p) => (isFilePart(p) ? resolveFile(p, fetchImpl) : null)),
   );

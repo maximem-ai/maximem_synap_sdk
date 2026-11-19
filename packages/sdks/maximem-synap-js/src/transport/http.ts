@@ -21,6 +21,16 @@ import {
   ServiceUnavailableError,
   SynapError,
   SynapPermanentError,
+  FileTooLargeError,
+  BatchTooLargeError,
+  UnsupportedFormatError,
+  UrlNotFetchedError,
+  FiltersNeedQueryError,
+  MissingScopeError,
+  FeatureNotInPlanError,
+  DocumentIdInUseError,
+  AmbiguousDocumentError,
+  InsufficientCreditsForDocumentError,
 } from '../errors.js';
 import { newCorrelationId } from '../util/correlation.js';
 import { ENDPOINTS, resolvePath, type EndpointName } from './endpoints.js';
@@ -142,6 +152,11 @@ export interface RequestOptions {
    */
   mapError?: (status: number, error: SynapError) => SynapError | undefined;
   signal?: AbortSignal;
+  /**
+   * `'bytes'` returns the body as a `Uint8Array` instead of parsing JSON (a
+   * document's original file). Errors are mapped as for JSON. Python: `raw=True`.
+   */
+  responseType?: 'json' | 'bytes';
 }
 
 interface AttemptOutcome {
@@ -537,6 +552,9 @@ export class HttpTransport {
       throw options.mapError?.(response.status, error) ?? error;
     }
 
+    if (options.responseType === 'bytes' && response.status === 200) {
+      return new Uint8Array(await response.arrayBuffer()) as unknown as T;
+    }
     if (response.status === 204) return undefined as T;
     const text = await response.text();
     if (!text) return undefined as T;
@@ -724,6 +742,101 @@ export function carriesScopePath(body: unknown): boolean {
   );
 }
 
+/**
+ * The Documents error codes, each with the status it comes with. A code under
+ * any other status is ignored, so an unrelated body that happens to carry the
+ * word is never misread. Python: `_DOCUMENT_ERRORS`.
+ */
+const DOCUMENT_ERRORS: Record<string, string> = {
+  '413:file_too_large': 'FileTooLargeError',
+  '413:batch_too_large': 'BatchTooLargeError',
+  '415:unsupported_format': 'UnsupportedFormatError',
+  '422:url_not_fetched': 'UrlNotFetchedError',
+  '422:filters_need_query': 'FiltersNeedQueryError',
+  '422:invalid_utility': 'InvalidInputError',
+  '422:invalid_plan': 'InvalidInputError',
+  '422:invalid_source': 'InvalidInputError',
+  // Memory records (D153, D175). Python: `_DOCUMENT_ERRORS`.
+  '422:unknown_document_type': 'InvalidInputError',
+  '422:invalid_memory_record': 'InvalidInputError',
+  // Knowledge query (D165). Python: `_DOCUMENT_ERRORS`. A coded 504 keeps the class
+  // a plain 504 has in JS (see KNOWN_STATUS_DIFFS in status-errors-parity.test.ts).
+  '422:unknown_type': 'InvalidInputError',
+  '422:unknown_property': 'InvalidInputError',
+  '422:bad_condition': 'InvalidInputError',
+  '422:too_many_hops': 'InvalidInputError',
+  '422:unknown_relation': 'InvalidInputError',
+  '422:invalid_cursor': 'InvalidInputError',
+  '422:query_too_broad': 'InvalidInputError',
+  '504:query_timeout': 'AgentUnavailableError',
+  '503:pricing_unavailable': 'ServiceUnavailableError',
+  // Document navigation (D166). Python: `_DOCUMENT_ERRORS`.
+  '422:read_too_large': 'InvalidInputError',
+  '422:invalid_read_request': 'InvalidInputError',
+  '404:document_not_ready': 'ContextNotFoundError',
+  '403:missing_scope': 'MissingScopeError',
+  '403:feature_not_in_plan': 'FeatureNotInPlanError',
+  '409:document_id_in_use': 'DocumentIdInUseError',
+  '409:ambiguous_document': 'AmbiguousDocumentError',
+  '402:insufficient_credits_for_document': 'InsufficientCreditsForDocumentError',
+};
+
+/**
+ * The typed error for a Documents refusal, or null for any other body. The
+ * code is read from the flat body (`error`) or from `detail` (`code` or
+ * `error`), as Python's `_document_error` reads it.
+ */
+function toDocumentError(
+  status: number,
+  parsed: Record<string, unknown>,
+  detailObject: Record<string, unknown> | null,
+  correlationId: string,
+): SynapError | null {
+  const code = parsed['error'] ?? detailObject?.['code'] ?? detailObject?.['error'];
+  if (typeof code !== 'string') return null;
+  const cls = DOCUMENT_ERRORS[`${status}:${code}`];
+  if (cls === undefined) return null;
+  const pick = (key: string): unknown => (key in parsed ? parsed[key] : detailObject?.[key]);
+  const raw = pick('message');
+  const message = typeof raw === 'string' && raw !== '' ? raw : code;
+  const opts = { correlationId, serverCode: code };
+  switch (cls) {
+    case 'FileTooLargeError': return new FileTooLargeError(message, opts);
+    case 'BatchTooLargeError': return new BatchTooLargeError(message, opts);
+    case 'UnsupportedFormatError': return new UnsupportedFormatError(message, opts);
+    case 'UrlNotFetchedError': return new UrlNotFetchedError(message, opts);
+    case 'FiltersNeedQueryError': return new FiltersNeedQueryError(message, opts);
+    case 'MissingScopeError':
+      return new MissingScopeError(message, { correlationId, scope: stringOrNull(pick('scope')) });
+    case 'FeatureNotInPlanError':
+      return new FeatureNotInPlanError(message, {
+        correlationId,
+        feature: stringOrNull(pick('feature')),
+        planId: stringOrNull(pick('plan_id')),
+        upgradeUrl: stringOrNull(pick('upgrade_url')),
+        requestId: stringOrNull(pick('request_id')),
+      });
+    case 'ServiceUnavailableError': return new ServiceUnavailableError(message, opts);
+    case 'ContextNotFoundError': return new ContextNotFoundError(message, opts);
+    case 'AgentUnavailableError': return new AgentUnavailableError(message, opts);
+    case 'DocumentIdInUseError': return new DocumentIdInUseError(message, opts);
+    case 'AmbiguousDocumentError': {
+      const matches = pick('matches');
+      return new AmbiguousDocumentError(message, {
+        correlationId,
+        matches: Array.isArray(matches) ? (matches as Record<string, unknown>[]) : [],
+      });
+    }
+    case 'InsufficientCreditsForDocumentError':
+      return new InsufficientCreditsForDocumentError(message, {
+        correlationId,
+        estimateCredits: numberOrNull(pick('estimate_credits')),
+        balanceCredits: numberOrNull(pick('balance_credits')),
+      });
+    default: return new InvalidInputError(message, opts);
+  }
+}
+
 async function toHttpError(response: Response, correlationId: string): Promise<SynapError> {
   const body = await response.text().catch(() => '');
   let parsed: Record<string, unknown> = {};
@@ -746,6 +859,11 @@ async function toHttpError(response: Response, correlationId: string): Promise<S
       : String(rawDetail);
   const message = `HTTP ${response.status}: ${detail || response.statusText}`;
   const opts = { correlationId };
+
+  // A Documents refusal names its own code; checked before the status
+  // branches so each gets its typed error. Mirrors `_document_error`.
+  const documentError = toDocumentError(response.status, parsed, detailObject, correlationId);
+  if (documentError !== null) return documentError;
 
   switch (response.status) {
     case 400:

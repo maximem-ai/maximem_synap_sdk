@@ -4,6 +4,7 @@ import asyncio
 import json as _json
 import os
 import time
+import warnings
 from datetime import datetime
 from typing import IO, Any, Dict, List, Optional, Union
 from uuid import UUID
@@ -38,6 +39,72 @@ from .parts import (
     resolve_files,
     to_parts,
 )
+
+
+#: Batch limits (product spec, Batch). Checked before anything is sent; the
+#: server checks them too (413 batch_too_large).
+MAX_BATCH_ITEMS = 100
+MAX_BATCH_BYTES = 50 * 1024 * 1024
+
+#: create_from_file warns once per process (D164).
+_CREATE_FROM_FILE_WARNED = False
+
+
+def _warn_create_from_file_deprecated() -> None:
+    global _CREATE_FROM_FILE_WARNED
+    if _CREATE_FROM_FILE_WARNED:
+        return
+    _CREATE_FROM_FILE_WARNED = True
+    warnings.warn(
+        "memories.create_from_file is deprecated and will be removed in the next "
+        "major version. Once document ingestion is enabled for your instance, use "
+        "memories.create(document=FilePart(...)) instead: it takes the same files, "
+        "plus a document_id so a re-upload becomes a new version, a document date, "
+        "objective and source.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
+def _batch_item_wire(item: CreateMemoryRequest) -> Dict[str, Any]:
+    """One JSON batch item: the create body, a text-only list joined."""
+    document = item.document
+    if item.document_type == DocumentType.MEMORY_RECORD.value and isinstance(document, (list, tuple)):
+        document = list(document)       # a load of memory records, sent as it is (D153)
+    elif isinstance(document, (TextPart, list, tuple)):
+        document = join_text(to_parts(document, what="document", documents=True))
+    return item.to_wire(document=document)
+
+
+async def _batch_manifest(items: List[CreateMemoryRequest]):
+    """The multipart batch: manifest items plus every item's form files.
+
+    An item with no file is its JSON batch item. An item with files is a
+    create manifest (parts in order, `document_type` null unless set), its
+    files named `file_<item>_<n>`.
+    """
+    out: List[Dict[str, Any]] = []
+    files: Dict[str, Any] = {}
+    total = 0
+    for index, item in enumerate(items):
+        if not item.has_files():
+            out.append(_batch_item_wire(item))
+            continue
+        resolved = await resolve_files(to_parts(item.document, what="document", documents=True))
+        total += sum(len(p.data) for p in resolved if not isinstance(p, TextPart))
+        if total > MAX_BATCH_BYTES:
+            raise InvalidInputError(
+                f"The files in this batch come to more than {MAX_BATCH_BYTES} bytes "
+                f"({MAX_BATCH_BYTES // (1024 * 1024)} MB), the limit for one batch"
+            )
+        manifest_parts, item_files = multipart_wire_parts(
+            resolved, field_prefix=f"file_{index}_")
+        body = item.to_wire(document=manifest_parts)
+        if "document_type" not in item.model_fields_set:
+            body["document_type"] = None
+        out.append(body)
+        files.update(item_files)
+    return out, files
 
 
 class MemoriesInterface:
@@ -108,6 +175,13 @@ class MemoriesInterface:
         metadata: Optional[dict] = None,
         scope: Optional[Dict[str, str]] = None,
         objective: Optional[str] = None,
+        document_format: Optional[str] = None,
+        utility: Optional[Dict[str, Any]] = None,
+        plan: Optional[Dict[str, Any]] = None,
+        conversation_id: Optional[str] = None,
+        source: Optional[Dict[str, Any]] = None,
+        participants: Optional[Dict[str, Any]] = None,
+        on_conflict: Optional[str] = None,
         **kwargs,
     ) -> CreateMemoryResponse:
         """
@@ -123,13 +197,17 @@ class MemoriesInterface:
                 - a list of strings, `TextPart` and `FilePart`. A list holding
                   only text is joined with newlines and sent exactly as that
                   string would be. A list holding a `FilePart` is uploaded
-                  with its files: each image is read and described, and the
-                  description takes the image's place in the text. Up to 10
-                  files, 10 MB each. Only png, jpeg and webp images are
-                  accepted today; use `create_from_file` for documents.
-                  `FilePart(url=...)` is fetched by the SDK, never the server.
-                  Needs a Synap server that supports file parts; an older one
-                  raises InvalidInputError saying so.
+                  with its files, up to 10 files, 10 MB each: images (png,
+                  jpeg, webp) and documents (pdf, docx, xlsx, pptx, txt, md,
+                  csv, html, json). Documents need document ingestion enabled
+                  on the instance; until it is, the server refuses them with
+                  415 (UnsupportedFormatError). Each document file becomes its
+                  own document, with its own `FilePart.document_type` and
+                  `FilePart.document_id` when given. This replaces the
+                  deprecated `create_from_file`. `FilePart(url=...)` is
+                  fetched by the SDK, never the server. Needs a Synap server
+                  that supports file parts; an older one raises
+                  InvalidInputError saying so.
                 - a single `FilePart`, the same as a list holding only it.
                 An empty list raises InvalidInputError.
             user_id: External user ID this memory is about. Optional — omit
@@ -138,10 +216,13 @@ class MemoriesInterface:
                 omit for client-scope ingestion. The server derives the
                 effective scope from the IDs passed and the instance's
                 user_context_isolation (B2C/B2B).
-            document_type: Type of document (ai-chat-conversation, email, pdf,
-                etc.). Omitted, a text document is sent as
+            document_type: What the document is, as a plain string (D8):
+                "ai-chat-conversation", "email", "contract", "policy" and the
+                other `DocumentType` values, or free text the server matches
+                against the type descriptions. A declared type is
+                authoritative. Omitted, a text document is sent as
                 "ai-chat-conversation", as it always was; a document with files
-                leaves it to the server, which reads it as a conversation.
+                leaves it to the server, which detects it.
             document_id: Optional client-provided ID
             document_created_at: When the document was originally created
             mode: "fast" or "long-range"
@@ -159,6 +240,31 @@ class MemoriesInterface:
                 of `OBJECTIVES` ("conversation", "bootstrap", "knowledge-base",
                 "record", "profile") or free text, up to 500 characters. Only
                 sent when given.
+            document_format: For text whose format cannot be seen: "text",
+                "markdown", "html", "csv" or "json" (D9).
+            utility: How the document is used (D31): `read_frequency`,
+                `modification_frequency`, `question_style`, `retrieval_mode`.
+                Any left out is inferred.
+            plan: A per-call ingestion plan override, for example
+                {"extraction": "detailed"}, checked against guardrails and
+                your plan (D34).
+            conversation_id: The conversation a file was sent in (1 to 200
+                characters), so deleting the conversation also deletes the
+                file it brought (D183). No effect on chat ingestion.
+            source: Where the document came from (D21, D86): `system`,
+                `external_id`, `url`, `container`, `fetched_at`,
+                `source_revision`, `source_modified_at`.
+            participants: Who each speaker label is (D21): label ->
+                {"user_id": ...}, {"customer_id": ...} or {"role": ...}.
+            on_conflict: For memory records (``document_type="memory-record"``,
+                with ``document`` one record dict or a list of up to 100):
+                "supersede" (the server's default), "keep_both" or "reject"
+                (D155). Each record's outcome is on ``status()`` under
+                ``records``.
+
+            Each of the last seven is sent only when given, so a call without
+            them sends exactly the body older SDKs sent. Their contents are
+            checked by the server (422).
 
         Returns:
             CreateMemoryResponse with ingestion_id and status. `attachments`
@@ -175,8 +281,12 @@ class MemoriesInterface:
         # A string or a dict goes to the model untouched: those callers'
         # bodies must not change by a byte. Only the new shapes are unpacked.
         parts = None
-        if isinstance(document, (TextPart, FilePart, list, tuple)):
-            parts = to_parts(document, what="document")
+        if document_type == DocumentType.MEMORY_RECORD.value and isinstance(document, (list, tuple)):
+            # A load of memory records (D153): the list is the body, sent as it
+            # is. A list with any other type is parts, exactly as before.
+            document = list(document)
+        elif isinstance(document, (TextPart, FilePart, list, tuple)):
+            parts = to_parts(document, what="document", documents=True)
             if not has_files(parts):
                 document = join_text(parts)
                 parts = None
@@ -186,7 +296,8 @@ class MemoriesInterface:
 
         request = CreateMemoryRequest(
             document=document if parts is None else "",
-            document_type=DocumentType(
+            # A plain string (D8): any value is sent as given.
+            document_type=(
                 document_type if document_type is not None else DocumentType.CONVERSATION
             ),
             document_id=document_id,
@@ -196,10 +307,16 @@ class MemoriesInterface:
             scope=scope,
             mode=IngestMode(mode),
             metadata=metadata or {},
+            objective=objective,
+            document_format=document_format,
+            utility=utility,
+            plan=plan,
+            conversation_id=conversation_id,
+            source=source,
+            participants=participants,
+            on_conflict=on_conflict,
         )
-        body = request.model_dump(mode="json")
-        if objective is not None:
-            body["objective"] = objective
+        body = request.to_wire()
 
         emit_memory_event(
             self._sdk._telemetry_collector,
@@ -224,9 +341,7 @@ class MemoriesInterface:
                 body["document"] = manifest_parts
                 # Unset stays null: the server picks the type for a document
                 # with files rather than the SDK guessing one.
-                body["document_type"] = (
-                    DocumentType(document_type).value if document_type is not None else None
-                )
+                body["document_type"] = document_type
 
                 auth_context = await self._sdk._get_auth_context(correlation_id)
                 try:
@@ -250,17 +365,7 @@ class MemoriesInterface:
                         correlation_id=correlation_id,
                     ) from e
 
-            attachments = result.get("attachments")
-            response = CreateMemoryResponse(
-                ingestion_id=UUID(result["ingestion_id"]),
-                document_id=result["document_id"],
-                status=IngestStatus(result["status"]),
-                queued_at=datetime.fromisoformat(result["queued_at"]),
-                attachments=(
-                    [AttachmentResult(**a) for a in attachments]
-                    if attachments is not None else None
-                ),
-            )
+            response = CreateMemoryResponse.from_wire(result)
 
             latency_ms = int((time.time() - start_time) * 1000)
             emit_memory_event(
@@ -293,12 +398,23 @@ class MemoriesInterface:
         """
         Create multiple memories in batch.
 
+        Each item takes everything `create` takes (D20): a string, a dict, or
+        a list of strings, `TextPart` and `FilePart`, and the Documents
+        fields. A batch with no file is sent as JSON, exactly as before. A
+        batch with any file is sent as multipart: a `manifest` field holding
+        `{"items": [...], "fail_fast": ...}`, each item in the shape of a
+        multipart create's manifest, and one form field per file named
+        `file_<item>_<n>` (n counts that item's files).
+
+        Limits, checked before anything is read or sent: 100 items, 50 MB of
+        files in all, 10 MB per file.
+
         Args:
             documents: List of CreateMemoryRequest objects
             fail_fast: Stop on first error if True
 
         Returns:
-            BatchCreateResponse with results for each document
+            BatchCreateResponse with results for each document, in order
         """
         self._sdk._ensure_initialized()
         correlation_id = generate_correlation_id(self._sdk.instance_id)
@@ -308,6 +424,11 @@ class MemoriesInterface:
             documents=documents,
             fail_fast=fail_fast,
         )
+        if len(request.documents) > MAX_BATCH_ITEMS:
+            raise InvalidInputError(
+                f"A batch takes at most {MAX_BATCH_ITEMS} items; got {len(request.documents)}"
+            )
+        with_files = any(d.has_files() for d in request.documents)
 
         emit_memory_event(
             self._sdk._telemetry_collector,
@@ -317,30 +438,35 @@ class MemoriesInterface:
         )
 
         try:
-            auth_context = await self._sdk._get_auth_context(correlation_id)
-
-            result = await self._sdk._http_transport.post(
-                path="/api/v1/memories/batch",
-                auth_context=auth_context,
-                json=request.model_dump(mode="json"),
-                correlation_id=correlation_id,
-            )
+            if not with_files:
+                auth_context = await self._sdk._get_auth_context(correlation_id)
+                result = await self._sdk._http_transport.post(
+                    path="/api/v1/memories/batch",
+                    auth_context=auth_context,
+                    json={
+                        "documents": [_batch_item_wire(d) for d in request.documents],
+                        "fail_fast": request.fail_fast,
+                    },
+                    correlation_id=correlation_id,
+                )
+            else:
+                items, files = await _batch_manifest(request.documents)
+                auth_context = await self._sdk._get_auth_context(correlation_id)
+                result = await self._sdk._http_transport.post_multipart(
+                    path="/api/v1/memories/batch",
+                    auth_context=auth_context,
+                    data={"manifest": compact_json(
+                        {"items": items, "fail_fast": request.fail_fast})},
+                    files=files,
+                    correlation_id=correlation_id,
+                )
 
             response = BatchCreateResponse(
                 batch_id=UUID(result["batch_id"]),
                 total=result["total"],
                 succeeded=result["succeeded"],
                 failed=result["failed"],
-                results=[
-                    CreateMemoryResponse(
-                        ingestion_id=UUID(r["ingestion_id"]),
-                        document_id=r["document_id"],
-                        status=IngestStatus(r["status"]),
-                        queued_at=datetime.fromisoformat(r["queued_at"]),
-                        error_message=r.get("error_message"),
-                    )
-                    for r in result["results"]
-                ],
+                results=[CreateMemoryResponse.from_wire(r) for r in result["results"]],
             )
 
             latency_ms = int((time.time() - start_time) * 1000)
@@ -402,6 +528,7 @@ class MemoriesInterface:
                 memories_created=result.get("memories_created", 0),
                 memory_ids=result.get("memory_ids", []),
                 error_message=result.get("error_message"),
+                records=result.get("records"),
             )
 
             latency_ms = int((time.time() - start_time) * 1000)
@@ -605,6 +732,12 @@ class MemoriesInterface:
         """
         Ingest a file or raw text into the memory pipeline.
 
+        Deprecated (D164): use `memories.create(document=FilePart(...))`,
+        which also takes a `document_id` (so a re-upload is a new version),
+        a document date, `objective` and `source`. This method keeps working
+        unchanged, warns once per process, and is removed in the next major
+        version.
+
         Exactly one of `file_path`, `file`, or `text` must be provided.
 
         Args:
@@ -629,6 +762,7 @@ class MemoriesInterface:
         Returns:
             CreateMemoryResponse with ingestion_id and status
         """
+        _warn_create_from_file_deprecated()
         if scope is not None and (
             not isinstance(scope, dict)
             or not all(isinstance(k, str) and isinstance(v, str) for k, v in scope.items())
@@ -752,7 +886,8 @@ class MemoriesInterface:
             ``complete`` or ``partial``), ``purge_after`` (a datetime for a soft
             delete), ``permanent``, ``fully_removed`` (True only when a
             permanent delete cleared every store), ``still_present_in`` and
-            ``source_text_kept``.
+            ``source_text_kept`` (True when a permanent delete left a shared
+            source document in place; always False for a soft delete).
 
         The key must be allowed to delete (a read-only key gets a 403) and the
         memory must be in the key's own instance (otherwise a 404).

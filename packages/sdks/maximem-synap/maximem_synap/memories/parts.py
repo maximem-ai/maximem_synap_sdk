@@ -77,8 +77,18 @@ class FilePart:
     "file". `media_type` defaults to a guess from the filename, else
     "application/octet-stream".
 
-    Only images (png, jpeg, webp) are accepted by the server today. Any other
-    type is refused by the server, not here.
+    `memories.create` takes documents as well as images: pdf, docx, xlsx,
+    pptx, txt, md, csv, html and json besides png, jpeg and webp (D170).
+    Documents need document ingestion enabled on the instance; until it is,
+    and for any format the server does not take, the server refuses the file
+    (415 `unsupported_format`), not here. `conversation.record_message` and
+    `instance.send_message` take images only.
+
+    `document_type` is this file's own type (D10), and `document_id` its own
+    identity, so a re-sent file with the same id becomes a new version of it
+    (D171). Without a `document_id` the file is identified by its content.
+    Both are for `memories.create` and `batch_create` only; the chat routes
+    refuse a part that carries either.
     """
 
     data: Optional[bytes] = None
@@ -86,6 +96,8 @@ class FilePart:
     url: Optional[str] = None
     filename: Optional[str] = None
     media_type: Optional[str] = None
+    document_type: Optional[str] = None
+    document_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         given = [n for n in ("data", "path", "url") if getattr(self, n) is not None]
@@ -96,6 +108,10 @@ class FilePart:
             )
         if self.data is not None and not isinstance(self.data, (bytes, bytearray, memoryview)):
             raise InvalidInputError("FilePart.data must be bytes")
+        for name in ("document_type", "document_id"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise InvalidInputError(f"FilePart.{name} must be a non-empty string")
         filename = self.filename or _default_filename(self.path, self.url)
         object.__setattr__(self, "filename", filename)
         object.__setattr__(self, "media_type", self.media_type or guess_media_type(filename))
@@ -112,6 +128,8 @@ class ResolvedFile:
     filename: str
     media_type: str
     data: bytes
+    document_type: Optional[str] = None
+    document_id: Optional[str] = None
 
 
 def _default_filename(path: Optional[str], url: Optional[str]) -> str:
@@ -137,11 +155,13 @@ def guess_media_type(filename: Optional[str]) -> str:
     return guessed or _DEFAULT_MEDIA_TYPE
 
 
-def to_parts(value: PartsInput, *, what: str) -> List[Part]:
+def to_parts(value: PartsInput, *, what: str, documents: bool = False) -> List[Part]:
     """Turn a string, a part, or a list of them into a list of parts.
 
     Raises InvalidInputError for an empty list or an item that is not a
-    string, `TextPart` or `FilePart`.
+    string, `TextPart` or `FilePart`. Unless `documents` (memories.create and
+    batch_create), also for a `FilePart` carrying `document_type` or
+    `document_id`: the chat routes take images only.
     """
     if isinstance(value, (str, TextPart, FilePart)):
         items: Sequence[Any] = [value]
@@ -158,6 +178,13 @@ def to_parts(value: PartsInput, *, what: str) -> List[Part]:
         if isinstance(item, str):
             parts.append(TextPart(item))
         elif isinstance(item, (TextPart, FilePart)):
+            if (not documents and isinstance(item, FilePart)
+                    and (item.document_type is not None or item.document_id is not None)):
+                raise InvalidInputError(
+                    f"{what}[{i}] carries document_type or document_id, which only "
+                    "memories.create takes. Messages take images only; send the "
+                    "document with memories.create(document=FilePart(...))."
+                )
             parts.append(item)
         else:
             raise InvalidInputError(
@@ -228,7 +255,8 @@ async def resolve_file(part: FilePart, *, max_bytes: int = MAX_FILE_BYTES) -> Re
         raise InvalidInputError(
             f"{filename} is {len(data)} bytes; the limit is {max_bytes} bytes per file"
         )
-    return ResolvedFile(filename=filename, media_type=media_type, data=data)
+    return ResolvedFile(filename=filename, media_type=media_type, data=data,
+                        document_type=part.document_type, document_id=part.document_id)
 
 
 def _read_path(path: str, max_bytes: int) -> bytes:
@@ -323,11 +351,15 @@ def inline_wire_parts(resolved: Sequence[Union[TextPart, ResolvedFile]]) -> List
 
 def multipart_wire_parts(
     resolved: Sequence[Union[TextPart, ResolvedFile]],
+    *,
+    field_prefix: str = "file_",
 ) -> Tuple[List[Dict[str, str]], Dict[str, Tuple[str, bytes, str]]]:
     """Manifest parts plus the form files they point at.
 
     Each file part names its form field, ``file_0``, ``file_1`` and so on in
-    order of appearance, and the bytes travel in that field.
+    order of appearance (counting files only), and the bytes travel in that
+    field. A batch item passes ``field_prefix="file_<item>_"``. A file's
+    ``document_type`` and ``document_id`` are in its part only when set.
     """
     manifest: List[Dict[str, str]] = []
     files: Dict[str, Tuple[str, bytes, str]] = {}
@@ -335,13 +367,18 @@ def multipart_wire_parts(
         if isinstance(p, TextPart):
             manifest.append({"type": "text", "text": p.text})
         else:
-            field = f"file_{len(files)}"
-            manifest.append({
+            field = f"{field_prefix}{len(files)}"
+            part = {
                 "type": "file",
                 "field": field,
                 "filename": p.filename,
                 "media_type": p.media_type,
-            })
+            }
+            if p.document_type is not None:
+                part["document_type"] = p.document_type
+            if p.document_id is not None:
+                part["document_id"] = p.document_id
+            manifest.append(part)
             files[field] = (p.filename, p.data, p.media_type)
     return manifest, files
 

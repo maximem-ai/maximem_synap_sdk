@@ -22,6 +22,21 @@ verbatim to `synap-cloud`, which owns auth.
 | `list_recent_memories` | broad `/v1/context/.../fetch` (no query) | Debug / "test my memory". Same scoping rules. |
 | `check_memory_status` | `GET /api/v1/memories/status/{id}` | Takes no scope ids: the `ingestion_id` already identifies the write. |
 
+### Agent query and navigation tools (off by default)
+
+Four more tools in two pairs, each listed only on a deployment that switches its flag on: `synap_describe` and `synap_query` with `SYNAP_KNOWLEDGE_QUERY=true`, `synap_document_index` and `synap_document_read` with `SYNAP_DOCS_NAVIGATION=true`. They need a Pro plan or above.
+
+**This switch is the deployment's, and it is separate from the API's per-instance flags** (`SYNAP_KNOWLEDGE_QUERY_INSTANCES`, `SYNAP_DOCS_NAVIGATION_INSTANCES`), which this server cannot see. Turn a pair on here only where the API has the matching flag on, or the tools are listed and every call fails. A `404` from the API is reported to the agent as "not enabled for this instance", naming the flag. `recall_context` stays the search tool.
+
+| Tool | REST operation | Notes |
+|---|---|---|
+| `synap_describe` | `GET /api/v1/knowledge/describe` | Call first: sources, document counts, the entity and fact types a query accepts. |
+| `synap_query` | `POST /api/v1/knowledge/query` | Structured request, never query text. Answers carry `total`, `complete` and `coverage`; the description tells the agent to report coverage. |
+| `synap_document_index` | `GET /api/v1/documents/{key}/index` | Title, summary and section tree. |
+| `synap_document_read` | `GET /api/v1/documents/{key}/read` | One `section_key` or `pages` (`3-5`), at most 20 pages or 8,000 tokens. |
+
+All four take `user_id`, `customer_id` and `scope` under the same contract below; a document the caller cannot see is a 404.
+
 ## Scoping: one contract, two modes
 
 The REST API enforces this. It is not advice, and it has been live on production

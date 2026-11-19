@@ -26,7 +26,8 @@ Error policy:
 
 import asyncio
 import json as _json
-from typing import Annotated, Optional
+import re
+from typing import Annotated, Any, Optional
 
 from pydantic import Field
 
@@ -36,8 +37,12 @@ from .client import (
     CustomerIdNotAcceptedError,
     SynapAPIError,
     create_memory,
+    document_index,
+    document_read,
     fetch_context,
     get_ingestion_status,
+    knowledge_describe,
+    knowledge_query,
     scope_for,
 )
 from .config import settings
@@ -241,7 +246,31 @@ def _format_context(data: dict) -> str:
             if content:
                 # bucket[:-1]: facts -> fact, preferences -> preference, etc.
                 lines.append(f"- ({bucket[:-1]}) {content}")
+    # D166/D167: document items, each with the citation an agent opens it by
+    # (synap_document_index / synap_document_read). Absent for a chat-only
+    # instance, so its lines are exactly the ones above.
+    for bucket, label in (("passages", "passage"), ("records", "record"), ("fetched", "fetched")):
+        for item in ctx.get(bucket, []) or []:
+            content = item.get("content") if isinstance(item, dict) else str(item)
+            if content:
+                cite = _format_citation(item.get("citation") if isinstance(item, dict) else None)
+                lines.append(f"- ({label}) {content}{cite}")
     return "\n".join(lines)
+
+
+def _format_citation(citation) -> str:
+    if not isinstance(citation, dict):
+        return ""
+    parts = []
+    if citation.get("document_key"):
+        parts.append(f"document_key: {citation['document_key']}")
+    if citation.get("title"):
+        parts.append(f"title: {citation['title']}")
+    if citation.get("section_path"):
+        parts.append("section: " + " > ".join(str(s) for s in citation["section_path"]))
+    if citation.get("page") is not None:
+        parts.append(f"page: {citation['page']}")
+    return f" [{'; '.join(parts)}]" if parts else ""
 
 
 # Annotated aliases, so all four tools describe the same field the same way.
@@ -367,3 +396,228 @@ def register(mcp) -> None:
         except SynapAPIError as exc:
             return _soft_recall_error(exc)
         return _format_context(data) or "No memories yet."
+
+
+# ---------------------------------------------------------------- navigation (D166, D167)
+#
+# Four more tools. synap_describe and synap_query are registered only where the
+# deployment set SYNAP_KNOWLEDGE_QUERY (config.knowledge_query), synap_document_index
+# and synap_document_read only where it set SYNAP_DOCS_NAVIGATION
+# (config.docs_navigation): the API's own flags are per instance, so the deployment
+# switches a pair on only where the API has it on (T98). `recall_context` stays the search tool; these are for the
+# questions search answers badly: a complete filtered set (describe, then query) and
+# a document opened section by section (index, then read). Errors are hard (ERROR:),
+# never a benign empty answer: an agent told "nothing found" when the call was refused
+# would report a wrong "none" to its user.
+
+DESCRIBE_DESC = (
+    "Call this FIRST, before synap_query: it lists what Synap knows in this scope. It "
+    "returns the sources, document counts by type, and the entity and fact types "
+    "(with their typed properties and relations) that synap_query accepts as target, "
+    "filters and relations. Use recall_context to search; use this to learn what can "
+    "be asked as a structured question. " + SCOPE_CONTRACT
+)
+QUERY_DESC = (
+    "Ask a structured question over the facts and entities extracted from documents "
+    "and get a COMPLETE filtered set, a count, or counts grouped by a property, not a "
+    "ranked top-k: use it for 'list every', 'how many' and filter questions (every "
+    "contract with Acme expiring before March). Call synap_describe first for the "
+    "valid target, property and relation names. Send a structured request, never "
+    "question text. Every answer carries total, complete (false means the row cap cut "
+    "the set: page with cursor) and coverage (documents in scope not yet processed or "
+    "only lightly extracted): ALWAYS report coverage to the user, for example '14 "
+    "found; 3 contracts still processing', and never present a result as complete "
+    "when complete is false or coverage shows gaps. For open-ended search use "
+    "recall_context instead. " + SCOPE_CONTRACT
+)
+INDEX_DESC = (
+    "Open a document's index: its title, summary and section tree, each section with "
+    "section_key, heading, level and page range. Use it to check a citation or to find "
+    "where to read; then call synap_document_read with a section_key. Takes the "
+    "document_key from a recall_context citation or a synap_query result. Pass the "
+    "same user_id and customer_id the document is read at: a document you cannot see "
+    "is reported as not found. " + SCOPE_CONTRACT
+)
+READ_DESC = (
+    "Read one section or one page range of a document, with its citation. Pass exactly "
+    "one of section_key (from synap_document_index) or pages ('3-5'). At most 20 pages "
+    "or 8,000 tokens per call; a larger request is refused, so ask for less. If the "
+    "document is still being processed, try again shortly. Pass the same user_id and "
+    "customer_id the document is read at. " + SCOPE_CONTRACT
+)
+
+KNOWLEDGE_FLAG = "SYNAP_KNOWLEDGE_QUERY"
+NAVIGATION_FLAG = "SYNAP_DOCS_NAVIGATION"
+
+
+def _error_code(detail: str) -> str:
+    """The server's machine code from an error body, or ''."""
+    try:
+        body = _json.loads(detail)
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    inner = body.get("detail")
+    inner = inner if isinstance(inner, dict) else {}
+    return str(body.get("error") or inner.get("code") or inner.get("error") or "")
+
+
+def _describe_navigation_error(exc: SynapAPIError, action: str, *, document: bool,
+                               flag: str) -> str:
+    """Navigation errors are never soft. A 404 is either the feature's flag being off
+    for this instance or, for a document, one the caller cannot see: the server answers
+    the same on purpose (D93), so the message names both, and the flag, so the agent
+    does not guess."""
+    not_enabled = f"this feature ({flag}) is not enabled for this instance"
+    code = _error_code(exc.detail)
+    if exc.status == 404:
+        if code == "document_not_ready":
+            return (
+                "ERROR: the document is still being processed. Try again shortly."
+            )
+        if document:
+            return (
+                f"ERROR: not found while {action}. Either the document does not exist or "
+                "you cannot see it in this scope (check user_id and customer_id), or "
+                f"{not_enabled}."
+            )
+        return f"ERROR: {not_enabled} (status 404)."
+    if exc.status == 403 and code == "feature_not_in_plan":
+        return (
+            f"ERROR: this workspace's plan does not include this feature while {action} "
+            f"(Pro and up). {_server_message(exc.detail)}"
+        )
+    if exc.status == 422:
+        return f"ERROR: the request was rejected while {action}. {_server_message(exc.detail)}"
+    if exc.status == 503 and code == "pricing_unavailable":
+        return f"ERROR: this feature is unavailable while {action}: no price is configured."
+    if exc.status == 504:
+        return (
+            f"ERROR: the query timed out while {action}; nothing partial is returned. "
+            "Narrow it with a filter and try again."
+        )
+    return _describe_api_error(exc, action)
+
+
+_PAGES = re.compile(r"^(\d+)-(\d+)$")
+
+
+ScopeArg = Annotated[
+    Optional[dict[str, str]],
+    Field(description="The scope path as level to id, e.g. {\"customer\": \"acme\"}. "
+                      "Usually leave out; user_id and customer_id are enough."),
+]
+
+
+async def _run(coro, action: str, *, document: bool, flag: str) -> str:
+    try:
+        data = await coro
+    except MissingTokenError as exc:
+        return f"ERROR: {exc}"
+    except CustomerIdNotAcceptedError as exc:
+        return f"ERROR: {exc} Retry this call with user_id only."
+    except SynapAPIError as exc:
+        return _describe_navigation_error(exc, action, document=document, flag=flag)
+    return _json.dumps(data, ensure_ascii=False)
+
+
+def register_knowledge(mcp) -> None:
+    """Attach synap_describe and synap_query (behind SYNAP_KNOWLEDGE_QUERY)."""
+
+    @mcp.tool(description=DESCRIBE_DESC)
+    async def synap_describe(
+        user_id: UserIdArg = None, customer_id: CustomerIdArg = None, scope: ScopeArg = None
+    ) -> str:
+        return await _run(
+            knowledge_describe(user_id=user_id, customer_id=customer_id, scope=scope),
+            "describing what is known", document=False, flag=KNOWLEDGE_FLAG,
+        )
+
+    @mcp.tool(description=QUERY_DESC)
+    async def synap_query(
+        target: Annotated[str, Field(description="An entity or fact type from synap_describe, "
+                                                 "e.g. \"Obligation\".")],
+        where: Annotated[Optional[dict[str, Any]], Field(description=(
+            "Property to a value, or to {eq|ne|in|before|after|between|gt|lt|contains|exists: "
+            "value}, e.g. {\"status\": \"open\", \"due_at\": {\"before\": \"2027-03-01\"}}."))] = None,
+        related: Annotated[Optional[dict[str, Any]], Field(description=(
+            "Relation to a filter on the node at the other end; nesting is a further hop "
+            "(at most 2), e.g. {\"COUNTERPARTY\": {\"type\": \"Organization\", "
+            "\"name\": \"Acme\"}}."))] = None,
+        as_of: Annotated[Optional[str], Field(description=(
+            "An ISO date or datetime; current versions only when unset."))] = None,
+        document_ids: Annotated[Optional[list[str]], Field(description=(
+            "Only facts from these documents."))] = None,
+        aggregate: Annotated[Optional[dict[str, Any]], Field(description=(
+            "{\"count\": true} or {\"group_by\": \"<property>\"}."))] = None,
+        sort: Annotated[Optional[list[dict[str, str]]], Field(description=(
+            "[{\"property\": ..., \"order\": \"asc\"|\"desc\"}]."))] = None,
+        limit: Annotated[Optional[int], Field(description=(
+            "Rows per page, at most 500 (default 100)."))] = None,
+        cursor: Annotated[Optional[str], Field(description=(
+            "The previous answer's next_cursor, to get the next page."))] = None,
+        user_id: UserIdArg = None,
+        customer_id: CustomerIdArg = None,
+        scope: ScopeArg = None,
+    ) -> str:
+        body: dict[str, Any] = {"target": target}
+        for key, value in (
+            ("where", where), ("related", related), ("as_of", as_of),
+            ("document_ids", document_ids), ("aggregate", aggregate), ("sort", sort),
+            ("limit", limit), ("cursor", cursor), ("user_id", user_id),
+            ("customer_id", customer_id), ("scope", scope),
+        ):
+            if value is not None:
+                body[key] = value
+        return await _run(knowledge_query(body), "running the query", document=False,
+                          flag=KNOWLEDGE_FLAG)
+
+
+def register_navigation(mcp) -> None:
+    """Attach synap_document_index and synap_document_read (behind
+    SYNAP_DOCS_NAVIGATION)."""
+
+    @mcp.tool(description=INDEX_DESC)
+    async def synap_document_index(
+        document_key: Annotated[str, Field(description=(
+            "The document's key, from a citation or a query result."))],
+        version: Annotated[Optional[int], Field(description=(
+            "A version other than the current one."))] = None,
+        user_id: UserIdArg = None,
+        customer_id: CustomerIdArg = None,
+        scope: ScopeArg = None,
+    ) -> str:
+        return await _run(
+            document_index(document_key, version=version, user_id=user_id,
+                           customer_id=customer_id, scope=scope),
+            "opening the document index", document=True, flag=NAVIGATION_FLAG,
+        )
+
+    @mcp.tool(description=READ_DESC)
+    async def synap_document_read(
+        document_key: Annotated[str, Field(description=(
+            "The document's key, from a citation or a query result."))],
+        section_key: Annotated[Optional[str], Field(description=(
+            "A section_key from synap_document_index. Exactly one of section_key and "
+            "pages."))] = None,
+        pages: Annotated[Optional[str], Field(description=(
+            "A page range as from-to, e.g. \"3-5\" (at most 20 pages)."))] = None,
+        user_id: UserIdArg = None,
+        customer_id: CustomerIdArg = None,
+        scope: ScopeArg = None,
+    ) -> str:
+        # Refused here, before any request, so a malformed call is an ERROR the model
+        # can fix and costs nothing.
+        if (section_key is None) == (pages is None):
+            return "ERROR: pass exactly one of section_key or pages."
+        if pages is not None:
+            m = _PAGES.match(pages.strip())
+            if m is None or int(m.group(1)) < 1 or int(m.group(2)) < int(m.group(1)):
+                return "ERROR: pages is from-to, whole page numbers from 1, for example 3-5."
+        return await _run(
+            document_read(document_key, section_key=section_key,
+                          pages=None if pages is None else pages.strip(), user_id=user_id,
+                          customer_id=customer_id, scope=scope),
+            "reading the document", document=True, flag=NAVIGATION_FLAG,
+        )

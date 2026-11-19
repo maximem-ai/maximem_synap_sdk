@@ -457,6 +457,41 @@ def test_format_context_context_is_none():
     assert result == ""
 
 
+def test_format_context_chat_only_output_is_unchanged():
+    """D166/D167: with no document buckets the lines are exactly today's."""
+    data = {"context": {"facts": [{"content": "engineer"}],
+                        "preferences": [{"content": "dark mode"}],
+                        "episodes": [{"content": "went to Goa"}]}}
+    assert _format_context(data) == (
+        "- (fact) engineer\n- (preference) dark mode\n- (episode) went to Goa")
+
+
+def test_format_context_prints_document_items_with_their_citation():
+    """D166/D167: passages, records and fetched items come through, each with the
+    document_key an agent passes to synap_document_index / synap_document_read."""
+    data = {"context": {
+        "facts": [{"content": "engineer"}],
+        "passages": [{"content": "Refunds within 30 days.", "kind": "passage",
+                      "citation": {"document_key": "dk-1", "title": "Refund policy",
+                                   "section_path": ["Policy", "Refunds"], "page": 4}}],
+        "records": [{"content": "Invoice 42: $300", "kind": "record",
+                     "citation": {"document_key": "dk-2"}}],
+        "fetched": [{"content": "Ticket 9 is open", "kind": "fetched",
+                     "citation": {"document_key": "dk-3", "page": None}}],
+    }}
+    lines = _format_context(data).split("\n")
+    assert lines[0] == "- (fact) engineer"
+    assert lines[1] == ("- (passage) Refunds within 30 days. [document_key: dk-1; "
+                        "title: Refund policy; section: Policy > Refunds; page: 4]")
+    assert lines[2] == "- (record) Invoice 42: $300 [document_key: dk-2]"
+    assert lines[3] == "- (fetched) Ticket 9 is open [document_key: dk-3]"
+
+
+def test_format_context_document_item_without_citation():
+    data = {"context": {"passages": [{"content": "A passage"}]}}
+    assert _format_context(data) == "- (passage) A passage"
+
+
 # ---------------------------------------------------------------------------
 # The identifier contract
 # ---------------------------------------------------------------------------

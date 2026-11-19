@@ -32,7 +32,7 @@ class RetryPolicy:
         self.base_delay_ms = base_delay_ms
         self.max_delay_ms = max_delay_ms
 
-    async def execute(self, operation: Callable) -> Any:
+    async def execute(self, operation: Callable, *, idempotent: bool = True) -> Any:
         """Execute operation with exponential backoff retry.
 
         Only retries on SynapTransientError. All other exceptions
@@ -40,6 +40,11 @@ class RetryPolicy:
 
         Args:
             operation: Async callable (zero-argument) to execute
+            idempotent: Whether running ``operation`` twice is harmless. ``True`` (the
+                default, as before) retries any SynapTransientError. Pass ``False`` for a
+                create or other write: an error whose outcome is unknown (``outcome_unknown``:
+                a gateway 504, a read timeout) is then raised at once, since the first
+                attempt may have been processed and a retry could store and bill it twice.
 
         Returns:
             Result of operation
@@ -54,6 +59,8 @@ class RetryPolicy:
                 return await operation()
             except SynapTransientError as e:
                 last_error = e
+                if not idempotent and e.outcome_unknown:
+                    break
                 if attempt >= self.max_retries:
                     break
                 delay_ms = min(

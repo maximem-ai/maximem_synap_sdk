@@ -53,6 +53,10 @@ mcp = FastMCP(
 # `version` argument, so set it on the wrapped server directly.
 mcp._mcp_server.version = __version__
 tools.register(mcp)
+if settings.knowledge_query:
+    tools.register_knowledge(mcp)
+if settings.docs_navigation:
+    tools.register_navigation(mcp)
 
 # Streamable HTTP Starlette app; the MCP endpoint is mounted at /mcp.
 app = mcp.streamable_http_app()

@@ -32,8 +32,10 @@ violation is raised as CustomerIdNotAcceptedError before any request is sent.
 """
 
 import hashlib
+import json as _json
 import time
 from typing import Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -128,7 +130,8 @@ def _auth_headers() -> dict:
 
 
 async def _request(
-    method: str, path: str, *, timeout: float, json: dict | None = None
+    method: str, path: str, *, timeout: float, json: dict | None = None,
+    params: dict | None = None,
 ) -> dict:
     """Issue an authenticated request, normalizing every failure to SynapAPIError.
 
@@ -140,7 +143,9 @@ async def _request(
         async with httpx.AsyncClient(
             base_url=settings.synap_api_url, timeout=timeout
         ) as client:
-            resp = await client.request(method, path, json=json, headers=headers)
+            resp = await client.request(
+                method, path, json=json, params=params, headers=headers
+            )
     except httpx.TimeoutException as exc:
         raise SynapAPIError(TIMEOUT_STATUS, f"timeout: {exc}") from exc
     except httpx.HTTPError as exc:
@@ -333,4 +338,73 @@ async def get_ingestion_status(ingestion_id: str) -> dict:
         "GET",
         f"/api/v1/memories/status/{ingestion_id}",
         timeout=settings.recall_timeout_s,
+    )
+
+
+# ---------------------------------------------------------------- navigation (D166, D167)
+#
+# Four reads behind SYNAP_DOCS_NAVIGATION. Each forwards the caller's own scope ids
+# untouched (the server applies fetch's scope rule to them), after the same B2C
+# check the other tools make on a customer_id.
+
+
+def _scope_params(user_id: str | None, customer_id: str | None, scope: dict | None) -> dict:
+    params: dict = {}
+    if user_id:
+        params["user_id"] = user_id
+    if customer_id:
+        params["customer_id"] = customer_id
+    if scope:
+        # A query string cannot carry a map: it travels as JSON, as the SDKs send it.
+        params["scope"] = _json.dumps(scope, separators=(",", ":"))
+    return params
+
+
+async def knowledge_describe(
+    *, user_id: str | None = None, customer_id: str | None = None, scope: dict | None = None
+) -> dict:
+    await assert_customer_id_allowed(customer_id, where="GET /api/v1/knowledge/describe")
+    return await _request(
+        "GET", "/api/v1/knowledge/describe", timeout=settings.recall_timeout_s,
+        params=_scope_params(user_id, customer_id, scope),
+    )
+
+
+async def knowledge_query(body: dict) -> dict:
+    """``body`` is the structured request, with only the fields the caller set."""
+    await assert_customer_id_allowed(
+        body.get("customer_id"), where="POST /api/v1/knowledge/query"
+    )
+    return await _request(
+        "POST", "/api/v1/knowledge/query", json=body, timeout=settings.navigation_timeout_s
+    )
+
+
+async def document_index(
+    document_key: str, *, version: int | None = None, user_id: str | None = None,
+    customer_id: str | None = None, scope: dict | None = None,
+) -> dict:
+    await assert_customer_id_allowed(customer_id, where="GET /api/v1/documents/{key}/index")
+    params = _scope_params(user_id, customer_id, scope)
+    if version is not None:
+        params = {"version": str(version), **params}
+    return await _request(
+        "GET", f"/api/v1/documents/{quote(document_key, safe='')}/index",
+        timeout=settings.recall_timeout_s, params=params,
+    )
+
+
+async def document_read(
+    document_key: str, *, section_key: str | None = None, pages: str | None = None,
+    user_id: str | None = None, customer_id: str | None = None, scope: dict | None = None,
+) -> dict:
+    await assert_customer_id_allowed(customer_id, where="GET /api/v1/documents/{key}/read")
+    params = _scope_params(user_id, customer_id, scope)
+    if section_key is not None:
+        params = {"section_key": section_key, **params}
+    if pages is not None:
+        params = {"pages": pages, **params}
+    return await _request(
+        "GET", f"/api/v1/documents/{quote(document_key, safe='')}/read",
+        timeout=settings.navigation_timeout_s, params=params,
     )
