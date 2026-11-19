@@ -224,11 +224,12 @@ describe('SynapClient', () => {
         .toBe('2026-08-12T10:00:00+00:00');
     });
 
-    it('rejects an invalid document_type or mode before sending', () => {
-      // Python's enum coercion raises before any request goes out. Passing a
-      // typo through would either 500 or silently take a different path.
-      expect(() => buildCreateBody({ document: 'x', document_type: 'conversation' }))
-        .toThrow(/Invalid document_type/);
+    it('sends document_type as a plain string and rejects an invalid mode before sending', () => {
+      // D8: document_type is a plain string in both SDKs; the server matches
+      // free text against the type descriptions. mode is still an enum, and
+      // Python's coercion raises before any request goes out.
+      expect(buildCreateBody({ document: 'x', document_type: 'conversation' })['document_type'])
+        .toBe('conversation');
       expect(() => buildCreateBody({ document: 'x', mode: 'accurate' }))
         .toThrow(/Invalid mode/);
     });

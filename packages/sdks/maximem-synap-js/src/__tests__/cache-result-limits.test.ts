@@ -26,6 +26,8 @@ const corpus = JSON.parse(
   lookup_cases: {
     name: string; matcher: 'semantic' | 'bm25'; search_query: string[]; max_items: number;
     per_query: number | null; served: string[] | null; matched_queries: Record<string, string[]> | null;
+    /** The fetch's document filters (D120), or null. */
+    filters?: Record<string, string[]> | null;
   }[];
 };
 
@@ -72,6 +74,7 @@ describe('lookups, against the Python corpus', () => {
     const cache = await cacheFor(c.matcher);
     const attempt = await tryServeFromCache(cache, 'user', {
       searchQuery: c.search_query, entityId: 'ana', clientId: 'cli', maxResultsPerQuery: c.per_query,
+      filters: c.filters ?? null,
     }, c.max_items);
     const served = attempt.hit === null ? null : Object.values(attempt.hit.itemsByType).flat();
     // Python returns items in rank order; JS groups by type in rank order.

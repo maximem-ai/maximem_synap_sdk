@@ -56,6 +56,17 @@ from .models.errors import (
     InstanceBuildFailedError,
     InstanceNotReadyError,
     TransientError,
+    AmbiguousDocument,
+    AmbiguousDocumentError,
+    BatchTooLargeError,
+    DocumentIdInUseError,
+    FeatureNotInPlanError,
+    FileTooLargeError,
+    FiltersNeedQueryError,
+    InsufficientCreditsForDocumentError,
+    MissingScopeError,
+    UnsupportedFormatError,
+    UrlNotFetchedError,
 )
 from .scoping import CustomerIdNotAcceptedError
 from .scope_ladder import ScopeAddress, ScopeLadder, ScopeLadderError, ScopeLevel
@@ -153,6 +164,18 @@ __all__ = [
     "SessionExpiredError",
     "ListeningAlreadyActiveError",
     "ListeningNotActiveError",
+    # Documents (tech spec, API and wire contract, Errors)
+    "AmbiguousDocument",
+    "AmbiguousDocumentError",
+    "BatchTooLargeError",
+    "DocumentIdInUseError",
+    "FeatureNotInPlanError",
+    "FileTooLargeError",
+    "FiltersNeedQueryError",
+    "InsufficientCreditsForDocumentError",
+    "MissingScopeError",
+    "UnsupportedFormatError",
+    "UrlNotFetchedError",
     
     # Backward compatibility error aliases
     "SDKError",

@@ -77,7 +77,7 @@ describe('the request', () => {
 describe('parsing, against the Python corpus', () => {
   it.each(corpus.parse_cases)('$name', (c) => {
     const ctx = applyResponseShape(fixture(c.fixture), c.response_shape);
-    expect({
+    const got: Record<string, unknown> = {
       items: summary(ctx.items),
       fact_ids: ids(ctx.facts),
       preference_ids: ids(ctx.preferences),
@@ -85,7 +85,20 @@ describe('parsing, against the Python corpus', () => {
       emotion_ids: ids(ctx.emotions),
       temporal_event_ids: ids(ctx.temporal_events),
       excerpt_ids: ids(ctx.excerpts),
-    }).toEqual(c.expected);
+    };
+    // Documents, only when present, as Python records them: ranked items that
+    // name their kind (D123), and by-type passages, records, fetched (T2).
+    const kinds = (ctx.items ?? [])
+      .filter((it) => it['kind'] !== undefined && it['kind'] !== null)
+      .map((it) => [it.id, it['kind'], it['citation'] ?? null]);
+    if (kinds.length > 0) got['documents'] = kinds;
+    for (const key of ['passages', 'records', 'fetched']) {
+      const list = (ctx as Record<string, unknown>)[key] as RawContextItem[] | undefined;
+      if (Array.isArray(list) && list.length > 0) {
+        got[key] = list.map((it) => [it.id, it['citation'] ?? null]);
+      }
+    }
+    expect(got).toEqual(c.expected);
   });
 
   it('a by-type response is returned untouched', () => {

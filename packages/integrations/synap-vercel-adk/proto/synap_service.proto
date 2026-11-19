@@ -371,6 +371,24 @@ message ContextItemProto {
   // query is about. Empty when the memory has no date, or from a server that
   // predates this.
   string date_prefix = 18;
+  // Documents (T22). What the item is and which document it cites, so the SDK
+  // cache can answer a fetch filtered by kinds, document_types or document_ids
+  // locally and serve the citation on a hit. All empty for a memory, and from
+  // a server that predates them; old SDKs ignore them, as they do date_prefix.
+  //
+  // The caller's own id of the cited document (T31), matched by document_ids.
+  string document_id = 19;
+  // "memory", "passage", "record" or "fetched" (D123). Empty means memory.
+  string kind = 20;
+  // The cited document's resolved type, matched by document_types.
+  string document_type = 21;
+  // The server's stable address of the document (T12): what an app passes to
+  // documents.original when a user opens the source.
+  string document_key = 22;
+  // The item's citation as the ranked and by-type responses carry it
+  // (document_key, document_id, version, section_path, page, url, anchor,
+  // fetched_at, added_at), as JSON. Empty for a memory.
+  string citation_json = 23;
 }
 
 // =============================================================================

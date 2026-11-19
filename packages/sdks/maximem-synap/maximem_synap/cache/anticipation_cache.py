@@ -1,5 +1,6 @@
 """In-memory TTL cache for context bundles pushed over gRPC."""
 
+import json
 import logging
 import math
 import os
@@ -330,9 +331,24 @@ def as_served(item_dict: Dict, matched_queries: Optional[List[str]] = None) -> D
     none: a server that predates the field sends "". The ``date_prefix`` key
     itself is not handed out.
     """
-    if not isinstance(item_dict, dict) or ("date_prefix" not in item_dict and matched_queries is None):
+    raw_citation = item_dict.get("citation_json") if isinstance(item_dict, dict) else None
+    cited = isinstance(raw_citation, str) and bool(raw_citation)
+    if not isinstance(item_dict, dict) or (
+        "date_prefix" not in item_dict and not cited and matched_queries is None
+    ):
         return item_dict
     out = dict(item_dict)
+    # A passage's citation travels as JSON in the proto (T22); a hit serves it
+    # as the object the server's own answer carries. An empty one is left as
+    # it is (the gRPC reader never stores one).
+    if cited:
+        del out["citation_json"]
+        try:
+            citation = json.loads(raw_citation)
+        except ValueError:
+            citation = None
+        if isinstance(citation, dict):
+            out["citation"] = citation
     # Served inside the content, not beside it: a caller seeing both could add it twice.
     raw = out.pop("date_prefix", None)
     label = raw if isinstance(raw, str) else ""
@@ -342,6 +358,30 @@ def as_served(item_dict: Dict, matched_queries: Optional[List[str]] = None) -> D
     if label and not content.startswith(label):
         out["content"] = label + content
     return out
+
+
+def passes_filters(item_dict: Dict, filters: Optional[Dict[str, Any]]) -> bool:
+    """Whether a cached item answers a fetch's document filters (D120).
+
+    An item with no ``kind`` is a memory: everything a server sent before
+    documents. ``document_types`` and ``document_ids`` match the item's own
+    ``document_type`` and ``document_id`` (the caller's id, T31), so a memory,
+    which has neither, never matches them.
+    """
+    if not filters:
+        return True
+    if not isinstance(item_dict, dict):
+        return False
+    kinds = filters.get("kinds")
+    if kinds is not None and (item_dict.get("kind") or "memory") not in kinds:
+        return False
+    types = filters.get("document_types")
+    if types is not None and item_dict.get("document_type") not in types:
+        return False
+    ids = filters.get("document_ids")
+    if ids is not None and item_dict.get("document_id") not in ids:
+        return False
+    return True
 
 
 class AnticipationCache:
@@ -673,8 +713,16 @@ class AnticipationCache:
         client_id: Optional[str] = None,
         scope_rung: Optional[str] = None,
         max_results_per_query: Optional[int] = None,
+        filters: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict]:
         """Find cached items matching the query.
+
+        ``filters`` holds a fetch's document filters (``kinds``,
+        ``document_types``, ``document_ids``). Items that do not pass are
+        dropped with the scope filter, before scoring decides a hit and before
+        the per-query share, so a filtered hit is not cut short. A fetch with
+        ``as_of`` is never answered from here: a bundle holds current versions
+        only. The bundle fingerprint and pushed evictions are P12's (T56).
 
         ``max_items`` is the caller's ``max_results``: a hit serves up to that
         many, as the server would. ``max_results_per_query`` gives each of
@@ -704,6 +752,9 @@ class AnticipationCache:
         caller named no rung, which is every caller today.
         """
         self._evict_expired()
+
+        if filters and filters.get("as_of") is not None:
+            return None
 
         if not self._entries or not self._items:
             logger.info(
@@ -746,6 +797,7 @@ class AnticipationCache:
             search_query, entity_id, conversation_id, max_items,
             customer_id=customer_id, client_id=client_id,
             scope_rung=scope_rung, per_query=max_results_per_query,
+            filters=filters or None,
         )
 
     def _item_lookup(
@@ -760,6 +812,7 @@ class AnticipationCache:
         scope_rung: Optional[str] = None,
         lexical_only: bool = False,
         per_query: Optional[int] = None,
+        filters: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict]:
         # Pre-build the telemetry skeleton — the hook fires on every exit
         # path. Most fields are filled below; we never reach `return None`
@@ -798,7 +851,7 @@ class AnticipationCache:
             return self._semantic_lookup(
                 search_query, query_tokens, hook_payload, entity_id, conversation_id,
                 max_items, customer_id=customer_id, client_id=client_id, scope_rung=scope_rung,
-                per_query=per_query)
+                per_query=per_query, filters=filters)
         if not query_tokens:
             hook_payload["exit_reason"] = "no_query_tokens"
             self._fire_lookup_hook(hook_payload)
@@ -889,6 +942,16 @@ class AnticipationCache:
                     "content_first_120": item.content[:120],
                     "bm25_score": round(score_f, 4),
                     "reason": "scope_filter_excluded",
+                }))
+                continue
+            if not passes_filters(item.item_dict, filters):
+                rejected_with_reason.append((score_f, {
+                    "item_index": idx,
+                    "bundle_id": item.bundle_id,
+                    "item_type": item.item_type,
+                    "content_first_120": item.content[:120],
+                    "bm25_score": round(score_f, 4),
+                    "reason": "document_filter_excluded",
                 }))
                 continue
             scored_items.append((score, item))
@@ -1064,6 +1127,7 @@ class AnticipationCache:
         client_id: Optional[str] = None,
         scope_rung: Optional[str] = None,
         per_query: Optional[int] = None,
+        filters: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict]:
         """Match by meaning: a lookup is a hit when an item's cosine to a query
         reaches ``min_cosine``, and the hit also serves the items at
@@ -1094,7 +1158,7 @@ class AnticipationCache:
             return self._item_lookup(
                 search_query, entity_id, conversation_id, max_items,
                 customer_id=customer_id, client_id=client_id, scope_rung=scope_rung, lexical_only=True,
-                per_query=per_query)
+                per_query=per_query, filters=filters)
 
         if query_tokens and (self._bm25_dirty or self._bm25 is None) and self._items:
             self._bm25 = BM25([item.tokens for item in self._items])
@@ -1133,6 +1197,13 @@ class AnticipationCache:
                     "item_index": idx, "bundle_id": item.bundle_id, "item_type": item.item_type,
                     "content_first_120": item.content[:120], "bm25_score": round(b, 4),
                     "cosine": None, "reason": "scope_filter_excluded",
+                }))
+                continue
+            if not passes_filters(item.item_dict, filters):
+                rejected.append((b, {
+                    "item_index": idx, "bundle_id": item.bundle_id, "item_type": item.item_type,
+                    "content_first_120": item.content[:120], "bm25_score": round(b, 4),
+                    "cosine": None, "reason": "document_filter_excluded",
                 }))
                 continue
             if item.vec is not None and item.vec_model == model and qvecs:

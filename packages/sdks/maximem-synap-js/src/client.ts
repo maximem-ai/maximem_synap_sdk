@@ -18,10 +18,10 @@ import { AuthenticationError, InvalidInputError } from './errors.js';
 import { getEnv } from './util/env.js';
 import { isLocalMode, localToken } from './local-mode.js';
 import { HttpTransport, type Credentials, type HttpTransportOptions } from './transport/http.js';
-import { fetchContext, responseShapeOf } from './context/fetch.js';
+import { documentFiltersOf, fetchContext, responseShapeOf } from './context/fetch.js';
 import { normalizeContextResponse } from './context/normalize.js';
 import {
-  AnticipationCache, type AnticipationCacheSnapshot,
+  AnticipationCache, type AnticipationCacheSnapshot, type DocumentFilters,
 } from './context/anticipation-cache.js';
 import { flattenContextItems, type FlatMemory } from './context/flatten.js';
 import {
@@ -32,6 +32,8 @@ import {
   createConversationNamespace, CompactionSubscribers, type ConversationNamespace,
 } from './conversation/interface.js';
 import { createDataInterface, type DataInterface } from './data/interface.js';
+import { createDocumentsInterface, type DocumentsInterface } from './documents/interface.js';
+import { createKnowledgeInterface, type KnowledgeInterface } from './knowledge/interface.js';
 import { createUserNamespace, type UserNamespace } from './user/interface.js';
 import { createCreditsNamespace, type CreditsNamespace } from './credits/interface.js';
 import { createMacaNamespace, type MacaNamespace } from './maca/interface.js';
@@ -244,6 +246,13 @@ export interface UnifiedFetchOptions {
   query_date?: string;
   /** A share of the response per search query. See FetchOptions.max_results_per_query. */
   max_results_per_query?: number;
+  /** Document filters, passed to every scope. See FetchOptions.kinds. */
+  kinds?: string[];
+  document_types?: string[];
+  document_ids?: string[];
+  as_of?: string | Date;
+  /** T54. See FetchOptions.source_kind_hint. */
+  source_kind_hint?: string;
   include_conversation_context?: boolean;
   scopes?: string[];
   include_scope_labels?: boolean;
@@ -306,6 +315,10 @@ export class SynapClient {
   readonly conversation!: ConversationNamespace;
   readonly memories!: MemoriesInterface;
   readonly data!: DataInterface;
+  /** List, read, delete and restore documents. Python: `sdk.documents`. */
+  readonly documents!: DocumentsInterface;
+  /** Describe and query facts and entities extracted from documents. Python: `sdk.knowledge`. */
+  readonly knowledge!: KnowledgeInterface;
   readonly credits!: CreditsNamespace;
   readonly maca!: MacaNamespace;
   readonly cache!: CacheNamespace;
@@ -431,6 +444,9 @@ export class SynapClient {
               (o['scope_path'] ?? o['scopePath']) as Record<string, string> | undefined,
             ),
             maxResultsPerQuery: (o['max_results_per_query'] ?? o['maxResultsPerQuery'] ?? null) as number | null,
+            // Kind, type and id filters run in the cache, before the per-query
+            // share (D120). as_of is never answered from it.
+            filters: documentFiltersOf(options) as DocumentFilters,
           },
           Number(o['max_results'] ?? o['maxResults'] ?? 10),
         );
@@ -597,6 +613,8 @@ export class SynapClient {
       }
       return cleared;
     });
+    this.documents = createDocumentsInterface(this.#transport);
+    this.knowledge = createKnowledgeInterface(this.#transport);
     this.credits = createCreditsNamespace(this.#transport);
     this.maca = createMacaNamespace(this.#transport);
     this.cache = createCacheNamespace(this.#anticipationCache);
@@ -973,9 +991,13 @@ export class SynapClient {
     // Up front, as Python does: a bad value inside a scope fetch would be an
     // InvalidInputError too, but only once a scope is queried.
     responseShapeOf({ response_shape: responseShape });
+    // Checked here, before the scopes run, so a refusal is thrown rather than
+    // lost with a dropped scope. Passed to every scope fetched.
+    const docFilters = documentFiltersOf(options as FetchOptions);
 
     const wants = (scope: string): boolean => scopes === undefined || scopes.includes(scope);
     const shared = {
+      ...docFilters,
       search_query: searchQuery,
       max_results: maxResults,
       types,

@@ -8,7 +8,7 @@
 
 import type { EndpointName } from '../transport/endpoints.js';
 import type { HttpTransport } from '../transport/http.js';
-import { InvalidInputError } from '../errors.js';
+import { FiltersNeedQueryError, InvalidInputError } from '../errors.js';
 import { RESPONSE_SHAPES, applyResponseShape } from './ranked.js';
 import { hasQuery } from './no-query.js';
 import type { FetchOptions, Json, RawContext } from './types.js';
@@ -33,6 +33,64 @@ function opt<T>(options: FetchOptions, snake: keyof FetchOptions, camel: keyof F
 export interface BuiltRequest {
   endpoint: EndpointName;
   body: Json;
+}
+
+/** What a context item can be (D123). Python: `ITEM_KINDS`. */
+export const ITEM_KINDS = ['memory', 'passage', 'record', 'fetched'] as const;
+
+/**
+ * The document filters a fetch names, checked, in wire order: empty when none
+ * is set, so the body and the cache lookup of a fetch without them are what
+ * they always were. Throws `FiltersNeedQueryError` for filters with no
+ * `search_query` (D185). Python: `document_filters`, same messages.
+ */
+export function documentFiltersOf(options: FetchOptions): Json {
+  const out: Json = {};
+  const lists: Array<[string, unknown]> = [
+    ['kinds', options.kinds],
+    ['document_types', opt<string[]>(options, 'document_types', 'documentTypes')],
+    ['document_ids', opt<string[]>(options, 'document_ids', 'documentIds')],
+  ];
+  for (const [name, value] of lists) {
+    if (value === undefined || value === null) continue;
+    if (!Array.isArray(value) || !value.every((v) => typeof v === 'string' && v !== '')) {
+      throw new InvalidInputError(`${name} must be a list of non-empty strings`);
+    }
+    out[name] = [...value];
+  }
+  const bad = ((out['kinds'] as string[] | undefined) ?? [])
+    .filter((k) => !(ITEM_KINDS as readonly string[]).includes(k));
+  if (bad.length > 0) {
+    throw new InvalidInputError(
+      `Invalid kinds [${bad.map((k) => `'${k}'`).join(', ')}]. Expected any of: ${ITEM_KINDS.join(', ')}`,
+    );
+  }
+  const asOf = opt<string | Date>(options, 'as_of', 'asOf');
+  if (asOf !== undefined && asOf !== null) {
+    if (asOf instanceof Date) out['as_of'] = asOf.toISOString();
+    else if (typeof asOf === 'string' && asOf.trim() !== '') out['as_of'] = asOf;
+    else throw new InvalidInputError('as_of must be an ISO-8601 string or a datetime');
+  }
+  const filtered = Object.keys(out).length > 0;
+  // T54: a hint tilts the source-kind weight (D122), so it is sent and keyed
+  // like the filters, but it filters nothing and needs no query.
+  const hint = opt<unknown>(options, 'source_kind_hint', 'sourceKindHint');
+  if (hint !== undefined && hint !== null) {
+    if (typeof hint !== 'string' || !(ITEM_KINDS as readonly string[]).includes(hint)) {
+      throw new InvalidInputError(
+        `Invalid source_kind_hint '${String(hint)}'. Expected one of: ${ITEM_KINDS.join(', ')}`,
+      );
+    }
+    out['source_kind_hint'] = hint;
+  }
+  if (filtered && !hasQuery(opt<unknown>(options, 'search_query', 'searchQuery'))) {
+    throw new FiltersNeedQueryError(
+      'kinds, document_types, document_ids and as_of narrow a search, so they ' +
+        'need a search_query. To read a document without one, use ' +
+        'documents.get (or knowledge.query to ask across documents).',
+    );
+  }
+  return out;
 }
 
 export function buildFetchRequest(scope: Scope, options: FetchOptions): BuiltRequest {
@@ -121,6 +179,8 @@ export function buildFetchRequest(scope: Scope, options: FetchOptions): BuiltReq
     case 'client':
       break;
   }
+  // Document filters (D123): only when set, last, as Python sends them.
+  Object.assign(body, documentFiltersOf(options));
 
   return { endpoint: ENDPOINT_BY_SCOPE[scope], body };
 }
@@ -301,6 +361,9 @@ export async function fetchContext(
   const { contextMode } = scopeOptionsOf(scope, options);
   const searchQuery = opt<unknown>(options, 'search_query', 'searchQuery');
   validateSearchQuery(searchQuery);
+  // Before the no-query answer and the cache, as Python checks them: filters
+  // without a query are refused, never answered with the profile (D185).
+  documentFiltersOf(options);
   // Summary mode is a different read: a caller profile and past-conversation
   // summaries, assembled by the server. A prefetched bundle holds neither, and
   // with no search query the cache answered it with the newest bundle, so the

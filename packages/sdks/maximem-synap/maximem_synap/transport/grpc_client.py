@@ -119,6 +119,22 @@ def _trailing_metadata(error: Any) -> Dict[str, str]:
     return out
 
 
+#: ContextItemProto fields 19 to 23 (T22), in the item dict under the same
+#: names. Each only when set, so an item without them is unchanged.
+_DOCUMENT_ITEM_FIELDS = ("document_id", "kind", "document_type", "document_key", "citation_json")
+
+
+def _document_item_fields(item: Any) -> Dict[str, str]:
+    names = type(item).DESCRIPTOR.fields_by_name
+    out: Dict[str, str] = {}
+    for name in _DOCUMENT_ITEM_FIELDS:
+        if name in names:
+            value = getattr(item, name)
+            if value:
+                out[name] = value
+    return out
+
+
 def _float_or_none(value: Any) -> Optional[float]:
     try:
         return float(value)
@@ -456,7 +472,11 @@ class GRPCTransport:
             return
         now = datetime.now(timezone.utc)
         # Unacknowledged first: an event written to the old stream is older
-        # than anything that piled up after it died.
+        # than anything that piled up after it died. All stamped now: the age
+        # limit is for an outage in THIS process, and a process that restarts
+        # after a crash must still send what the journal kept, however long the
+        # restart took (a refused event is no longer a reason to age them:
+        # the server acknowledges it and the SDK drops it on the error signal).
         for payload in unacked + queued:
             self._send_queue.append((now, payload))
         logger.info(
@@ -1283,7 +1303,26 @@ class GRPCTransport:
             # stream down for it dropped and rebuilt the connection on every
             # such event. A fatal server error ends the stream, which the read
             # loop already handles as server_close.
-            logger.warning(f"Server error signal (stream stays open): {reason}")
+            #
+            # When the error names an event (`metadata["event_id"]`) that event
+            # was refused for good, not held: it is dropped from the
+            # unacknowledged set so it is not replayed into the same refusal on
+            # every reconnect, and the caller is told in the log. (An SDK older
+            # than 0.5.20 reconnects on any error signal; the server
+            # acknowledges the refused event first, so there is nothing for it
+            # to replay.)
+            refused = dict(getattr(signal, "metadata", None) or {}).get("event_id")
+            if refused:
+                held = self._unacked.pop(refused, None)
+                self._journal.record_dropped(refused)
+                logger.warning(
+                    "Server refused event %s%s and it will not be retried: %s",
+                    refused,
+                    f" ({held[1].get('event_type')})" if held else "",
+                    reason,
+                )
+            else:
+                logger.warning(f"Server error signal (stream stays open): {reason}")
         else:
             logger.warning(f"Unknown signal type '{signal_type}': {reason}")
 
@@ -1491,6 +1530,12 @@ class GRPCTransport:
                         if "date_prefix" in type(item).DESCRIPTOR.fields_by_name
                         else ""
                     ),
+                    # What the item is and which document it cites (T22), so
+                    # the cache filters by kind, type and id and serves the
+                    # citation on a hit. Present only when the server set
+                    # them: a memory from any server carries none, so its
+                    # item is the dict it always was.
+                    **_document_item_fields(item),
                 }
                 for item in item_list.items
             ]

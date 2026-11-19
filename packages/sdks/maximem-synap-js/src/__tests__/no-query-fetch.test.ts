@@ -4,7 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SynapClient } from '../client.js';
 import { conversationStateContext, hasQuery, profileContext } from '../context/no-query.js';
-import type { Json } from '../context/types.js';
+import type { FetchOptions, Json } from '../context/types.js';
+import { documentFiltersOf } from '../context/fetch.js';
 
 /**
  * A fetch with no query, against the corpus captured from Python
@@ -23,6 +24,7 @@ const corpus = JSON.parse(
   query_cases: Array<{ search_query: unknown; expected: boolean }>;
   conversation_cases: Array<{ name: string; prompt: Json; conversation_id: string; expected: unknown }>;
   profile_cases: Array<{ name: string; profile: unknown; expected: unknown }>;
+  filter_cases: Array<{ args: Record<string, unknown>; raises: string | null; filters: Json | null }>;
 };
 
 describe('the rules, against the Python corpus', () => {
@@ -37,6 +39,21 @@ describe('the rules, against the Python corpus', () => {
   it.each(corpus.profile_cases)('profile: $name', (c) => {
     expect(profileContext(c.profile)).toEqual(c.expected);
   });
+
+  // D185: filters with no query are refused; a hint (T54) is not a filter.
+  it.each(corpus.filter_cases.map((c, i) => ({ i, label: JSON.stringify(c.args) })))(
+    'filters [$i] $label',
+    ({ i }) => {
+      const c = corpus.filter_cases[i]!;
+      let got: { raises: string | null; filters: Json | null };
+      try {
+        got = { raises: null, filters: documentFiltersOf(c.args as FetchOptions) };
+      } catch (e) {
+        got = { raises: (e as Error).name, filters: null };
+      }
+      expect(got).toEqual({ raises: c.raises, filters: c.filters });
+    },
+  );
 });
 
 const INSTANCE_ID = 'inst_0123456789abcdef';

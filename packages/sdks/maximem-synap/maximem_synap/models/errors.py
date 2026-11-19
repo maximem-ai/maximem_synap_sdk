@@ -15,6 +15,9 @@ class SynapError(Exception):
     #: The HTTP status the server answered with, when the error came from an
     #: HTTP response. None for errors raised before or without a response.
     status_code: Optional[int] = None
+    #: The server's machine-readable error code (``file_too_large``,
+    #: ``invalid_utility``, ...), when the response carried one.
+    code: Optional[str] = None
 
     def __init__(self, message: str, correlation_id: Optional[str] = None):
         super().__init__(message)
@@ -24,7 +27,11 @@ class SynapError(Exception):
 class SynapTransientError(SynapError):
     """Transient error - retry may succeed."""
 
-    pass
+    #: True when it is genuinely unknown whether the server processed the request (a gateway 504,
+    #: a read timeout). A caller must not retry a non-idempotent call after such an error: it could
+    #: be stored and billed twice. The transport sets it; JS decides the same in
+    #: ``isOutcomeUnknown`` (transport/http.ts) rather than on the error object.
+    outcome_unknown: bool = False
 
 
 class SynapPermanentError(SynapError):
@@ -303,6 +310,130 @@ class AgentUnavailableError(SynapTransientError):
         self, message: str = "Agent unavailable", correlation_id: Optional[str] = None
     ):
         super().__init__(message, correlation_id=correlation_id)
+
+
+# ---------------------------------------------------------------------------
+# Documents (tech spec, API and wire contract, Errors)
+#
+# Each code the Documents routes answer with has its own class, a subclass of
+# the class its HTTP status already raised, so an existing
+# ``except InvalidInputError`` (or ConflictError, AuthenticationError,
+# InsufficientCreditsError) still catches it. ``code`` is the server's code;
+# the codes without a class of their own (invalid_utility, invalid_plan,
+# invalid_source) set it on the InvalidInputError they raise.
+# ---------------------------------------------------------------------------
+
+
+class FileTooLargeError(InvalidInputError):
+    """A file or body is over 10 MB (HTTP 413 ``file_too_large``)."""
+
+    code = "file_too_large"
+
+
+class BatchTooLargeError(InvalidInputError):
+    """A batch is over 100 items or 50 MB (HTTP 413 ``batch_too_large``)."""
+
+    code = "batch_too_large"
+
+
+class UnsupportedFormatError(InvalidInputError):
+    """The file's format is not accepted (HTTP 415 ``unsupported_format``)."""
+
+    code = "unsupported_format"
+
+
+class UrlNotFetchedError(InvalidInputError):
+    """A file part carried only a URL (HTTP 422 ``url_not_fetched``).
+
+    The SDK fetches a ``FilePart(url=...)`` itself; the server never fetches a
+    caller's URL."""
+
+    code = "url_not_fetched"
+
+
+class FiltersNeedQueryError(InvalidInputError):
+    """Document filters on a fetch with no query (HTTP 422 ``filters_need_query``).
+
+    A fetch with ``kinds``, ``document_types``, ``document_ids`` or ``as_of``
+    needs a ``search_query``. To read a document without one, use
+    ``documents.get``."""
+
+    code = "filters_need_query"
+
+
+class MissingScopeError(AuthenticationError):
+    """The API key lacks the scope this route needs (HTTP 403 ``missing_scope``).
+
+    ``scope`` names the scope it needs, for example ``sdk:default`` for a
+    write-only (``memories:write``) key calling a read route."""
+
+    code = "missing_scope"
+
+    def __init__(self, message: str, scope: Optional[str] = None,
+                 correlation_id: Optional[str] = None):
+        super().__init__(message, correlation_id=correlation_id)
+        self.scope = scope
+
+
+class FeatureNotInPlanError(AuthenticationError):
+    """The plan does not include this feature (HTTP 403 ``feature_not_in_plan``).
+
+    For example a premium parser, a connector or live fetch on a plan without
+    it. ``upgrade_url`` is where to upgrade."""
+
+    code = "feature_not_in_plan"
+
+    def __init__(self, message: str, feature: Optional[str] = None,
+                 plan_id: Optional[str] = None, upgrade_url: Optional[str] = None,
+                 request_id: Optional[str] = None, correlation_id: Optional[str] = None):
+        super().__init__(message, correlation_id=correlation_id)
+        self.feature = feature
+        self.plan_id = plan_id
+        self.upgrade_url = upgrade_url
+        self.request_id = request_id
+
+
+class DocumentIdInUseError(ConflictError):
+    """A restore found a newer document holding the same identity (HTTP 409
+    ``document_id_in_use``)."""
+
+    code = "document_id_in_use"
+
+
+class AmbiguousDocumentError(ConflictError):
+    """A ``document_id`` names more than one document across scopes (HTTP 409
+    ``ambiguous_document``).
+
+    ``matches`` lists each match's scope. Pass the ``user_id``,
+    ``customer_id`` or ``scope`` that names one, or its ``document_key``."""
+
+    code = "ambiguous_document"
+
+    def __init__(self, message: str, matches: Optional[list] = None,
+                 correlation_id: Optional[str] = None):
+        super().__init__(message, correlation_id=correlation_id)
+        self.matches = list(matches or [])
+
+
+#: The name the tech spec uses.
+AmbiguousDocument = AmbiguousDocumentError
+
+
+class InsufficientCreditsForDocumentError(InsufficientCreditsError):
+    """Overages are off and the balance is below this document's estimate
+    (HTTP 402 ``insufficient_credits_for_document``).
+
+    ``estimate_credits`` is what the document is expected to cost;
+    ``balance_credits`` is what the wallet holds."""
+
+    code = "insufficient_credits_for_document"
+
+    def __init__(self, message: str, estimate_credits: Optional[float] = None,
+                 balance_credits: Optional[float] = None,
+                 correlation_id: Optional[str] = None):
+        super().__init__(message, balance_credits=balance_credits,
+                         correlation_id=correlation_id)
+        self.estimate_credits = estimate_credits
 
 
 # Backward compatibility aliases

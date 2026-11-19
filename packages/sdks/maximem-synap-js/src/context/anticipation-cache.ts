@@ -209,15 +209,59 @@ function itemQuestions(item: BundleItem): string[] {
  * handed out.
  */
 export function asServed(item: BundleItem, matchedQueries: readonly string[] | null = null): BundleItem {
-  if (!('date_prefix' in item) && matchedQueries === null) return item;
+  const rawCitation = (item as { citation_json?: unknown }).citation_json;
+  const cited = typeof rawCitation === 'string' && rawCitation !== '';
+  if (!('date_prefix' in item) && !cited && matchedQueries === null) return item;
   // Served inside the content, not beside it: a caller seeing both could add it twice.
   const { date_prefix: raw, ...rest } = item as BundleItem & { date_prefix?: unknown };
   const label = typeof raw === 'string' ? raw : '';
   const out: BundleItem = { ...rest };
+  // A passage's citation travels as JSON in the proto (T22); a hit serves it
+  // as the object the server's own answer carries. An empty one is left as
+  // it is (the stream drops empty document fields before storing).
+  if (cited) {
+    delete (out as Record<string, unknown>)['citation_json'];
+    try {
+      const citation = JSON.parse(rawCitation) as unknown;
+      if (citation !== null && typeof citation === 'object' && !Array.isArray(citation)) {
+        out['citation'] = citation;
+      }
+    } catch { /* a malformed citation is served without one */ }
+  }
   if (matchedQueries !== null) out['matched_queries'] = [...matchedQueries];
   const content = typeof out.content === 'string' ? out.content : '';
   if (label !== '' && !content.startsWith(label)) out.content = label + content;
   return out;
+}
+
+/**
+ * A fetch's document filters, as the cache applies them (D120). Python: the
+ * `filters` dict `lookup` takes.
+ */
+export interface DocumentFilters {
+  kinds?: readonly string[];
+  document_types?: readonly string[];
+  document_ids?: readonly string[];
+  /** Never answered from the cache: a bundle holds current versions only. */
+  as_of?: string;
+}
+
+/**
+ * Whether a cached item answers a fetch's document filters. An item with no
+ * `kind` is a memory: everything a server sent before documents. A memory has
+ * no `document_type` or `document_id`, so it never matches those filters.
+ * Python: `passes_filters`.
+ */
+export function passesFilters(item: BundleItem, filters: DocumentFilters | null | undefined): boolean {
+  if (!filters) return true;
+  const rec = item as Record<string, unknown>;
+  const kind = typeof rec['kind'] === 'string' && rec['kind'] !== '' ? rec['kind'] : 'memory';
+  if (filters.kinds !== undefined && !filters.kinds.includes(kind)) return false;
+  if (filters.document_types !== undefined
+    && !filters.document_types.includes(rec['document_type'] as string)) return false;
+  if (filters.document_ids !== undefined
+    && !filters.document_ids.includes(rec['document_id'] as string)) return false;
+  return true;
 }
 
 export const MATCHERS = ['bm25', 'semantic'] as const;
@@ -296,6 +340,13 @@ export interface LookupParams {
    * With them (and matcher "semantic") the lookup matches by meaning.
    */
   queryVectors?: readonly (readonly number[])[] | null;
+  /**
+   * The fetch's document filters. Items that do not pass are dropped with the
+   * scope filter, before scoring decides a hit and before the per-query share,
+   * so a filtered hit is not cut short. With `as_of` the lookup is a miss.
+   * The bundle fingerprint and pushed evictions are P12's (T56).
+   */
+  filters?: DocumentFilters | null;
 }
 
 export type ExitReason =
@@ -643,9 +694,11 @@ export class AnticipationCache {
       clientId = null, conversationId = null, scopeRung = null, maxItems = 10,
       queryVectors = null, queryOwners = null, maxResultsPerQuery = null,
     } = params;
+    const filters = params.filters && Object.keys(params.filters).length > 0 ? params.filters : null;
     const shares = sharesOf(searchQuery, maxResultsPerQuery);
 
     this.evictExpired();
+    if (filters !== null && filters.as_of !== undefined && filters.as_of !== null) return null;
 
     const accepted = this.buildAcceptedScope(entityId, customerId, clientId);
     const telemetry: LookupTelemetry = {
@@ -674,7 +727,7 @@ export class AnticipationCache {
     if (this.semantic && queryVectors !== null && queryVectors.length > 0) {
       return this.semanticLookup(
         queryTokens, queryVectors, accepted, conversationId, scopeRung ?? null, maxItems, telemetry,
-        shares, maxResultsPerQuery, queryOwners);
+        shares, maxResultsPerQuery, queryOwners, filters);
     }
     if (queryTokens.length === 0) {
       return this.miss(telemetry, 'no_query_tokens');
@@ -727,6 +780,7 @@ export class AnticipationCache {
         });
       if (score < effectiveThreshold) { reject('below_threshold'); continue; }
       if (!validBundles.has(item.bundleId)) { reject('scope_filter_excluded'); continue; }
+      if (!passesFilters(item.itemDict, filters)) { reject('document_filter_excluded'); continue; }
       picked.push({ score, item });
     }
 
@@ -784,6 +838,7 @@ export class AnticipationCache {
     shares: string[] | null = null,
     maxResultsPerQuery: number | null = null,
     queryOwners: readonly string[] | null = null,
+    filters: DocumentFilters | null = null,
   ): LookupResult | null {
     const model = this.encoder?.model ?? '';
     if (queryTokens.length > 0 && (this.bm25Dirty || this.bm25 === null) && this.items.length > 0) {
@@ -822,6 +877,7 @@ export class AnticipationCache {
         });
       // Scope first: another user's items are never scored.
       if (!validBundles.has(item.bundleId)) return reject(b, null, 'scope_filter_excluded');
+      if (!passesFilters(item.itemDict, filters)) return reject(b, null, 'document_filter_excluded');
       let passes: boolean;
       let rank: number;
       let cos: number | null = null;

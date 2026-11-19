@@ -424,10 +424,12 @@ describe('memories.create: file parts go multipart', () => {
 
   it('validates the rest before reading any file', async () => {
     const { calls, fetchImpl } = capture();
+    // document_type is a plain string now (D8), so a bad enum value elsewhere
+    // stands in for it: document_format.
     await expect(client(fetchImpl).memories.create({
       document: [filePart({ url: 'https://files.example.com/a.png' })],
-      document_type: 'nope',
-    })).rejects.toThrow(/Invalid document_type 'nope'/);
+      document_format: 'nope' as never,
+    })).rejects.toThrow(/Invalid document_format 'nope'/);
     expect(calls, 'the url must not be fetched for a call that cannot be sent').toHaveLength(0);
   });
 
@@ -523,16 +525,19 @@ describe('memories.create: file parts go multipart', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it('batch_create refuses a FilePart and joins a text-only list', async () => {
+  it('batch_create sends a FilePart as multipart and joins a text-only list', async () => {
+    // D20: each batch item takes everything create takes, files included.
     const { calls, fetchImpl } = capture(() => json({ batch_id: 'b', results: [] }));
     const c = client(fetchImpl);
-    await expect(c.memories.batch_create({
-      documents: [{ document: [filePart({ data: PNG })] }],
-    })).rejects.toThrow(/memories\.batch_create cannot carry a FilePart/);
-    expect(calls).toHaveLength(0);
     await c.memories.batch_create({ documents: [{ document: ['a', 'b'] }] });
     const body = JSON.parse(calls[0]!.init.body as string);
     expect(body.documents[0].document).toBe('a\nb');
+    await c.memories.batch_create({
+      documents: [{ document: [filePart({ data: PNG })] }],
+    });
+    const form = calls[1]!.init.body as FormData;
+    expect(JSON.parse(form.get('manifest') as string).items[0].document[0].field).toBe('file_0_0');
+    expect(form.get('file_0_0')).toBeInstanceOf(Blob);
   });
 });
 

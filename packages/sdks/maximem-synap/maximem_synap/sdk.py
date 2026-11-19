@@ -28,6 +28,7 @@ from .models.context import (
     UnifiedContextResponse,
     UserProfileModel,
     conversation_state_context,
+    document_filters,
     has_query,
     profile_context,
 )
@@ -1230,6 +1231,12 @@ class MaximemSynapSDK:
         self.memories = MemoriesInterface(self)
         self.data = DataInterface(self)
 
+        from .documents import DocumentsInterface
+        self.documents = DocumentsInterface(self)
+
+        from .knowledge import KnowledgeInterface
+        self.knowledge = KnowledgeInterface(self)
+
         # Credits is attached lazily so circular imports don't bite
         # (credits.py imports MaximemSynapSDK via TYPE_CHECKING only).
         from .credits import CreditsInterface
@@ -2066,6 +2073,15 @@ class MaximemSynapSDK:
         last_n_conversations: int = 1,
         response_shape: str = "by_type",
         scope_path: Optional[Dict[str, str]] = None,
+        # Document filters (D123), passed to every scope fetched. Checked here,
+        # before the scopes run, so a refusal is raised rather than lost in the
+        # gather. See document_filters.
+        kinds: Optional[List[str]] = None,
+        document_types: Optional[List[str]] = None,
+        document_ids: Optional[List[str]] = None,
+        as_of: Optional[Union[str, datetime]] = None,
+        # T54: tilts the source-kind weight (D122); one of the kinds values.
+        source_kind_hint: Optional[str] = None,
     ) -> UnifiedContextResponse:
         """Fetch and merge context across all relevant scopes in a single call.
 
@@ -2166,6 +2182,11 @@ class MaximemSynapSDK:
                 f"Invalid response_shape '{response_shape}'. Must be one of: {RESPONSE_SHAPES}"
             )
         _validate_search_query_input(search_query)
+        doc_filters = document_filters(
+            search_query, kinds=kinds, document_types=document_types,
+            document_ids=document_ids, as_of=as_of,
+            source_kind_hint=source_kind_hint,
+        )
         start_time = datetime.now(timezone.utc)
 
         # Forwarded only when set, so a call without one is unchanged.
@@ -2230,6 +2251,7 @@ class MaximemSynapSDK:
                 user_id=user_id,
                 customer_id=customer_id,
                 **path_kw,
+                **doc_filters,
             ))
             scope_labels.append("conversation")
 
@@ -2254,6 +2276,7 @@ class MaximemSynapSDK:
                 include_profile=include_profile,
                 last_n_conversations=last_n_conversations,
                 **path_kw,
+                **doc_filters,
             ))
             scope_labels.append("user")
 
@@ -2270,6 +2293,7 @@ class MaximemSynapSDK:
                 max_results_per_query=max_results_per_query,
                 response_shape=response_shape,
                 **customer_path_kw,
+                **doc_filters,
             ))
             scope_labels.append("customer")
 
@@ -2286,6 +2310,7 @@ class MaximemSynapSDK:
                     query_date=query_date,
                     max_results_per_query=max_results_per_query,
                 response_shape=response_shape,
+                    **doc_filters,
                 ))
                 scope_labels.append("client")
 
@@ -3099,6 +3124,15 @@ class ConversationContextInterface:
         # excerpts; the typed lists are then views of those items. Sent only
         # when "ranked", so a default fetch sends the body it always did.
         response_shape: str = "by_type",
+        # Document filters (D123). Each is sent only when set, so a fetch
+        # without them sends the body it always did; set, they are part of the
+        # cache key and need a search_query (D185). See document_filters.
+        kinds: Optional[List[str]] = None,
+        document_types: Optional[List[str]] = None,
+        document_ids: Optional[List[str]] = None,
+        as_of: Optional[Union[str, datetime]] = None,
+        # T54: tilts the source-kind weight (D122); one of the kinds values.
+        source_kind_hint: Optional[str] = None,
     ) -> ContextResponse:
         """Fetch context for a conversation.
 
@@ -3153,6 +3187,11 @@ class ConversationContextInterface:
                 f"Invalid response_shape '{response_shape}'. Must be one of: {RESPONSE_SHAPES}"
             )
         _validate_search_query_input(search_query)
+        doc_filters = document_filters(
+            search_query, kinds=kinds, document_types=document_types,
+            document_ids=document_ids, as_of=as_of,
+            source_kind_hint=source_kind_hint,
+        )
 
         # No query: the conversation's state, the same answer
         # get_context_for_prompt gives. There is nothing to search for, and the
@@ -3210,6 +3249,9 @@ class ConversationContextInterface:
             # correct. Same shape as the 0.4.3 defect where the key omitted
             # instance_id and two instances shared one database.
             "scope_path": scope_path,
+            # ⚠ PART OF THE KEY when set (D120): they decide which items
+            # answer. Absent when unset, so every existing key is unchanged.
+            **doc_filters,
         }
 
         # Check anticipation cache first (bundles pre-fetched via gRPC stream).
@@ -3249,10 +3291,13 @@ class ConversationContextInterface:
             # The caller's own limits: a hit serves what a miss would.
             max_items=max_results,
             max_results_per_query=max_results_per_query,
+            # Kind, type and id filters run in the cache, before the
+            # per-query share (D120). as_of is never answered from it.
+            filters=doc_filters or None,
         )
         # A borderline match races the server (semantic_match.race_deadline_ms):
         # its answer if it is in time, the cached one if not.
-        raced = await _race_borderline(anticipated, lambda: self.fetch(conversation_id=conversation_id, search_query=search_query, max_results=max_results, max_results_per_query=max_results_per_query, types=types, mode=mode, precision_level=precision_level, user_id=user_id, customer_id=customer_id, scope_path=scope_path, response_shape=response_shape))
+        raced = await _race_borderline(anticipated, lambda: self.fetch(conversation_id=conversation_id, search_query=search_query, max_results=max_results, max_results_per_query=max_results_per_query, types=types, mode=mode, precision_level=precision_level, user_id=user_id, customer_id=customer_id, scope_path=scope_path, response_shape=response_shape, **doc_filters))
         if raced is not None:
             return raced
         if anticipated:
@@ -3339,6 +3384,8 @@ class ConversationContextInterface:
                 # tenant would cross a customer boundary.
                 if scope_path:
                     body["scope"] = scope_path
+                # Document filters (D123): only when set, last.
+                body.update(doc_filters)
                 result = await self._sdk._http_transport.post(
                     "/v1/context/conversation/fetch",
                     auth_context=auth_context,
@@ -4067,6 +4114,15 @@ class UserContextInterface:
         # excerpts; the typed lists are then views of those items. Sent only
         # when "ranked", so a default fetch sends the body it always did.
         response_shape: str = "by_type",
+        # Document filters (D123). Each is sent only when set, so a fetch
+        # without them sends the body it always did; set, they are part of the
+        # cache key and need a search_query (D185). See document_filters.
+        kinds: Optional[List[str]] = None,
+        document_types: Optional[List[str]] = None,
+        document_ids: Optional[List[str]] = None,
+        as_of: Optional[Union[str, datetime]] = None,
+        # T54: tilts the source-kind weight (D122); one of the kinds values.
+        source_kind_hint: Optional[str] = None,
     ) -> ContextResponse:
         """Fetch context for a user.
 
@@ -4121,6 +4177,11 @@ class UserContextInterface:
                 f"Invalid response_shape '{response_shape}'. Must be one of: {RESPONSE_SHAPES}"
             )
         _validate_search_query_input(search_query)
+        doc_filters = document_filters(
+            search_query, kinds=kinds, document_types=document_types,
+            document_ids=document_ids, as_of=as_of,
+            source_kind_hint=source_kind_hint,
+        )
         valid_context_modes = ("in-conversation", "conversation-summary")
         if context_mode not in valid_context_modes:
             raise InvalidInputError(
@@ -4181,6 +4242,9 @@ class UserContextInterface:
             # correct. Same shape as the 0.4.3 defect where the key omitted
             # instance_id and two instances shared one database.
             "scope_path": scope_path,
+            # ⚠ PART OF THE KEY when set (D120): they decide which items
+            # answer. Absent when unset, so every existing key is unchanged.
+            **doc_filters,
         }
 
         # Check anticipation cache first (bundles pre-fetched via gRPC stream).
@@ -4217,10 +4281,13 @@ class UserContextInterface:
             # The caller's own limits: a hit serves what a miss would.
             max_items=max_results,
             max_results_per_query=max_results_per_query,
+            # Kind, type and id filters run in the cache, before the
+            # per-query share (D120). as_of is never answered from it.
+            filters=doc_filters or None,
         )
         # A borderline match races the server (semantic_match.race_deadline_ms):
         # its answer if it is in time, the cached one if not.
-        raced = await _race_borderline(anticipated, lambda: self.fetch(user_id=user_id, conversation_id=conversation_id, search_query=search_query, max_results=max_results, max_results_per_query=max_results_per_query, types=types, mode=mode, precision_level=precision_level, customer_id=customer_id, context_mode=context_mode, include_profile=include_profile, last_n_conversations=last_n_conversations, scope_path=scope_path, response_shape=response_shape))
+        raced = await _race_borderline(anticipated, lambda: self.fetch(user_id=user_id, conversation_id=conversation_id, search_query=search_query, max_results=max_results, max_results_per_query=max_results_per_query, types=types, mode=mode, precision_level=precision_level, customer_id=customer_id, context_mode=context_mode, include_profile=include_profile, last_n_conversations=last_n_conversations, scope_path=scope_path, response_shape=response_shape, **doc_filters))
         if raced is not None:
             return raced
         if anticipated:
@@ -4309,6 +4376,8 @@ class UserContextInterface:
                     body["context_mode"] = context_mode
                     body["include_profile"] = include_profile
                     body["last_n_conversations"] = last_n_conversations
+                # Document filters (D123): only when set, last.
+                body.update(doc_filters)
                 result = await self._sdk._http_transport.post(
                     "/v1/context/user/fetch",
                     auth_context=auth_context,
@@ -4452,6 +4521,15 @@ class CustomerContextInterface:
         # excerpts; the typed lists are then views of those items. Sent only
         # when "ranked", so a default fetch sends the body it always did.
         response_shape: str = "by_type",
+        # Document filters (D123). Each is sent only when set, so a fetch
+        # without them sends the body it always did; set, they are part of the
+        # cache key and need a search_query (D185). See document_filters.
+        kinds: Optional[List[str]] = None,
+        document_types: Optional[List[str]] = None,
+        document_ids: Optional[List[str]] = None,
+        as_of: Optional[Union[str, datetime]] = None,
+        # T54: tilts the source-kind weight (D122); one of the kinds values.
+        source_kind_hint: Optional[str] = None,
     ) -> ContextResponse:
         """Fetch context for a customer (B2B)."""
         self._sdk._check_customer_id(customer_id, where="CustomerContextInterface.fetch")
@@ -4474,6 +4552,11 @@ class CustomerContextInterface:
                 f"Invalid response_shape '{response_shape}'. Must be one of: {RESPONSE_SHAPES}"
             )
 
+        doc_filters = document_filters(
+            search_query, kinds=kinds, document_types=document_types,
+            document_ids=document_ids, as_of=as_of,
+            source_kind_hint=source_kind_hint,
+        )
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = datetime.now(timezone.utc)
         cache_hit = False
@@ -4509,6 +4592,9 @@ class CustomerContextInterface:
             # correct. Same shape as the 0.4.3 defect where the key omitted
             # instance_id and two instances shared one database.
             "scope_path": scope_path,
+            # ⚠ PART OF THE KEY when set (D120): they decide which items
+            # answer. Absent when unset, so every existing key is unchanged.
+            **doc_filters,
         }
 
         # Check anticipation cache first (bundles pre-fetched via gRPC stream).
@@ -4542,10 +4628,13 @@ class CustomerContextInterface:
             # The caller's own limits: a hit serves what a miss would.
             max_items=max_results,
             max_results_per_query=max_results_per_query,
+            # Kind, type and id filters run in the cache, before the
+            # per-query share (D120). as_of is never answered from it.
+            filters=doc_filters or None,
         )
         # A borderline match races the server (semantic_match.race_deadline_ms):
         # its answer if it is in time, the cached one if not.
-        raced = await _race_borderline(anticipated, lambda: self.fetch(customer_id=customer_id, conversation_id=conversation_id, search_query=search_query, max_results=max_results, max_results_per_query=max_results_per_query, types=types, mode=mode, precision_level=precision_level, scope_path=scope_path, response_shape=response_shape))
+        raced = await _race_borderline(anticipated, lambda: self.fetch(customer_id=customer_id, conversation_id=conversation_id, search_query=search_query, max_results=max_results, max_results_per_query=max_results_per_query, types=types, mode=mode, precision_level=precision_level, scope_path=scope_path, response_shape=response_shape, **doc_filters))
         if raced is not None:
             return raced
         if anticipated:
@@ -4624,6 +4713,8 @@ class CustomerContextInterface:
                 # tenant would cross a customer boundary.
                 if scope_path:
                     body["scope"] = scope_path
+                # Document filters (D123): only when set, last.
+                body.update(doc_filters)
                 result = await self._sdk._http_transport.post(
                     "/v1/context/customer/fetch",
                     auth_context=auth_context,
@@ -4761,6 +4852,15 @@ class ClientContextInterface:
         # excerpts; the typed lists are then views of those items. Sent only
         # when "ranked", so a default fetch sends the body it always did.
         response_shape: str = "by_type",
+        # Document filters (D123). Each is sent only when set, so a fetch
+        # without them sends the body it always did; set, they are part of the
+        # cache key and need a search_query (D185). See document_filters.
+        kinds: Optional[List[str]] = None,
+        document_types: Optional[List[str]] = None,
+        document_ids: Optional[List[str]] = None,
+        as_of: Optional[Union[str, datetime]] = None,
+        # T54: tilts the source-kind weight (D122); one of the kinds values.
+        source_kind_hint: Optional[str] = None,
     ) -> ContextResponse:
         """Fetch organizational context."""
         self._sdk._ensure_initialized()
@@ -4779,6 +4879,11 @@ class ClientContextInterface:
                 f"Invalid response_shape '{response_shape}'. Must be one of: {RESPONSE_SHAPES}"
             )
 
+        doc_filters = document_filters(
+            search_query, kinds=kinds, document_types=document_types,
+            document_ids=document_ids, as_of=as_of,
+            source_kind_hint=source_kind_hint,
+        )
         correlation_id = generate_correlation_id(self._sdk.instance_id)
         start_time = datetime.now(timezone.utc)
         cache_hit = False
@@ -4814,6 +4919,9 @@ class ClientContextInterface:
             # correct. Same shape as the 0.4.3 defect where the key omitted
             # instance_id and two instances shared one database.
             "scope_path": scope_path,
+            # ⚠ PART OF THE KEY when set (D120): they decide which items
+            # answer. Absent when unset, so every existing key is unchanged.
+            **doc_filters,
         }
 
         # Check anticipation cache first (bundles pre-fetched via gRPC stream).
@@ -4848,10 +4956,13 @@ class ClientContextInterface:
             # The caller's own limits: a hit serves what a miss would.
             max_items=max_results,
             max_results_per_query=max_results_per_query,
+            # Kind, type and id filters run in the cache, before the
+            # per-query share (D120). as_of is never answered from it.
+            filters=doc_filters or None,
         )
         # A borderline match races the server (semantic_match.race_deadline_ms):
         # its answer if it is in time, the cached one if not.
-        raced = await _race_borderline(anticipated, lambda: self.fetch(conversation_id=conversation_id, search_query=search_query, max_results=max_results, max_results_per_query=max_results_per_query, types=types, mode=mode, precision_level=precision_level, scope_path=scope_path, response_shape=response_shape))
+        raced = await _race_borderline(anticipated, lambda: self.fetch(conversation_id=conversation_id, search_query=search_query, max_results=max_results, max_results_per_query=max_results_per_query, types=types, mode=mode, precision_level=precision_level, scope_path=scope_path, response_shape=response_shape, **doc_filters))
         if raced is not None:
             return raced
         if anticipated:
@@ -4928,6 +5039,8 @@ class ClientContextInterface:
                 # tenant would cross a customer boundary.
                 if scope_path:
                     body["scope"] = scope_path
+                # Document filters (D123): only when set, last.
+                body.update(doc_filters)
                 result = await self._sdk._http_transport.post(
                     "/v1/context/client/fetch",
                     auth_context=auth_context,

@@ -196,5 +196,10 @@ export function normalizeContextResponse(result: Json = {}): NormalisedContext {
     ...(Array.isArray(context.items)
       ? { items: context.items, excerpts: Array.isArray(context.excerpts) ? context.excerpts : [] }
       : {}),
+    // Documents (T2), only when the server sent them, so a result without
+    // documents has exactly the keys it had. Python: ContextResponse.passages.
+    ...Object.fromEntries((['passages', 'records', 'fetched'] as const)
+      .filter((k) => Array.isArray(context[k]) && (context[k] as unknown[]).length > 0)
+      .map((k) => [k, context[k]])),
   };
 }

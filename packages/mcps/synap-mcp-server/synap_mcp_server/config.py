@@ -12,6 +12,8 @@ class Settings:
     recall_timeout_s: float = float(os.getenv("MCP_RECALL_TIMEOUT_S", "10"))
     ingest_timeout_s: float = float(os.getenv("MCP_INGEST_TIMEOUT_S", "8"))
     default_max_results: int = int(os.getenv("MCP_DEFAULT_MAX_RESULTS", "10"))
+    # A knowledge query may run for the server's own 5 s limit; leave room for it.
+    navigation_timeout_s: float = float(os.getenv("MCP_NAVIGATION_TIMEOUT_S", "15"))
     # Also report a logged exchange as a conversation turn on the anticipation
     # path (POST /v1/events/batch), so the anticipation agent sees the turn and
     # not only the extracted memory. See stream.py for what this costs.
@@ -28,6 +30,19 @@ class Settings:
     # Reporting the turn is best effort and sits on the write path, so it gets
     # a tighter budget than the write it follows.
     events_timeout_s: float = float(os.getenv("MCP_EVENTS_TIMEOUT_S", "4"))
+    # D165-D167, T95, T98: synap_describe and synap_query are registered only where the
+    # deployment sets SYNAP_KNOWLEDGE_QUERY, synap_document_index and
+    # synap_document_read only where it sets SYNAP_DOCS_NAVIGATION: the names of the
+    # cloud flags they sit behind. Both OFF by default. This server holds no
+    # per-instance flags (the API's are SYNAP_*_INSTANCES), so the switch is the
+    # deployment's; the API stays authoritative per instance (a 404 from it is
+    # reported as "not enabled for this instance", naming the flag).
+    knowledge_query: bool = os.getenv("SYNAP_KNOWLEDGE_QUERY", "false").lower() in (
+        "1", "true", "yes",
+    )
+    docs_navigation: bool = os.getenv("SYNAP_DOCS_NAVIGATION", "false").lower() in (
+        "1", "true", "yes",
+    )
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     environment: str = os.getenv("ENVIRONMENT", "production")
     # Browser origins allowed to call the MCP endpoint directly (the dashboard's

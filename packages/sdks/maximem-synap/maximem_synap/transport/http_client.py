@@ -30,6 +30,16 @@ from ..models.errors import (
     TranscriptConflictError,
     InstanceNotReadyError,
     InstanceBuildFailedError,
+    FileTooLargeError,
+    BatchTooLargeError,
+    UnsupportedFormatError,
+    UrlNotFetchedError,
+    FiltersNeedQueryError,
+    MissingScopeError,
+    FeatureNotInPlanError,
+    DocumentIdInUseError,
+    AmbiguousDocumentError,
+    InsufficientCreditsForDocumentError,
 )
 from ..auth.models import AuthContext
 from ..utils.correlation import generate_correlation_id
@@ -88,6 +98,95 @@ def _credit_message(payload: Dict[str, Any], error_message: Any, fallback: str) 
         return error_message
     return fallback
 
+
+
+#: The Documents error codes (tech spec, API and wire contract, Errors), each
+#: with the status it comes with. A code under any other status is ignored, so
+#: an unrelated body that happens to carry the word is never misread.
+_DOCUMENT_ERRORS = {
+    (413, "file_too_large"): FileTooLargeError,
+    (413, "batch_too_large"): BatchTooLargeError,
+    (415, "unsupported_format"): UnsupportedFormatError,
+    (422, "url_not_fetched"): UrlNotFetchedError,
+    (422, "filters_need_query"): FiltersNeedQueryError,
+    (422, "invalid_utility"): InvalidInputError,
+    (422, "invalid_plan"): InvalidInputError,
+    (422, "invalid_source"): InvalidInputError,
+    # Memory records (D153, D175): a near miss of the exact type, and a record
+    # that does not match the schema (the message names its index and field).
+    (422, "unknown_document_type"): InvalidInputError,
+    (422, "invalid_memory_record"): InvalidInputError,
+    # Knowledge query (D165): the 422s are the caller's request, kept as
+    # InvalidInputError with `code` set; a timeout and a missing price keep the
+    # class their status already raised.
+    (422, "unknown_type"): InvalidInputError,
+    (422, "unknown_property"): InvalidInputError,
+    (422, "bad_condition"): InvalidInputError,
+    (422, "too_many_hops"): InvalidInputError,
+    (422, "unknown_relation"): InvalidInputError,
+    (422, "invalid_cursor"): InvalidInputError,
+    (422, "query_too_broad"): InvalidInputError,
+    (504, "query_timeout"): ServiceUnavailableError,
+    (503, "pricing_unavailable"): ServiceUnavailableError,
+    # Document navigation (D166): a read too big for one call is the caller's request;
+    # a document still processing is a 404 that names why, so "not yet" is not "never".
+    (422, "read_too_large"): InvalidInputError,
+    (422, "invalid_read_request"): InvalidInputError,
+    (404, "document_not_ready"): ContextNotFoundError,
+    (403, "missing_scope"): MissingScopeError,
+    (403, "feature_not_in_plan"): FeatureNotInPlanError,
+    (409, "document_id_in_use"): DocumentIdInUseError,
+    (409, "ambiguous_document"): AmbiguousDocumentError,
+    (402, "insufficient_credits_for_document"): InsufficientCreditsForDocumentError,
+}
+
+
+def _number(value: Any) -> Optional[float]:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _document_error(status: int, error_body: Any, correlation_id: str) -> Optional[SynapError]:
+    """The typed error for a Documents refusal, or None for any other body.
+
+    The code is read from the flat body (``error``) or from ``detail``
+    (``code`` or ``error``): ``DocumentError.body()`` sends both copies, and
+    a raised HTTPException (``require_entitlement``) only ``detail``.
+    """
+    if not isinstance(error_body, dict):
+        return None
+    detail = error_body.get("detail")
+    detail = detail if isinstance(detail, dict) else {}
+    code = error_body.get("error") or detail.get("code") or detail.get("error")
+    cls = _DOCUMENT_ERRORS.get((status, code)) if isinstance(code, str) else None
+    if cls is None:
+        return None
+
+    def pick(key: str) -> Any:
+        return error_body[key] if key in error_body else detail.get(key)
+
+    message = pick("message")
+    message = message if isinstance(message, str) and message else code
+    if cls is MissingScopeError:
+        err: SynapError = cls(message, scope=pick("scope"), correlation_id=correlation_id)
+    elif cls is FeatureNotInPlanError:
+        err = cls(message, feature=pick("feature"), plan_id=pick("plan_id"),
+                  upgrade_url=pick("upgrade_url"), request_id=pick("request_id"),
+                  correlation_id=correlation_id)
+    elif cls is AmbiguousDocumentError:
+        matches = pick("matches")
+        err = cls(message, matches=matches if isinstance(matches, list) else [],
+                  correlation_id=correlation_id)
+    elif cls is InsufficientCreditsForDocumentError:
+        err = cls(message, estimate_credits=_number(pick("estimate_credits")),
+                  balance_credits=_number(pick("balance_credits")),
+                  correlation_id=correlation_id)
+    else:
+        err = cls(message, correlation_id=correlation_id)
+    err.code = code
+    return err
 
 
 def _instance_not_ready(error_body: Any, headers: Any) -> Optional[Dict[str, Any]]:
@@ -514,7 +613,8 @@ class HTTPTransport:
         json: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
         correlation_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        raw: bool = False,
+    ) -> Any:
         """Make an HTTP request with retries and telemetry.
 
         Args:
@@ -524,9 +624,11 @@ class HTTPTransport:
             json: JSON body for POST/PUT/PATCH
             params: Query parameters
             correlation_id: Optional correlation ID (generated if not provided)
+            raw: Return the body's bytes instead of parsing JSON (a
+                document's original file). Errors are mapped as for JSON.
 
         Returns:
-            Parsed JSON response
+            Parsed JSON response, or the bytes when ``raw``
 
         Raises:
             SynapError: On failure after retries exhausted
@@ -595,6 +697,7 @@ class HTTPTransport:
                 result = self._handle_response(
                     response, correlation_id,
                     carried_scope_path=_carries_scope_path(json),
+                    raw=raw,
                 )
                 if gated:
                     self._cooldown_clear(cooldown_key)
@@ -643,8 +746,8 @@ class HTTPTransport:
                 # We received a complete response, so the server told us what it
                 # did. The retryable statuses here (429, 503) are rejections
                 # issued before the request was processed.
-                outcome_unknown = False
                 last_error = self._map_status_error(e, correlation_id)
+                outcome_unknown = getattr(last_error, "outcome_unknown", False)
 
             except InstanceNotReadyError as e:
                 # Remember the refusal so the next calls do not need a round trip.
@@ -657,8 +760,8 @@ class HTTPTransport:
                 # raises it, so before this arm it went straight to the
                 # `except SynapError: raise` below and was never retried,
                 # while the JS SDK retried the same statuses. The server
-                # answered, so the outcome is known.
-                outcome_unknown = False
+                # answered, so the outcome is known, except for a 504.
+                outcome_unknown = e.outcome_unknown
                 last_error = e
 
             except SynapError:
@@ -715,7 +818,8 @@ class HTTPTransport:
         response: httpx.Response,
         correlation_id: str,
         carried_scope_path: bool = False,
-    ) -> Dict[str, Any]:
+        raw: bool = False,
+    ) -> Any:
         """Handle HTTP response, raising appropriate errors.
 
         Every error raised for a response carries its HTTP status as
@@ -724,6 +828,8 @@ class HTTPTransport:
         exception class or its text.
         """
         try:
+            if raw and response.status_code == 200:
+                return response.content
             return self._raise_for_response(response, correlation_id)
         except SynapError as e:
             e.status_code = response.status_code
@@ -757,6 +863,12 @@ class HTTPTransport:
             )
         except Exception:
             error_message = response.text
+
+        # A Documents refusal names its own code; checked before the
+        # status branches so each gets its typed error.
+        document_error = _document_error(response.status_code, error_body, correlation_id)
+        if document_error is not None:
+            raise document_error
 
         # 403 too, as the JS SDK maps it. With no branch of its own it fell
         # through to the SynapTransientError at the bottom, which tells a
@@ -851,10 +963,15 @@ class HTTPTransport:
             )
 
         if response.status_code >= 500:
-            raise ServiceUnavailableError(
+            err = ServiceUnavailableError(
                 error_message,
                 correlation_id=correlation_id,
             )
+            # A 504 is a gateway giving up, not the origin answering: the origin may
+            # have finished and only the response was lost. The retry gate treats it
+            # like a read timeout (JS does too: `isOutcomeUnknown`).
+            err.outcome_unknown = response.status_code == 504
+            raise err
 
         # Any other 4xx is the request's fault and will fail the same way
         # again, so it is permanent, as the JS SDK now raises it. It was a
@@ -1144,7 +1261,7 @@ class HTTPTransport:
                 last_error = NetworkTimeoutError(f"Connection failed: {e}", correlation_id=correlation_id)
             except SynapTransientError as e:
                 # A 429 or 5xx the server answered with; see `request`.
-                outcome_unknown = False
+                outcome_unknown = e.outcome_unknown
                 last_error = e
             except SynapError:
                 raise

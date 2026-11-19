@@ -29,7 +29,15 @@ export {
   type CreateFromFileOptions, type BatchCreateResult,
   FORGET_MODES, type ForgetOptions, type ForgetResult, type ForgetCandidate,
   type ForgetMode, type ForgetStatus, type CreateDocument, type DeleteMemoryResult, type DeleteMemoryOptions,
+  DOCUMENT_FORMATS, MAX_BATCH_ITEMS, MAX_BATCH_BYTES, type DocumentFormat,
 } from './memories/interface.js';
+export {
+  type DocumentsInterface, type DocumentAddress, type ListDocumentsOptions,
+  type OriginalOptions, type DeleteDocumentOptions, type IndexOptions, type ReadOptions,
+} from './documents/interface.js';
+export {
+  MAX_QUERY_LIMIT, type KnowledgeInterface, type KnowledgeQueryOptions, type KnowledgeScope,
+} from './knowledge/interface.js';
 export {
   OBJECTIVES, textPart, filePart,
   type Objective, type TextPart, type FilePart, type FilePartInit, type FileData,
